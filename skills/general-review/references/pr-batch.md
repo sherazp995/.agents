@@ -39,13 +39,13 @@ Without a profile, detect what you can (GitHub repo from `origin`, default branc
 0. **Find the checkout (REPO).**
    - Try `git rev-parse --show-toplevel` in the current folder. If the user named a repo and this folder's `origin` does not match it, or the profile's match check fails, ask where the checkout is. Offer the profile's usual locations that exist and pass the check; the user can type another path.
    - Use the main checkout's top-level path as REPO for every git, gh and agent step. Run `gh` with `--repo <GH_REPO>` so it works from any folder.
-1. **Ledger:** `mkdir -p LEDGER_ROOT` and check `.origin` and `~/.agents/.gitignore` (`ledger.md`, "Where records live"). Cleanup runs at the end (step 12), not now.
+1. **Ledger:** `mkdir -p LEDGER_ROOT` and check `.origin` (`ledger.md`, "Where records live"). Cleanup runs at the end (step 12), not now.
 2. **Resolve each target.**
    - **A number or PR URL:** `gh pr view <n> --repo <GH_REPO> --json state,baseRefName,headRefName,headRefOid,title`.
    - **A branch name:** `gh pr list --repo <GH_REPO> --head <branch> --state all --json number,state --limit 1`.
      - If a PR exists, treat the target as that PR (and move any `branch-` record, see `ledger.md`).
      - Otherwise it is a **branch target**. Base: `--base`, else the `base:` line of an existing record, else ask, offering the profile's base branches (first one marked Recommended) or the repo's default branch. Head: `origin/<branch>` if pushed, else the local branch marked "local only, not pushed". Title: the subject of its last commit.
-3. **One fetch, before any agent starts** (agents never fetch): `cd <REPO> && git fetch origin <every base> <every pushed head branch>`. Then BASE_REF = `origin/<base>`, BASE_SHA = `git rev-parse origin/<base>`, HEAD_SHA = the fetched head or the PR's `headRefOid`.
+3. **One fetch, before any agent starts** (agents never fetch): `cd <REPO> && git fetch origin <every base> <every pushed head branch of a branch target> <pull/<n>/head for every PR>`. A PR's head comes from `pull/<n>/head`, which also works for PRs opened from forks; its head branch name may not exist on origin. Then BASE_REF = `origin/<base>`, BASE_SHA = `git rev-parse origin/<base>`, HEAD_SHA = the fetched head or the PR's `headRefOid`.
 4. **Decide per target:**
    - PR is MERGED or CLOSED: "already merged/closed, not reviewed".
    - Note READ_RUN_ID for the key (no lock yet; `ledger.md`, "Locking").

@@ -16,7 +16,7 @@ TARGET
 - MODE: {MODE}. Previously reviewed head: {PREV_STATE} (recheck only). Force-pushed since then: {FORCE_PUSHED}; if yes, say so in the recheck heading.
 - Repo: {REPO}. Everything is already fetched. Do NOT fetch or pull, do NOT move any local branch, do NOT change the main checkout's branch.
 - Work dir: {WORKDIR} (already created). Earlier findings (read-only, already normalized by the main session): {EARLIER}. Never read ledger folders yourself. Earlier proof specs (read-only, or `none`): {REPRO}.
-- If EARLIER has an "other agents" section with records at the same STATE, give each of their OPEN and PARTLY findings your own status and record it as `#<other>:<id> [severity] text — <status> (checked by <your runner>)`. These lines do not count toward your verdict; list in the report where you and the other agent disagree.
+- If EARLIER has an "other agents" section with records at the same STATE, give each of their OPEN and PARTLY findings your own status and record it as `#<other>:<id> [severity] text — <status> (checked by <your runner>)`. A finding you confirm as still OPEN or PARTLY is a finding of this change and counts toward your verdict like your own; FIXED, N/A, DROPPED and ACCEPTED lines do not. List in the report where you and the other agent disagree.
 - If {PREV_STATE} is `n/a (previous head unavailable)`, review the full diff instead of new commits, but still give every earlier finding a status.
 - Skill dir: {SKILL_DIR}. Report format: `references/pr-batch-report.md`. Record format: `references/ledger.md`, "Record format". Severity and origin rules: `SKILL.md` section 4.
 - FOCUS (risks the main session wants checked):

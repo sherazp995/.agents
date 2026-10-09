@@ -9,14 +9,14 @@ TARGET (frozen; do not widen it)
 - Kind: {KIND} (pr | branch | uncommitted | staged | files | codebase).
 - Base: {BASE} ({BASE_SHA}); head: {HEAD_SHA}.
 - pr and branch kinds only: read the head with `git show <head>:<path>` and diff `<base sha>...<head>`; the working tree may be on another branch.
-- Uncommitted, staged or files: the frozen STATE is {STATE}; its manifest is in {EARLIER_DIR}/manifest.txt. If the files change while you review, say so and review the version you read.
+- Uncommitted, staged or files: the frozen STATE is {STATE}; its manifest is in {EARLIER_DIR}/manifest.txt. If the files change while you review (re-hash them at the end), stop, say which files changed, and write `verdict: INCOMPLETE`: the record's STATE would otherwise label code you did not review.
 - Mode: {MODE} (review | recheck). Previous state: {PREV_STATE}.
 
 INTENT (requirements only; this is the bar the change is judged against)
 {INTENT}
 
 EARLIER FINDINGS (read-only): {EARLIER}. In recheck mode every one of them gets a status. Never read ledger folders yourself.
-- If EARLIER has an "other agents" section with records at the same STATE, give each of their OPEN and PARTLY findings your own status and record it as `#<other>:<id> [severity] text — <status> (checked by <your runner>)`. These lines do not count toward your verdict; list in the report where you and the other agent disagree.
+- If EARLIER has an "other agents" section with records at the same STATE, give each of their OPEN and PARTLY findings your own status and record it as `#<other>:<id> [severity] text — <status> (checked by <your runner>)`. A finding you confirm as still OPEN or PARTLY is a finding of this change and counts toward your verdict like your own; FIXED, N/A, DROPPED and ACCEPTED lines do not. List in the report where you and the other agent disagree.
 
 WHAT TO DO
 1. Read `~/.agents/skills/general-review/SKILL.md` sections 1 to 6 and every file they link, and follow them for this target. You are the lead: run them yourself, including the Codex lens (single-review command in `references/codex-handoff.md`). Do not start another review lead, and skip the "Modes and ledger" and "Who reviews" coordination steps, which are already done.

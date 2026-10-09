@@ -315,6 +315,8 @@ def render(d):
             lines.append(f"note: {n}")
     for w in d["warnings"]:
         lines.append(f"WARNING: {w}")
+    for raw in d.get("unknown", []):
+        lines.append(f"  unknown status: {raw}")
     return "\n".join(lines)
 
 

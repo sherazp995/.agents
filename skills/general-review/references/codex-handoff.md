@@ -29,7 +29,7 @@ mkdir -p "$REVIEW_TMP"
 cat > "$REVIEW_TMP/codex-review-<short-tag>.prompt" <<'CODEX_REVIEW_PROMPT'
 <prompt below>
 CODEX_REVIEW_PROMPT
-timeout 1800 codex exec -m gpt-6-astra --sandbox read-only - \
+timeout 1800 codex exec -m gpt-6-astra --sandbox read-only --ephemeral --color never -c 'mcp_servers={}' - \
   < "$REVIEW_TMP/codex-review-<short-tag>.prompt" \
   > "$REVIEW_TMP/codex-review-<short-tag>.log" 2>&1
 ```
@@ -51,7 +51,7 @@ Record the exit status of every run.
 ## Prompt
 
 ```text
-Review this change like a senior engineer under the Unified Review Protocol (~/.agents/AGENTS.md rule 44). Run every phase and emit EXACTLY its fixed template.
+Review this change like a senior engineer under the Unified Review Protocol (~/.agents/AGENTS.md rule 44). Run every phase and emit the report template from ~/.agents/skills/general-review/SKILL.md section 6, which is rule 44's template plus the root-cause, fix and verify fields asked for below.
 TARGET: <repository or file roots>; mode <branch/PR | staged-only | combined working tree | current-state>; in-scope paths <paths>; baseline <P0 revision or supplied baseline, or none>; target <P0 head revision, index/working-tree snapshot, or selected current files with recorded hashes>.
 Use the scope recorded in P0 for every diff, source read, caller search, line count, blame and check. Read ~/.agents/skills/general-review/references/review-checklist.md section 2 for the mode-specific readers. For branch/PR reviews use the recorded merge base and head; for staged-only reviews use the recorded baseline and index, excluding unstaged changes; for combined working-tree reviews use the recorded baseline (normally HEAD), staged and unstaged changes, and relevant untracked files. For current-state assessments without a change baseline, inspect the selected files, classify findings as pre-existing, and report Verdict: N/A without PASS or LGTM. If the target changes during review, reconcile the delta before reporting.
 INTENT: <what the change is for, acceptance criteria, and anything explicitly out of scope>.

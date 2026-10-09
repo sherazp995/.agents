@@ -221,7 +221,7 @@ No code change is "done" until reviewed under the protocol below with verdict **
 
 **The phases:**
 
-**P0: Load context.** Read intent/ticket. Establish diff scope (`git diff` for uncommitted, `git diff main...HEAD` for branch). Open full touched files. Load conventions.
+**P0: Load context.** Read intent/ticket. Establish diff scope (`git diff` for uncommitted, `git diff <base>...HEAD` for a branch, where `<base>` is the branch's actual base (for a PR, `origin/<its base branch>`), never assumed to be `main`). Open full touched files. Load conventions.
 
 **P1: Understand intent.** Restate in one line what the change does and why this approach. Judge against *that*, not an imagined ideal.
 

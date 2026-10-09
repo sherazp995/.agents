@@ -133,7 +133,7 @@ Check whether mocks hide the changed integration, fixtures make the trigger unre
 
 Run the smallest applicable existing tests, type checks, linters, or build checks that add confidence. Reuse cached output only when command, relevant source state, dependencies, and environment match; an old passing filename is not enough. Cache full output and preserve failure exit codes. Do not repeat unchanged runs or default to the whole suite.
 
-Do not mutate source, add tests, or perform destructive reproductions in this reporting-only workflow. If mutation evidence is supplied, assess it; otherwise explain why assertions detect the suspected failure and state that mutation testing was not performed. Do not claim a test was seen failing when it was not.
+Do not mutate the reviewed checkout, add tests to it, or perform destructive reproductions in this reporting-only workflow (PR batch mode's throwaway worktrees, removed after the review, are the one exception; see SKILL.md). If mutation evidence is supplied, assess it; otherwise explain why assertions detect the suspected failure and state that mutation testing was not performed. Do not claim a test was seen failing when it was not.
 
 A failing check is not automatically introduced. Compare with baseline evidence where practical or trace the causal change. Distinguish test failures from environment/setup failures. Unavailable tooling is a verification limitation, not an invented code defect.
 

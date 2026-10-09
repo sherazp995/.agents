@@ -14,14 +14,14 @@ The ledger is a cache from (target, state) to findings. It relies on four rules:
 ## Where records live
 
 - `REPO_SLUG`: the repository name from `git remote get-url origin` (last path part, no `.git`, leading dots removed so the folder is not hidden). Without an origin, the top-level directory name, same rule. Outside Git, `no-repo`. The old-ledger adapter is passed the name with its dots kept.
-- `LEDGER_ROOT=~/.agents/review-ledger/<REPO_SLUG>`, shared by every agent on this machine. Create it with `mkdir -p` (this one-time setup is allowed during the review). On creation, write the origin URL to `LEDGER_ROOT/.origin`. If `.origin` exists with a different URL, use `~/.agents/review-ledger/<owner>__<REPO_SLUG>` instead (same rules). `review-ledger/` is listed in `~/.agents/.gitignore`; add it there if it is missing.
+- `LEDGER_ROOT=~/.agents/review-ledger/<REPO_SLUG>`, shared by every agent on this machine. Create it with `mkdir -p` (this one-time setup is allowed during the review). On creation, write the origin URL to `LEDGER_ROOT/.origin`. If `.origin` exists with a different URL, use `~/.agents/review-ledger/<owner>__<REPO_SLUG>` instead (same rules).
 - One folder per target: `D=LEDGER_ROOT/<KEY>/`. Each agent (RUNNER) has its **own** files in it, side by side with the others':
 
 | Path in `D` | What | Who writes it |
 | --- | --- | --- |
 | `<RUNNER>.md` | this agent's current record | only this RUNNER |
 | `<RUNNER>.lock` | this agent's lock file (an OS lock is held on it only while writing; the file itself may stay) | only this RUNNER |
-| `<RUNNER>.old-<YYYY-MM-DD>-<short state>.md` | this agent's archived records | only this RUNNER |
+| `<RUNNER>.old-<YYYY-MM-DD>-<short state>-<run id tail>[-N].md` | this agent's archived records (`-2`, `-3` … only when the name is taken) | only this RUNNER |
 | `<RUNNER>.conflict-<RUN_ID>.md` | a record that lost a write race; kept for the user | only this RUNNER |
 | `repro/<RUNNER>/`, `repro/<RUNNER>.old-<…>/` | this agent's proof specs | only this RUNNER |
 
@@ -33,13 +33,15 @@ The ledger is a cache from (target, state) to findings. It relies on four rules:
 | Target | KEY |
 | --- | --- |
 | Pull request | `<PR number>` |
-| Branch with no PR | `branch-<name with / replaced by __>` |
-| Uncommitted work | `local-<current branch, / replaced by __>` (or `local-detached`) |
-| Staged changes only | `staged-<current branch, / replaced by __>` (or `staged-detached`) |
+| Branch with no PR | `branch-<encoded name>` |
+| Uncommitted work | `local-<encoded current branch>` (or `local-detached`) |
+| Staged changes only | `staged-<encoded current branch>` (or `staged-detached`) |
 | Selected files | `files-<first 12 hex of sha256 of the selection as given: the repo-relative paths, folders or globs, sorted, one per line>` (adding a file inside a selected folder keeps the key and changes STATE) |
 | Whole codebase | `codebase` |
 
-A branch target that now has a PR uses the PR key. If this agent has no `<n>/<RUNNER>.md` but has `branch-<name>/<RUNNER>.md`, that branch record is its earlier record (see "Picking the review mode"), and it moves to the PR folder at write time ("Locking").
+**Encoded name:** replace `%` with `%25`, then `/` with `%2F` (so `fix/x` is `fix%2Fx` and never collides with `fix__x`). Decode in the reverse order. Old `cohabit_pr_review` records keep their own `__` form; the adapter handles those.
+
+A branch target that now has a PR uses the PR key. If this agent has no `<n>/<RUNNER>.md` but has `branch-<encoded name>/<RUNNER>.md`, that branch record is its earlier record (see "Picking the review mode"), and it moves to the PR folder at write time ("Locking").
 
 When a `local-` review runs on a branch that also has a `branch-` or PR record (or the reverse), say in one line: "record for <other key> exists: N open findings (<path>)". The records stay separate; uncommitted edits are not part of a branch or PR review.
 
@@ -55,11 +57,11 @@ When a `local-` review runs on a branch that also has a `branch-` or PR record (
 
 **MANIFEST** (deterministic, and unaffected by the review):
 1. `cd <REPO>`; list `git diff --name-only HEAD` plus `git ls-files -o --exclude-standard` (for selected files: just those paths).
-2. Drop anything under `tmp/`, `log/`, `coverage/` and `.nyc_output/`, and anything under `REVIEW_TMP`. (Gitignored files are already excluded.)
+2. Drop **untracked** files under `tmp/`, `log/`, `coverage/` and `.nyc_output/`, and anything under `REVIEW_TMP` (gitignored files are already excluded). Tracked files in those folders stay in the manifest.
 3. Sort the paths bytewise (`LC_ALL=C sort -u`).
-4. One line per path: `<path>\t<git hash-object <path>>`, or `<path>\tdeleted` if it no longer exists. Never use `hash-object -w`.
+4. One line per path: `<path>\t<mode>\t<git hash-object <path>>`, where mode is `120000` for a symlink, `100755` for an executable file, else `100644`; or `<path>\tdeleted` if it no longer exists. Never use `hash-object -w`.
 
-**INDEX MANIFEST** (staged targets): `git diff --cached --name-only` sorted bytewise, one line per path: `<path>\t<blob from git ls-files -s <path>>`, or `<path>\tdeleted`. It changes when hunks are staged or unstaged, and not when only the working tree changes.
+**INDEX MANIFEST** (staged targets): `git diff --cached --name-only` sorted bytewise, one line per path: `<path>\t<mode>\t<blob>` with mode and blob from `git ls-files -s <path>`, or `<path>\tdeleted`. It changes when hunks are staged or unstaged, and not when only the working tree changes.
 
 Compute STATE once in P0, before running any check, and store that value and its manifest in the record; never recompute it at the end, because the review's own test runs may write files. On the next run, comparing the two manifests gives the changed files, which is the recheck delta for uncommitted work.
 
@@ -72,13 +74,13 @@ At the end, publish with one command; never hand-write these steps:
 ```bash
 python3 -I ~/.agents/skills/general-review/scripts/publish_record.py \
   --dir D --runner <RUNNER> --run-id <RUN_ID> --read-run-id <READ_RUN_ID> --body <record.md> \
-  [--repro <proof spec dir>] [--full] [--branch-dir <LEDGER_ROOT>/branch-<name> --read-run-id-branch <READ_RUN_ID_BRANCH>]
+  [--repro <proof spec dir>] [--full] [--branch-dir <LEDGER_ROOT>/branch-<encoded name> --read-run-id-branch <READ_RUN_ID_BRANCH>]
 ```
 
-It holds this agent's OS lock (branch folder first, then `D`), checks that nobody wrote since READ_RUN_ID, archives on `--full`, moves a branch record into `D` as an `.old-` archive (with its proof specs), stages new proof specs and archives the old ones before the record goes live, and publishes atomically. A `--repro` path that is not a folder is rejected before anything is written. Archives are named `<RUNNER>.old-<YYYY-MM-DD>-<short state>-<run id tail>.md`, so they never overwrite each other. The kernel releases the lock if the process dies, so there is no stale-lock handling.
+It holds this agent's OS lock (branch folder first, then `D`), checks that nobody wrote since READ_RUN_ID, archives on `--full`, moves a branch record into `D` as an `.old-` archive (with its proof specs), stages new proof specs and archives the old ones before the record goes live, and publishes with a final rename. Proofs are copied before anything is archived, and archive names get a `-2`, `-3` suffix instead of overwriting, so a failure part way leaves the old record or its archive in place, never nothing. A `--repro` path that is not a folder is rejected before anything is written. Archives are named `<RUNNER>.old-<YYYY-MM-DD>-<short state>-<run id tail>.md`, so they never overwrite each other. The kernel releases the lock if the process dies, so there is no stale-lock handling.
 
 - Exit 0: recorded.
-- Exit 2: the body breaks the record format: a line that is not a header, manifest line or `#<id> [severity] … — STATUS` finding; a status outside the list; a missing `run_id:`, `state:`, `kind:` or `verdict:`; or CHANGES REQUIRED/BLOCKED with no finding lines. Nothing was written; the lead fixes record.md ("NOT FIXED" is written OPEN) and you publish again.
+- Exit 2: the verdict is not PASS, CHANGES REQUIRED, BLOCKED, N/A or INCOMPLETE, or does not match the open introduced findings (blocker → BLOCKED; high or medium → CHANGES REQUIRED; else PASS; findings with a `P-` ID, or with `(pre-existing)`, `(question)` or `older head` in the status detail after the last ` — `, do not gate); a severity is not blocker, high, medium or low; the body's `run_id:` differs from `--run-id`; or the body breaks the record format: a line that is not a header, manifest line or `#<id> [severity] … — STATUS` finding; a status outside the list; a missing `run_id:`, `state:`, `kind:` or `verdict:`; or CHANGES REQUIRED/BLOCKED with no finding lines. Nothing was written; the lead fixes record.md ("NOT FIXED" is written OPEN) and you publish again.
 - Exit 3 (someone wrote meanwhile) or 75 (another run of this agent is writing): the body is kept as `D/<RUNNER>.conflict-<RUN_ID>.md`; report "not recorded as current" and the path.
 - Any other exit: report it; the body is still in the review temp folder.
 
@@ -97,9 +99,9 @@ Decide per target once KEY and STATE are known, from **this agent's own** record
    - no sibling record in `D` at the same STATE has an OPEN or PARTLY finding that this record has no `#<other>:<id>` status line for (otherwise recheck, so the new sibling findings get this agent's status).
 
    Then list its OPEN and PARTLY findings, show the sibling summary (below), and stop; no reviewers run, nothing is written. Otherwise MODE=recheck with `PREV_STATE` = its state, and say why (new commits, base moved, incomplete last run, or stronger mode asked).
-3. **PR key with no own record, but `branch-<head branch>/<RUNNER>.md` exists:** that record is the earlier record. Note its `run_id` as READ_RUN_ID_BRANCH. MODE=recheck with `PREV_STATE` = its state; every one of its findings gets a status.
+3. **PR key with no own record, but `branch-<encoded head branch>/<RUNNER>.md` exists:** that record is the earlier record. Note its `run_id` as READ_RUN_ID_BRANCH. MODE=recheck with `PREV_STATE` = its state; every one of its findings gets a status.
 4. **No own record, but `D/<RUNNER>.old-*` exists:** MODE=review using the newest own `.old-` record as earlier findings. Do not read the old ledger.
-5. **No own records in `D` at all:** first look for a record from this skill's earlier layout, `~/.claude/review-ledger/<REPO_SLUG with dots kept>/<KEY>.md` (read-only; leave it in place). If it exists, it is the earlier record: MODE=recheck with `PREV_STATE` = its state, and the first new record adds `imported_from: <its path>`. Otherwise run the adapter (below). Exit 0: MODE=recheck with `PREV_STATE` = its state (an imported record never produces "no changes"). Exit 4: review if asked, but do not record. Exit 3: continue.
+5. **No own records in `D` at all:** first look for a record from this skill's earlier layout, `~/.claude/review-ledger/<REPO_SLUG with dots kept>/<KEY>.md` (read-only; leave it in place). That layout wrote branch, local and staged keys with `/` replaced by `__` (for example `branch-fix__x.md`), so for those keys look up that legacy name, and import it only if its `target:` or `branch:` line names this exact branch. If it exists, it is the earlier record: MODE=recheck with `PREV_STATE` = its state, and the first new record adds `imported_from: <its path>`. Otherwise run the adapter (below). Exit 0: MODE=recheck with `PREV_STATE` = its state (an imported record never produces "no changes"). Exit 4: review if asked, but do not record. Exit 3: continue.
 6. **Nothing:** MODE=review.
 
 **Sibling records.** Read every other agent's `D/<other>.md` (read-only). Report one line each: "<other> record (<date>, state <short>, <same | different> head): N open, verdict V". When a sibling is at the same STATE, the reviewer also gives each of its OPEN and PARTLY findings this agent's own status; the record keeps those as `#<other>:<id> … — <status> (checked by <RUNNER>)` lines, and the report lists where the two agents disagree.
@@ -165,7 +167,7 @@ source_runner: <runner>        (same)
 #I-3 [medium] path/y.rb:3 — one-line problem — FIXED (<date>)
 
 manifest:                      (uncommitted, staged and files targets)
-<path>\t<blob or deleted>
+<path>\t<mode>\t<blob>   (or <path>\tdeleted)
 
 repro: <D/repro/RUNNER/ or none>
 ```

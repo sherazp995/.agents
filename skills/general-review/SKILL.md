@@ -5,7 +5,7 @@ description: Review code changes, pull requests, branches, selected files, or an
 
 # General review
 
-Review the requested scope, verify suspected defects, and report findings. This review phase ends at the report. During it, do not edit source, apply fixes, create commits, publish comments, or open tickets. Suggested fixes are recommendations only.
+Review the requested scope, verify suspected defects, and report findings. This review phase ends at the report. During it, do not edit the reviewed checkout, apply fixes to it, create commits, publish comments, or open tickets. Suggested fixes are recommendations only. Two things are not edits of the reviewed code: PR batch mode proves findings and proposed fixes in throwaway worktrees that are removed afterwards, and every review writes only its temp folder, the test cache (rule 41), its own ledger record (creating the ledger folder and its `.origin` file on first use), and in PR batch mode its throwaway worktrees and private test databases, which it removes afterwards. Ledger cleanup deletes only this agent's records of finished work, and lists them instead while list-only mode is on.
 
 A standalone review request does not authorize remediation. When an already-authorized implementation task calls this skill for self-review, return the findings to that task; the calling task then re-proves findings, resolves introduced blockers, fixes introduced high and medium findings, and re-reviews under rule 44. Ending this review phase does not end or revoke that implementation task. Introduced lows and pre-existing findings remain subject to the user's decision.
 
