@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Enforce the writing-specs skill after an agent edits a test file.
+
+Reads the normalized hook event (see ../adapters/run.py) for a file-editing tool. When the
+edit touches a test file it:
+  * delivers the writing-specs skill the first time a session touches a test file, so the
+    rules are loaded exactly when they apply (answer: {"context": ...});
+  * checks only the lines this edit added (new text compared with the old) for the rules a
+    script can detect for certain,
+    and reports breaks back to the agent (answer: {"decision": "deny", "reason": ...}).
+Judgment rules (minimal coverage, one scenario per example, layer choice, watching each test
+fail) stay with the skill and the completion-check Stop hook.
+"""
+from collections import Counter
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import time
+
+HUB = Path(__file__).resolve().parents[2]
+SKILL = HUB / 'skills' / 'writing-specs' / 'SKILL.md'
+SEEN = HUB / 'chats' / 'spec-guard-sessions'  # machine-local, git-ignored
+
+TEST_DIRS = {'spec', 'specs', 'test', 'tests', '__tests__'}
+TEST_NAME = re.compile(r'(_spec|_test)\.rb$|^test_.*\.py$|_test\.(py|go)$|\.(test|spec)\.[cm]?[jt]sx?$')
+
+LET = re.compile(r'^\s*let!?\s*[\(\{]')
+CHECKS = [
+    (re.compile(r'^\s*it\s*\{\s*(is_expected|should)\.to\s+(belong_to|have_many|have_one|'
+                r'have_and_belong_to_many|validate_\w+)\b'),
+     'rule 49: test the behaviour a declaration drives, not the declaration (no one-line Shoulda matchers)'),
+    (re.compile(r'\bassigns\(|\bassert_template\b'),
+     'rule 30: assert the response and its effects, not controller internals (assigns / assert_template)'),
+]
+
+
+def is_test_file(path):
+    parts = Path(path).parts
+    return bool(TEST_NAME.search(Path(path).name)) or any(part in TEST_DIRS for part in parts[:-1])
+
+
+def new_lines(new, old):
+    """Lines of `new` that `old` did not have (counted, so a repeated unchanged line is not new)."""
+    remaining = Counter(old.splitlines())
+    added = []
+    for line in new.splitlines():
+        if remaining[line]:
+            remaining[line] -= 1
+        else:
+            added.append(line)
+    return added
+
+
+def line_changes(new, old):
+    return new_lines(new, old), new_lines(old, new)
+
+
+def changed_lines(tool, data, response):
+    """{path: (added, removed)} for Write/Edit/MultiEdit and apply_patch."""
+    if data.get('file_path'):
+        path = data['file_path']
+        if tool == 'Write':
+            return {path: line_changes(data.get('content', ''), response.get('originalFile') or '')}
+        edits = data.get('edits', []) if tool == 'MultiEdit' else [data]
+        return {path: line_changes('\n'.join(e.get('new_string', '') for e in edits),
+                                   '\n'.join(e.get('old_string', '') for e in edits))}
+    patch = data.get('input') or data.get('patch') or data.get('command') or ''
+    if isinstance(patch, list):
+        patch = '\n'.join(map(str, patch))
+    plus, minus, current = {}, {}, None
+    for line in str(patch).splitlines():
+        header = re.match(r'^\*\*\* (?:Add|Update) File: (.+)$', line)
+        if header:
+            current = header.group(1).strip()
+            plus.setdefault(current, [])
+            minus.setdefault(current, [])
+        elif current and line.startswith('+') and not line.startswith('+++'):
+            plus[current].append(line[1:])
+        elif current and line.startswith('-') and not line.startswith('---'):
+            minus[current].append(line[1:])
+    return {path: line_changes('\n'.join(plus[path]), '\n'.join(minus[path])) for path in plus}
+
+
+def problems_in(path, cwd, lines, removed):
+    problems = []
+    for pattern, message in CHECKS:
+        if any(pattern.search(line) for line in lines):
+            problems.append(f'{path}: {message}')
+    new_lets = sum(1 for line in lines if LET.search(line))
+    if new_lets and path.endswith('_spec.rb'):  # rule 34 is about RSpec's let
+        full = Path(cwd, path)
+        file_lets = sum(1 for line in full.read_text(errors='replace').splitlines() if LET.search(line)) \
+            if full.is_file() else new_lets
+        removed_lets = sum(1 for line in removed if LET.search(line))
+        if file_lets - new_lets + removed_lets <= 0:
+            problems.append(f'{path}: rule 34: use helper methods, not let/let! (this file does not use let yet)')
+    return problems
+
+
+def first_time_in_session(session_id):
+    if not session_id:
+        return True
+    marker = SEEN / re.sub(r'[^A-Za-z0-9_.-]', '_', str(session_id))
+    if marker.exists():
+        return False
+    SEEN.mkdir(parents=True, exist_ok=True)
+    week_ago = time.time() - 7 * 86400
+    for old in SEEN.iterdir():  # one marker per session; old sessions are done
+        if old.stat().st_mtime < week_ago:
+            old.unlink(missing_ok=True)
+    marker.touch()
+    return True
+
+
+def verdict(event):
+    edits = changed_lines(event.get('tool') or '', event.get('input') or {}, event.get('response') or {})
+    tests = {path: changes for path, changes in edits.items() if is_test_file(path)}
+    if not tests:
+        return None
+    cwd = event.get('cwd') or os.getcwd()
+    problems = [p for path, (added, removed) in tests.items() for p in problems_in(path, cwd, added, removed)]
+    result = {}
+    if first_time_in_session(event.get('session_id')) and SKILL.is_file():
+        result['context'] = ('You are editing tests. These rules apply to every test you write or change '
+                             '(the writing-specs skill):\n\n' + SKILL.read_text())
+    if problems:
+        result.update(decision='deny', reason='Spec rules (writing-specs skill): ' + '; '.join(problems)
+                      + '. Fix the test you just edited.')
+    return result or None
+
+
+if __name__ == '__main__':
+    result = verdict(json.loads(sys.stdin.read() or '{}'))
+    if result:
+        print(json.dumps(result))

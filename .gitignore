@@ -1,0 +1,17 @@
+.DS_Store
+backup/
+chats/
+handoffs/
+memory/
+tmp/
+__pycache__/
+skills/synced/
+skills/.system/
+# Vendored upstream Ponytail; rebuilt by update-ponytail.sh from upstream plus our patch.
+plugins/ponytail/
+skills/ponytail*
+plans/
+review-ledger/
+# Machine-local extra logins (agents-hub account).
+accounts.toml
+history/

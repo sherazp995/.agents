@@ -1,0 +1,109 @@
+# Which client and profile is wired to which shared piece of ~/.agents.
+# Paths starting with ~ are relative to the home directory of the machine.
+#
+# install.py and check.py read this file. A client counts as installed when any
+# `detect` path exists or command is on PATH; clients and profiles that are not
+# present are skipped, so the same file works on every machine.
+#
+#   profiles            the first login only; extra logins are machine-local, in
+#                       accounts.toml (written by `agents-hub account add`)
+#   rules / rules_mode  how the profile loads AGENTS.md:
+#                         link  the file is a symlink to AGENTS.md
+#                         render  install.py writes it from integrations/<client>.*
+#                         merge  install.py adds AGENTS.md to an existing config
+#   account_links       entries an extra account links (relative) to the first login;
+#                       everything else in the account folder is its own
+#   account_env         the variable that points the app at an account folder
+#   account_command     the app's command; an account's shell alias runs it
+#   memory_folder       the app's own memory folder, linked to memory/<client> in the hub
+#   history             the app's chat history folders; install.py moves them to
+#                       history/<client>/ in the hub and leaves a relative link
+#   separate            files each profile keeps for itself (never symlinked);
+#                       relative to the profile, or absolute with ~
+#   hooks               shared hooks: { name, event, kind, matcher }; kind "prompt" is a
+#                       Claude agent hook from hooks/prompts/<name>.md, kind "command"
+#                       runs hooks/bin/<name> through hooks/adapters/run.py
+
+[[clients]]
+name = "claude"
+detect = ["~/.claude", "claude"]
+profiles = ["~/.claude"]
+rules = "CLAUDE.md"
+rules_mode = "link"
+account_env = "CLAUDE_CONFIG_DIR"
+account_command = "claude"
+history = ["projects"]
+account_links = [
+  "agents", "cache", "chrome", "CLAUDE.md", "commands", "debug", "downloads", "file-history",
+  "history.jsonl", "ide", "jobs", "memory", "paste-cache", "plugins", "projects", "session-env",
+  "sessions", "settings.json", "settings.local.json", "shell-snapshots", "skills", "tasks", "teams",
+  "telemetry", "todos",
+]
+separate = ["~/.claude.json", ".claude.json"]
+memory = "native auto-memory; projects/<key>/memory link into memory/scopes, created by the SessionStart hook"
+hooks = [
+  { name = "completion-check", event = "Stop", kind = "prompt", matcher = "" },
+  { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
+  { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
+]
+
+[[clients]]
+name = "codex"
+detect = ["~/.codex", "codex"]
+profiles = ["~/.codex"]
+rules = "AGENTS.md"
+rules_mode = "link"
+account_env = "CODEX_HOME"
+account_command = "codex"
+history = ["sessions"]
+account_links = ["agents", "AGENTS.md", "hooks.json", "memories", "plugins", "prompts", "rules", "sessions", "skills"]
+memory_folder = "memories"
+separate = ["auth.json", "config.toml"]
+memory = "agents-hub memory show / add (instructions in AGENTS.md)"
+hooks = [
+  { name = "completion-check", event = "Stop", kind = "command", matcher = "", timeout = 240 },
+  { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
+  { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
+]
+
+[[clients]]
+name = "opencode"
+detect = ["~/.config/opencode", "opencode"]
+profiles = ["~/.config/opencode"]
+rules = "AGENTS.md"
+rules_mode = "link"
+separate = ["~/.local/share/opencode/auth.json"]
+memory = "agents-hub (instructions in AGENTS.md)"
+
+[[clients]]
+name = "cursor"
+detect = ["~/.cursor"]
+profiles = ["~/.cursor"]
+rules = "rules/global.mdc"
+rules_mode = "render"
+separate = []
+memory = "agents-hub (instructions in AGENTS.md)"
+
+[[clients]]
+name = "aider"
+detect = ["~/.aider.conf.yml", "aider"]
+profiles = ["~"]
+rules = ".aider.conf.yml"
+rules_mode = "merge"
+separate = []
+memory = "agents-hub (instructions in AGENTS.md)"
+
+[[clients]]
+name = "continue"
+detect = ["~/.continue"]
+profiles = ["~/.continue"]
+rules = "config.yaml"
+rules_mode = "merge"
+separate = []
+memory = "agents-hub (instructions in AGENTS.md)"
+
+# Explicit scope sharing. Without an alias, a path only ever uses its own scope.
+# `path` may be a repository or any folder inside one.
+# [[aliases]]
+# path = "~/code/shop/admin"
+# scope = "-home-me-code-shop"

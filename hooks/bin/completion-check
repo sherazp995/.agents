@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Codex side of the shared completion-check Stop hook.
+
+Claude runs hooks/prompts/completion-check.md natively as an agent hook. Codex has
+no agent hooks, so this script runs the same prompt through a read-only,
+ephemeral `codex exec` and turns its answer into a verdict for the adapter:
+the prompt reports work to do as FINISH: and FIX: lines, so only an answer
+containing those blocks the stop (and is handed back to the agent); OK, SKIP,
+a one-line "all done" or no answer lets the turn end.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+PROMPT = Path(__file__).resolve().parent.parent / 'prompts' / 'completion-check.md'
+GUARD = 'AGENTS_HUB_IN_COMPLETION_CHECK'  # the checker's own Codex run must not check itself
+TIMEOUT_SECONDS = 230
+
+
+def prompt_body():
+    """The prompt without its `status:` / `model:` header lines (those configure Claude's hook)."""
+    lines = PROMPT.read_text().splitlines()
+    while lines and lines[0].split(':', 1)[0] in ('status', 'model'):
+        lines.pop(0)
+    return '\n'.join(lines).strip()
+
+
+def checker_answer(event):
+    hook_input = {'hook_event_name': 'Stop', 'stop_hook_active': False,
+                  'transcript_path': event.get('transcript_path'), 'cwd': event.get('cwd')}
+    prompt = prompt_body().replace('$ARGUMENTS', json.dumps(hook_input))
+    with tempfile.TemporaryDirectory() as tmp:
+        answer_file = Path(tmp) / 'answer.txt'
+        subprocess.run(['codex', 'exec', '--ephemeral', '--sandbox', 'read-only', '--skip-git-repo-check',
+                        '-o', str(answer_file), '-'],
+                       input=prompt, text=True, capture_output=True, timeout=TIMEOUT_SECONDS,
+                       cwd=event.get('cwd') or None, env={**os.environ, GUARD: '1'})
+        return answer_file.read_text().strip() if answer_file.exists() else ''
+
+
+def verdict(event):
+    if os.environ.get(GUARD) or event.get('stop_hook_active') or not event.get('transcript_path'):
+        return None
+    answer = checker_answer(event)
+    if not re.search(r'(?m)^\s*(FINISH|FIX):', answer):
+        return None
+    return {'decision': 'deny', 'reason': answer}
+
+
+if __name__ == '__main__':
+    result = verdict(json.loads(sys.stdin.read() or '{}'))
+    if result:
+        print(json.dumps(result))

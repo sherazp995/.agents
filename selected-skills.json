@@ -1,0 +1,26 @@
+{
+  "skills": [
+    "branch-visual-qa",
+    "cohabit_pr_review",
+    "copilot-review",
+    "doing-substantial-work",
+    "general-review",
+    "learn",
+    "llm-council",
+    "pr-details",
+    "status-update",
+    "thermo-nuclear-code-quality-review",
+    "work-council",
+    "writing-specs"
+  ],
+  "roots": [
+    ".claude/skills",
+    ".codex/skills",
+    ".cursor/skills",
+    ".config/opencode/skills"
+  ],
+  "ponytail_plugin_paths": [
+    ".claude/plugins/cache/ponytail/ponytail/4.10.0",
+    ".codex/plugins/cache/ponytail/ponytail/4.10.0"
+  ]
+}

@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+<!-- managed by ~/.agents/install.py -->
+Read and follow the shared global development rules in `{AGENTS_MD}`.
+
+@{AGENTS_MD}

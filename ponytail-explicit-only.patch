@@ -1,0 +1,183 @@
+diff --color -ruN a/skills/ponytail/SKILL.md b/skills/ponytail/SKILL.md
+--- a/skills/ponytail/SKILL.md	2026-09-16 16:18:27
++++ b/skills/ponytail/SKILL.md	2026-09-16 16:17:37
+@@ -1,20 +1,9 @@
+ ---
+ name: ponytail
+-description: >
+-  Forces the laziest solution that actually works, simplest, shortest, most
+-  minimal. Channels a senior dev who has seen everything: question whether the
+-  task needs to exist at all (YAGNI), reach for the standard library before
+-  custom code, native platform features before dependencies, one line before
+-  fifty. Supports intensity levels: lite, full (default), ultra. Use on ANY
+-  coding task: writing, adding, refactoring, fixing, reviewing, or designing
+-  code, and choosing libraries or dependencies. Also use whenever the user
+-  says "ponytail", "be lazy", "lazy mode", "simplest solution", "minimal
+-  solution", "yagni", "do less", or "shortest path", or complains about
+-  over-engineering, bloat, boilerplate, or unnecessary dependencies. Do NOT
+-  use for non-coding requests (general knowledge, prose, translation,
+-  summaries, recipes).
++description: "Apply Ponytail simplification mode only when the user explicitly requests Ponytail by name or command. Supports lite, full, and ultra; full is the level used after an explicit activation when no level is specified. Do not activate for ordinary coding or simplification requests."
+ argument-hint: "[lite|full|ultra]"
+ license: MIT
++disable-model-invocation: true
+ ---
+ 
+ # Ponytail
+@@ -25,9 +14,11 @@
+ 
+ ## Persistence
+ 
+-ACTIVE EVERY RESPONSE. No drift back to over-building. Still active if
+-unsure. Off only: "stop ponytail" / "normal mode". Default: **full**.
+-Switch: `/ponytail lite|full|ultra`.
++Off by default in every coding agent. Activate only when the user explicitly
++requests Ponytail by name or command. After activation, use **full** unless
++another level is requested, and persist only for the requested scope or
++current session. Stop when the user asks to stop or turns Ponytail off.
++Switch: `/ponytail lite|full|ultra|off`.
+ 
+ ## The ladder
+ 
+diff --color -ruN a/skills/ponytail/agents/openai.yaml b/skills/ponytail/agents/openai.yaml
+--- a/skills/ponytail/agents/openai.yaml	1970-01-01 05:00:00
++++ b/skills/ponytail/agents/openai.yaml	2026-09-16 16:17:37
+@@ -0,0 +1,2 @@
++policy:
++  allow_implicit_invocation: false
+diff --color -ruN a/skills/ponytail-audit/SKILL.md b/skills/ponytail-audit/SKILL.md
+--- a/skills/ponytail-audit/SKILL.md	2026-09-16 16:18:27
++++ b/skills/ponytail-audit/SKILL.md	2026-09-16 16:17:37
+@@ -1,12 +1,7 @@
+ ---
+ name: ponytail-audit
+-description: >
+-  Whole-repo audit for over-engineering. Like ponytail-review, but scans the
+-  entire codebase instead of a diff: a ranked list of what to delete, simplify,
+-  or replace with stdlib/native equivalents. Use when the user says "audit this
+-  codebase", "audit for over-engineering", "what can I delete from this repo",
+-  "find bloat", "ponytail-audit", or "/ponytail-audit". One-shot report, does
+-  not apply fixes.
++description: "Audit a whole repository for unnecessary complexity only when the user explicitly requests Ponytail Audit or invokes /ponytail-audit. Produce a ranked report without applying fixes. Do not select for generic audit requests."
++disable-model-invocation: true
+ ---
+ 
+ ponytail-review, repo-wide. Scan the whole tree instead of a diff. Rank
+diff --color -ruN a/skills/ponytail-audit/agents/openai.yaml b/skills/ponytail-audit/agents/openai.yaml
+--- a/skills/ponytail-audit/agents/openai.yaml	1970-01-01 05:00:00
++++ b/skills/ponytail-audit/agents/openai.yaml	2026-09-16 16:17:37
+@@ -0,0 +1,2 @@
++policy:
++  allow_implicit_invocation: false
+diff --color -ruN a/skills/ponytail-debt/SKILL.md b/skills/ponytail-debt/SKILL.md
+--- a/skills/ponytail-debt/SKILL.md	2026-09-16 16:18:27
++++ b/skills/ponytail-debt/SKILL.md	2026-09-16 16:17:37
+@@ -1,11 +1,7 @@
+ ---
+ name: ponytail-debt
+-description: >
+-  Harvest every `ponytail:` comment in the codebase into a debt ledger, so the
+-  deliberate shortcuts and deferrals ponytail leaves behind get tracked instead
+-  of rotting into "later means never". Use when the user says "ponytail debt",
+-  "/ponytail-debt", "what did ponytail defer", "list the shortcuts", "ponytail
+-  ledger", or "what did we mark to do later". One-shot report, changes nothing.
++description: "List deliberate ponytail shortcuts only when the user explicitly requests Ponytail Debt or invokes /ponytail-debt. Produce a report without changing files."
++disable-model-invocation: true
+ ---
+ 
+ Every deliberate ponytail shortcut is marked with a `ponytail:` comment naming
+diff --color -ruN a/skills/ponytail-debt/agents/openai.yaml b/skills/ponytail-debt/agents/openai.yaml
+--- a/skills/ponytail-debt/agents/openai.yaml	1970-01-01 05:00:00
++++ b/skills/ponytail-debt/agents/openai.yaml	2026-09-16 16:17:37
+@@ -0,0 +1,2 @@
++policy:
++  allow_implicit_invocation: false
+diff --color -ruN a/skills/ponytail-gain/SKILL.md b/skills/ponytail-gain/SKILL.md
+--- a/skills/ponytail-gain/SKILL.md	2026-09-16 16:18:27
++++ b/skills/ponytail-gain/SKILL.md	2026-09-16 16:17:37
+@@ -1,11 +1,7 @@
+ ---
+ name: ponytail-gain
+-description: >
+-  Show ponytail's measured impact as a compact scoreboard: less code, less
+-  cost, more speed, from the benchmark medians. One-shot display, not a
+-  persistent mode, and not a per-repo number. Trigger: /ponytail-gain,
+-  "ponytail gain", "what does ponytail save", "show ponytail impact",
+-  "ponytail scoreboard".
++description: "Show the Ponytail measured-impact scoreboard only when the user explicitly requests Ponytail Gain or invokes /ponytail-gain. This does not activate Ponytail mode."
++disable-model-invocation: true
+ ---
+ 
+ # Ponytail Gain
+diff --color -ruN a/skills/ponytail-gain/agents/openai.yaml b/skills/ponytail-gain/agents/openai.yaml
+--- a/skills/ponytail-gain/agents/openai.yaml	1970-01-01 05:00:00
++++ b/skills/ponytail-gain/agents/openai.yaml	2026-09-16 16:17:37
+@@ -0,0 +1,2 @@
++policy:
++  allow_implicit_invocation: false
+diff --color -ruN a/skills/ponytail-help/SKILL.md b/skills/ponytail-help/SKILL.md
+--- a/skills/ponytail-help/SKILL.md	2026-09-16 16:18:27
++++ b/skills/ponytail-help/SKILL.md	2026-09-16 16:17:37
+@@ -1,9 +1,7 @@
+ ---
+ name: ponytail-help
+-description: >
+-  Quick-reference card for all ponytail modes, skills, and commands.
+-  One-shot display, not a persistent mode. Trigger: /ponytail-help,
+-  "ponytail help", "what ponytail commands", "how do I use ponytail".
++description: "Show Ponytail commands and usage only when the user explicitly requests Ponytail Help or invokes /ponytail-help. This does not activate Ponytail mode."
++disable-model-invocation: true
+ ---
+ 
+ # Ponytail Help
+@@ -43,7 +41,9 @@
+ 
+ ## Configure Default Mode
+ 
+-Default mode = `full`, auto-active every session. Change it:
++The shared default is `off` in every coding agent. Activate only on an
++explicit request with `/ponytail full` (or `lite` / `ultra`).
++The following settings can change the default when explicitly requested:
+ 
+ **Environment variable** (highest priority):
+ ```bash
+@@ -52,7 +52,7 @@
+ 
+ **Config file** (`~/.config/ponytail/config.json`, Windows: `%APPDATA%\ponytail\config.json`):
+ ```json
+-{ "defaultMode": "lite" }
++{ "defaultMode": "off" }
+ ```
+ 
+ Set `"off"` to disable auto-activation on session start, activate manually
+diff --color -ruN a/skills/ponytail-help/agents/openai.yaml b/skills/ponytail-help/agents/openai.yaml
+--- a/skills/ponytail-help/agents/openai.yaml	1970-01-01 05:00:00
++++ b/skills/ponytail-help/agents/openai.yaml	2026-09-16 16:17:37
+@@ -0,0 +1,2 @@
++policy:
++  allow_implicit_invocation: false
+diff --color -ruN a/skills/ponytail-review/SKILL.md b/skills/ponytail-review/SKILL.md
+--- a/skills/ponytail-review/SKILL.md	2026-09-16 16:18:27
++++ b/skills/ponytail-review/SKILL.md	2026-09-16 16:17:37
+@@ -1,13 +1,7 @@
+ ---
+ name: ponytail-review
+-description: >
+-  Code review focused exclusively on over-engineering. Finds what to delete:
+-  reinvented standard library, unneeded dependencies, speculative abstractions,
+-  dead flexibility. One line per finding: location, what to cut, what replaces
+-  it. Use when the user says "review for over-engineering", "what can we
+-  delete", "is this over-engineered", "simplify review", or invokes
+-  /ponytail-review. Complements correctness-focused review, this one only
+-  hunts complexity.
++description: "Review a diff for unnecessary complexity only when the user explicitly requests Ponytail Review or invokes /ponytail-review. Report simplification opportunities without applying fixes. Do not select for generic review requests."
++disable-model-invocation: true
+ ---
+ 
+ Review diffs for unnecessary complexity. One line per finding: location, what
+diff --color -ruN a/skills/ponytail-review/agents/openai.yaml b/skills/ponytail-review/agents/openai.yaml
+--- a/skills/ponytail-review/agents/openai.yaml	1970-01-01 05:00:00
++++ b/skills/ponytail-review/agents/openai.yaml	2026-09-16 16:17:37
+@@ -0,0 +1,2 @@
++policy:
++  allow_implicit_invocation: false

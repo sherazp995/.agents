@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Enforce the git rules agents tend to skip (AGENTS-RULES.md 43, 48 and 54) before a shell command runs.
+
+Reads the normalized hook event (see ../adapters/run.py). For a rule break it returns
+{"decision": "ask", "reason": ...}: Claude Code then asks the user, and Codex (which has
+no "ask") refuses and tells the agent to ask the user. Only the user can override.
+"""
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+ATTRIBUTION = re.compile(r'Co-Authored-By:\s*Claude|Claude-Session|Generated with \[?Claude Code', re.I)
+SEPARATOR = re.compile(r'^[;&|]+$')
+WRAPPERS = {'command', 'env', 'exec', 'nohup', 'time', 'sudo'}
+HEREDOC = re.compile(r'''<<(-?)[ \t]*((?:[^\s;&|<>\\'"]|\\.|'[^']*'|"[^"]*")+)''')
+# git options that come before the subcommand and take the next word as their value.
+GLOBAL_OPTIONS_WITH_VALUE = {'-c', '-C', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'}
+
+
+# Options whose separate argument belongs to a wrapper, not its command.
+WRAPPER_OPTIONS_WITH_VALUE = {
+    'env': {'-u', '--unset', '-C', '--chdir', '-S', '--split-string'},
+    'sudo': {'-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt',
+             '-C', '--close-from', '-T', '--command-timeout', '-r', '--role', '-t', '--type'},
+    'exec': {'-a'},
+    'time': {'-f', '--format', '-o', '--output'},
+}
+
+
+def parse_shell(command):
+    """One lexical traversal for substitutions, quotes, comments and heredocs.
+
+    Each region retains normalized source for message checks and masked words for
+    command checks. Substitutions own their lexical context and directory scope.
+    No shell code is evaluated.
+    """
+    prefix = '__git_guard_substitution_'
+    while prefix in command:
+        prefix += '_'
+    i = 0
+
+    def scan(closing=None, heredoc=None):
+        nonlocal i
+        original, masked, substitutions = [], [], {}
+        quote, word_start, depth = None, True, 0
+        pending_heredocs = []
+
+        def append(text):
+            original.append(text)
+            if heredoc is None:
+                masked.append(text)
+
+        def result():
+            return (''.join(original), ''.join(masked), substitutions)
+
+        while i < len(command):
+            char = command[i]
+            if heredoc and (i == 0 or command[i - 1] == '\n'):
+                end = command.find('\n', i)
+                end = len(command) if end == -1 else end + 1
+                line = command[i:end]
+                candidate = line.rstrip('\n')
+                if heredoc[2]:
+                    candidate = candidate.lstrip('\t')
+                if candidate == heredoc[0]:
+                    i = end
+                    return result(), line
+            if heredoc and heredoc[1]:
+                append(char)
+                i += 1
+                continue
+            if char == '\\' and quote != "'":
+                pair = command[i:i + 2]
+                if pair != '\\\n':
+                    append(pair)
+                    word_start = False
+                i += len(pair)
+                continue
+            if (closing == '`' and char == '`') or (
+                    closing == ')' and char == ')' and quote is None and depth == 0 and heredoc is None):
+                i += 1
+                return result(), char
+            if heredoc is None and quote is None and word_start and char == '#':
+                end = command.find('\n', i)
+                end = len(command) if end == -1 else end
+                original.append(command[i:end])
+                i = end
+                continue
+            if heredoc is None and quote is None and char == '\n' and pending_heredocs:
+                original.append(char)
+                i += 1
+                for delimiter in pending_heredocs:
+                    body, terminator = scan(heredoc=delimiter)
+                    original.extend((body[0], terminator))
+                    # Heredoc literals are data; only their substitutions execute.
+                    for marker, substitution in body[2].items():
+                        renamed = f'{prefix}{len(substitutions)}__'
+                        substitutions[renamed] = substitution
+                        masked.append(' ' + renamed)
+                pending_heredocs.clear()
+                masked.append('\n')
+                word_start = True
+                continue
+            if (heredoc is None and quote is None and command.startswith('<<', i)
+                    and not command.startswith('<<<', i) and (i == 0 or command[i - 1] != '<')):
+                match = HEREDOC.match(command, i)
+                if match:
+                    raw = match[2]
+                    pending_heredocs.append((shlex.split(raw)[0], any(c in raw for c in "\"'\\"), bool(match[1])))
+                    append(match[0])
+                    i = match.end()
+                    word_start = False
+                    continue
+            if quote != "'" and (command.startswith('$(', i) or char == '`'):
+                opener = '`' if char == '`' else '$('
+                i += len(opener)
+                body, terminator = scan(closing='`' if opener == '`' else ')')
+                spelling = opener + body[0] + terminator
+                marker = f'{prefix}{len(substitutions)}__'
+                substitutions[marker] = (body, spelling)
+                original.append(spelling)
+                masked.append(marker)
+                word_start = False
+                continue
+            if heredoc is None:
+                if quote:
+                    if char == quote:
+                        quote = None
+                elif char in "\"'":
+                    quote = char
+                elif char == '(':
+                    depth += 1
+                elif char == ')' and depth:
+                    depth -= 1
+                word_start = quote is None and (char.isspace() or char in ';&|()<>')
+            append(char)
+            i += 1
+        if closing or heredoc or pending_heredocs or quote:
+            raise ValueError('unclosed shell quote, substitution or heredoc')
+        return result(), ''
+
+    return scan()[0]
+
+
+def unquoted_newlines_to_separators(command):
+    """Newlines outside quotes end a command, as in a shell script; newlines inside quotes
+    (a heredoc message in "$(cat <<EOF ...)") stay part of their word."""
+    out, quote, escaped = [], None, False
+    for char in command:
+        if escaped:
+            escaped = False
+        elif char == '\\' and quote != "'":
+            escaped = True
+        elif quote:
+            quote = None if char == quote else quote
+        elif char in '"\'':
+            quote = char
+        elif char == '\n':
+            char = ';'
+        out.append(char)
+    return ''.join(out)
+
+
+def segments(command):
+    """Shell command split into simple commands (word lists)."""
+    lexer = shlex.shlex(unquoted_newlines_to_separators(command), posix=True, punctuation_chars=';&|')
+    lexer.whitespace_split = True
+    lexer.commenters = ''  # `issue#3` is a word, not a comment
+    current = []
+    for token in lexer:
+        token = token.strip('(){}') if token not in ('(', ')', '{', '}') else ''  # subshells and groups
+        if not token:
+            continue
+        if SEPARATOR.match(token):
+            if current:
+                yield current
+            current = []
+        else:
+            current.append(token)
+    if current:
+        yield current
+
+
+def git_invocation(words):
+    """(global options, subcommand, its arguments) when the words run git, else None."""
+    while words:
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0]):
+            words = words[1:]
+            continue
+        wrapper = os.path.basename(words[0])
+        if wrapper not in WRAPPERS:
+            break
+        words = words[1:]
+        while words and words[0].startswith('-'):
+            option = words[0]
+            words = words[1:]
+            if option == '--':
+                break
+            if option in WRAPPER_OPTIONS_WITH_VALUE.get(wrapper, set()) and words:
+                words = words[1:]
+    if not words or os.path.basename(words[0]) != 'git':
+        return None
+    options, i = [], 1
+    while i < len(words) and words[i].startswith('-'):
+        options.append(words[i])
+        if words[i] in GLOBAL_OPTIONS_WITH_VALUE and i + 1 < len(words):
+            options.append(words[i + 1])
+            i += 1
+        i += 1
+    return options, (words[i] if i < len(words) else None), words[i + 1:]
+
+
+def git(directory, *args):
+    result = subprocess.run(['git', *args], cwd=directory, capture_output=True, text=True, timeout=10)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def commit_messages(args):
+    messages, i = [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ('-m', '--message') and i + 1 < len(args):
+            messages.append(args[i + 1])
+            i += 1
+        elif arg.startswith('--message='):
+            messages.append(arg.split('=', 1)[1])
+        elif arg.startswith('-m') and len(arg) > 2:
+            messages.append(arg[2:])
+        i += 1
+    return messages
+
+
+def check_commit(directory, args):
+    problems = []
+    messages = commit_messages(args)
+    if len(messages) > 1 or any('\n' in m.strip() for m in messages):
+        problems.append('rule 48: the commit message must be a single line')
+    if any(ATTRIBUTION.search(m) for m in messages):
+        problems.append('rule 48: no Claude attribution in commits')
+    has_head = git(directory, 'rev-parse', '--verify', '-q', 'HEAD') is not None
+    unpushed = int(git(directory, 'rev-list', '--count', 'HEAD', '--not', '--remotes') or 0) if has_head else 0
+    amend = '--amend' in args
+    if unpushed > 1:
+        problems.append(f'rule 54: this branch already has {unpushed} unpushed commits; '
+                        'ask the user whether to squash them into one first')
+    elif unpushed == 1 and not amend:
+        problems.append('rule 54: one unpushed commit already exists; fold this change into it with '
+                        '`git commit --amend` instead of adding a second commit')
+    elif unpushed == 0 and amend and has_head:
+        problems.append('rule 54: --amend here would rewrite a commit that is already pushed')
+    return problems
+
+
+def problems_in(parsed, cwd):
+    problems, directory = [], cwd
+    _, masked, substitutions = parsed
+    for words in segments(masked):
+        for marker, (body, original) in substitutions.items():
+            if any(marker in word for word in words):
+                problems += problems_in(body, directory)
+                words = [word.replace(marker, original) for word in words]
+        if words[0] == 'cd' and len(words) > 1:
+            directory = os.path.join(directory, os.path.expanduser(words[1]))
+            continue
+        invocation = git_invocation(words)
+        if not invocation:
+            continue
+        options, subcommand, args = invocation
+        if '-C' in options:  # only git's own -C; `git log -C` is a different option
+            problems.append('rule 43: run git from inside the repo (cd into it), not with `git -C`')
+        if subcommand == 'commit':
+            problems += check_commit(directory, args)
+    return problems
+
+
+def verdict(event):
+    command = (event.get('input') or {}).get('command') or ''
+    try:
+        problems = problems_in(parse_shell(command), event.get('cwd') or os.getcwd())
+    except Exception as error:
+        # Unparseable shell syntax: ask only when a commit or
+        # git -C could be hiding in it; never wave such a command through unchecked.
+        command = command.replace('\\\n', '')
+        if not re.search(r'\bgit\b[^\n]*(?:\bcommit\b|(?<!\S)-C(?:\s|$))', command):
+            return None
+        problems = [f'could not check this git command against rules 43, 48 and 54 ({error})']
+    if not problems:
+        return None
+    return {'decision': 'ask', 'reason': 'Git rules (AGENTS-RULES.md): ' + '; '.join(problems)
+            + '. Only the user can approve going ahead anyway.'}
+
+
+if __name__ == '__main__':
+    result = verdict(json.loads(sys.stdin.read() or '{}'))
+    if result:
+        print(json.dumps(result))
