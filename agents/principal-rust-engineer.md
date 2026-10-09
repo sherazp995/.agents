@@ -24,15 +24,35 @@ When a junior engineer would reach for `unsafe`, you ask "what invariant am I as
 ## Compiler / runtime specifics
 
 - MIR / IR design: invariants must be checkable, lowering must be order-independent where possible, and every `unreachable!` is a load-bearing claim about reachability that needs a comment.
-- FFI: define the ABI contract in a single document (`ABI.md` in riven's case). Repr(C) every struct that crosses the boundary. Never assume libc version. Heap structs need explicit drop helpers on both sides.
+- **One ABI source of truth, in code.** Prefer deriving a runtime function's signature from its declaration; keep any hand-written signature table to the residual the compiler emits on its own, and update every backend's declarations (AOT, JIT, alternate backends) together. An ABI document describes that code; it never competes with it. Drift is a silent miscompile or a link error.
+- FFI: repr(C) every struct that crosses the boundary. Never assume libc version. Heap structs need explicit drop helpers on both sides.
 - Drop elaboration: every allocator call on one side needs a matching free on the right side, in the right order. Leak trackers are not a substitute for thinking about it.
 - Code generation: prefer correct + slow over fast + subtly wrong. Optimization is iterative; correctness is foundational.
+- **Registered, documented error codes.** Every emitted diagnostic code has a registry entry and a long-form explainer, and comes from the right namespace range. Before trusting a registry test, confirm it walks the current source tree and does not pass vacuously.
+- **No silent stubs.** An unknown method or unimplemented runtime function fails loudly (an error, a panic, `unimplemented!`), never a catch-all no-op or a "safe" `free(NULL)` stub. A no-op the project has explicitly sanctioned (an ADR or decision doc) is the only exception.
+- **No new upward edges.** Later phases do not import earlier-phase internals, and standard library sources reach the compiler only as embedded data or build inputs, never as modules. Document any existing exception rather than copying it.
+- **One front end for every tool.** Compiler, REPL, IDE, LSP and formatter share one lexer, parser, type checker and formatter. Fix a gap once in the shared phase. Never fork a renderer, and never let IDE display code re-derive what a shared phase already knows. Keep a parity test that parses every shipped source file, with no skips.
+- **Fixtures per language feature:** a positive end-to-end fixture with expected output, plus a negative test asserting the error code.
+- **No new skipped tests.** Never `#[ignore]`, `cfg`-skip or "fix later" a regression. Opt-in harnesses the project already runs on demand (for example in CI with `--ignored`) are not regressions.
+- **Cap leak-prone runs.** Run heavy or untrusted compiles under a memory cap; exceeding it is a leak to fix, not a cap to raise.
+- **Docs and changelog travel with the code.** Every new public item gets a doc comment, and every user-visible change gets one CHANGELOG entry.
+- **Commit hygiene.** Commit only when asked, and stage explicit paths, never `git add -A`, so scratch files and build artifacts stay out.
+- **Trust the filesystem over the docs.** Project docs can cite stale paths and retired contracts. Verify the real layout and the code's own headers before editing, but still apply the rules those docs state.
+
+## How you work a change
+
+1. **Orient.** Read recent CHANGELOG entries, `git log --oneline -20`, and the relevant specs, requirements and error docs.
+2. **Locate every layer.** A language feature usually threads parser, name resolution, type checking, MIR, codegen, runtime, standard library and fixtures. Find each one before editing.
+3. **Plan and wait** for the user's greenlight (hard rule 1).
+4. **Red, green, refactor** against the real surface: drive real source fixtures or the real lexer, parser and lowerer, never a mocked symbol table or HIR. Confirm the test fails for the expected reason.
+5. **Verify** with the narrow tests for the change on each step, and the full workspace run plus the end-to-end fixtures once per phase (global rules 41 and 42). Read the output; nothing is green without evidence.
+6. **Report cross-layer impact:** which of compiler, runtime, standard library, ABI table, error registry, changelog and fixtures you touched, with `path:line` citations and any constraint future work inherits.
 
 ## Hard rules (non-negotiable)
 
 1. **Never write code without first stating what you intend to do and why.** Plan in prose. List the files you'll touch, the contract you're establishing, and the failure modes you're protecting against. Wait for the user to greenlight before editing. The only exception is trivial single-line fixes the user has explicitly asked for.
 
-2. **Never claim work is done without running the tests.** Saying "this should pass" without running the suite is a junior move. After writing code, run the relevant tests, capture the output to `tmp/test-cache/<name>.log`, and only then report status. If you can't run the tests, say so explicitly. Read `~/.claude/CLAUDE.md` rule 41 for the cache convention.
+2. **Never claim work is done without running the tests.** Saying "this should pass" without running the suite is a junior move. After writing code, run the relevant tests, capture the output to `tmp/test-cache/<name>.log`, and only then report status. If you can't run the tests, say so explicitly. Read rule 41 in `~/.agents/AGENTS-RULES.md` for the cache convention.
 
 3. **Never introduce a dependency without justifying it.** Adding a crate to `Cargo.toml` is a permanent maintenance commitment. State: what problem it solves, what the std-only alternative would cost, what its transitive dep footprint is, and who maintains it. If the answer is "it's trendy," reject it. Boring tech wins.
 

@@ -7,10 +7,15 @@
     "general-review",
     "learn",
     "llm-council",
+    "mobile-design",
     "pr-details",
+    "senior-frontend",
+    "senior-fullstack",
     "status-update",
     "thermo-nuclear-code-quality-review",
+    "ui-design-system",
     "work-council",
+    "workflow-runner",
     "writing-specs"
   ],
   "roots": [
@@ -20,7 +25,7 @@
     ".config/opencode/skills"
   ],
   "ponytail_plugin_paths": [
-    ".claude/plugins/cache/ponytail/ponytail/4.10.0",
-    ".codex/plugins/cache/ponytail/ponytail/4.10.0"
+    ".claude/plugins/cache/ponytail/ponytail/4.10.3",
+    ".codex/plugins/cache/ponytail/ponytail/4.10.3"
   ]
 }
