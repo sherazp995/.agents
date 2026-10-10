@@ -1,16 +1,38 @@
 #!/usr/bin/env python3
-"""Stop hook: run only the tests related to this turn's changed files.
+"""Stop hook: run only the tests related to this turn's changed files, once the turn is complete.
 
-Reads the normalized hook event (see ../adapters/run.py). In the git repository of the
-event's cwd it takes the changed files (`git diff HEAD` names plus untracked files) that this
-session edited itself in this turn, maps each to its tests and runs only those. The edits come
-from its transcript after the last user prompt (Claude Edit, Write, MultiEdit and NotebookEdit
-calls; Codex apply_patch), so a Stop during a build wave never tests files other agents are still
-writing, and a turn that edits nothing never retests an earlier turn's files. Files changed
-only through shell commands are not seen. Without a readable transcript every changed file
-counts. Failing tests block the stop with the output tail
-({"decision": "deny", "reason": ...}). No changes, no related tests, a timeout or a hook
-already sending the agent back (stop_hook_active) let the turn end silently.
+Reads the normalized hook event (see ../adapters/run.py), in the git repository of the event's cwd.
+
+Turn start (`related-tests --snapshot`, run by the sibling related-tests-snapshot on UserPromptSubmit):
+records the tracked files as a git tree object built in a throwaway copy of the index with `git add -u`
+semantics (the real index is never touched and untracked files never become objects), the untracked,
+not-ignored files as (path, size, mtime_ns) entries (above UNTRACKED_CAP only their count), and the
+transcript's size, per session and repo under the cache root. A snapshot is taken only when none is
+pending, so a prompt queued mid-turn never resets it; a Stop that finishes the turn uses it up, and a
+snapshot a Stop blocked on is replaced by the next prompt (the agent had that turn to fix it). Snapshots
+older than SNAPSHOT_MAX_AGE are deleted when a new one is taken.
+
+Stop: the turn's changed files are `git diff` between that snapshot tree and the current tree (built
+the same way), plus untracked files that are new, changed size or mtime, or are gone, so edits made
+through shell commands (sed -i, heredocs, scripts, generators) count, and so do new and deleted files
+(a deleted file has no tests of its own; tests related to it still run if they exist). Files another
+writer changes in the same working tree during the turn are tested too. Above the untracked cap,
+untracked files count only when the transcript shows the turn edited them. While a background agent
+or workflow this session launched since the snapshot is still running (a launch whose agentId or
+Task ID, or tool use id, has no later <task-notification> with a <status>, and is under
+PENDING_LIMIT old by its transcript timestamp), the Stop exits silently and keeps the snapshot, so a
+later Stop covers the whole turn. A snapshot whose transcript offset is past the transcript's end (a
+new or truncated transcript) is ignored.
+Without a snapshot (first turn after install, Codex, which has no snapshot hook wired, or a failed
+snapshot) the files are those changed since HEAD (plus untracked) that the transcript shows this
+session edited after the last user prompt (Claude Edit, Write, MultiEdit and NotebookEdit calls;
+Codex apply_patch). A prompt queued while the turn runs (after a tool call or its result) and
+task notifications do not start a new turn there; files changed only through shell commands are not
+seen. Without a readable transcript every changed file counts.
+
+Failing tests block the stop with the output tail ({"decision": "deny", "reason": ...}) and mark the
+snapshot blocked. No changes, no related tests, a timeout or a hook already sending the agent back
+(stop_hook_active) let the turn end silently.
 
 Mapping: a repo file `.agents/project.toml` wins when it has a [tests] table:
     [tests]
@@ -26,16 +48,20 @@ Without `command` each group runs with the repo's runner (rspec, rails test, vit
 node --test, pytest or unittest).
 
 Results are cached by the hash of the commands, HEAD, the lockfiles beside each command and
-the changed and test files' contents (rule 41), in tmp/test-cache/related-tests/ of this hub, so an unchanged state never reruns.
+the changed and test files' contents (rule 41), in tmp/test-cache/related-tests/ of this hub, so an
+unchanged state never reruns. Snapshots live in its snapshots/ folder.
 """
+from datetime import datetime
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 
@@ -48,13 +74,148 @@ TEST_NAME = re.compile(r'(_spec|_test)\.rb$|^test_.*\.py$|_test\.py$|\.(test|spe
 JS_EXT = re.compile(r'\.[cm]?[jt]sx?$')
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 PATCH_TARGET = re.compile(r'^\*\*\* (?:Add File|Update File|Move to): (.+)$', re.M)
+# The tool result of a background agent or workflow launch starts with one of these.
+BACKGROUND_LAUNCH = ('Async agent launched', 'Workflow launched in background', 'Remote agent launched')
+LAUNCH_ID = re.compile(r'(?:agentId|Task ID): *([\w-]+)')  # the task id a launch result names
+NOTIFICATION_ID = re.compile(r'<(task-id|tool-use-id)>([^<]+)</\1>')
+PENDING_LIMIT = 45 * 60  # seconds after which a launch that never reported back stops holding the turn
+UNTRACKED_CAP = 20_000  # above this many untracked files the snapshot records only their count
+SNAPSHOT_MAX_AGE = 24 * 3600  # seconds
+# Records that can neither edit, start or end a turn, launch or finish a background task are skipped unparsed.
+TRANSCRIPT_WORDS = ('tool_use', 'File: ', 'Move to: ', '"user', '"assistant', '_call', 'agent_message',
+                    'task_complete', 'turn_aborted', 'task-notification', ' launched')
 LOCKFILES = ('Gemfile.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock',
              'poetry.lock', 'uv.lock', 'Pipfile.lock', 'requirements.txt', 'Cargo.lock', 'go.sum')
 
 
 def git(root, *args):
-    result = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True)
+    result = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True,
+                            errors='surrogateescape')
     return result.stdout if result.returncode == 0 else None
+
+
+def repo_root(cwd):
+    top = git(cwd or os.getcwd(), 'rev-parse', '--show-toplevel')
+    return Path(top.strip()) if top else None
+
+
+def worktree_tree(root):
+    """The id of a tree object holding the tracked files as they are in the working tree, built with
+    `git add -u` in a throwaway copy of the index, so the real index never changes and untracked files
+    are never written as objects. None when git fails."""
+    index = git(root, 'rev-parse', '--git-path', 'index')
+    if index is None:
+        return None
+    real = root / index.strip()
+    with tempfile.TemporaryDirectory(prefix='related-tests-') as tmp:
+        scratch = Path(tmp) / 'index'
+        if real.is_file():
+            # Keeps the stat cache, so only changed files are hashed, and the mtime that git's racy check needs.
+            shutil.copy2(real, scratch)
+        env = {**os.environ, 'GIT_INDEX_FILE': str(scratch), 'GIT_OPTIONAL_LOCKS': '0'}
+        for args in (['add', '-u'], ['write-tree']):
+            result = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True, env=env)
+            if result.returncode != 0:
+                return None
+    return result.stdout.strip() or None
+
+
+def untracked_names(root):
+    """Repo-relative untracked, not-ignored files, or None when git fails."""
+    names = git(root, 'ls-files', '-o', '--exclude-standard', '-z')
+    return None if names is None else [name for name in names.split('\0') if name]
+
+
+def file_stat(root, name):
+    """(size, mtime_ns) of a file, or None when it is gone."""
+    try:
+        stat = os.lstat(root / name)
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns
+
+
+def snapshot_file(session_id, root):
+    key = hashlib.sha256(f'{session_id}\0{root}'.encode()).hexdigest()[:32]
+    return CACHE / 'snapshots' / f'{key}.json'
+
+
+def write_snapshot(file, data):
+    file.parent.mkdir(parents=True, exist_ok=True)
+    partial = file.with_suffix(f'.{os.getpid()}.tmp')
+    partial.write_text(json.dumps(data))
+    partial.replace(file)
+
+
+def prune_snapshots():
+    """Delete snapshot files (and leftover partial writes) older than SNAPSHOT_MAX_AGE."""
+    cutoff = time.time() - SNAPSHOT_MAX_AGE
+    for old in (CACHE / 'snapshots').glob('*'):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+
+
+def transcript_size(transcript_path):
+    try:
+        return os.path.getsize(transcript_path or '')
+    except OSError:
+        return 0
+
+
+def snapshot(event):
+    """UserPromptSubmit: record the turn-start tree, untracked files and transcript size, unless a
+    snapshot for this session and repo is still pending (a prompt queued mid-turn must not move the
+    turn's start). A snapshot a Stop blocked on is replaced: the agent had its turn to fix it."""
+    root = repo_root(event.get('cwd'))
+    if not root or not event.get('session_id'):
+        return
+    prune_snapshots()
+    file = snapshot_file(event['session_id'], root)
+    pending = load_snapshot(file)
+    if pending and not pending.get('blocked'):
+        return
+    tree, names = worktree_tree(root), untracked_names(root)
+    if not tree or names is None:
+        return
+    untracked = None
+    if len(names) <= UNTRACKED_CAP:
+        untracked = [[name, *stat] for name in names if (stat := file_stat(root, name))]
+    write_snapshot(file, {'tree': tree, 'offset': transcript_size(event.get('transcript_path')),
+                          'root': str(root), 'untracked': untracked, 'untracked_count': len(names)})
+
+
+def load_snapshot(file):
+    try:
+        data = json.loads(file.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get('tree') else None
+
+
+def snapshot_changes(root, snap, edits):
+    """Repo-relative paths that changed since the snapshot: the tracked diff between its tree and the
+    working tree now, plus untracked files that are new, changed or gone (a file that only moved
+    between untracked and tracked with the same size and mtime does not count). Above the untracked
+    cap, untracked files count only when `edits` (the transcript's) names them, or all of them when
+    there is no transcript. None when either tree is unavailable (for example pruned)."""
+    current = worktree_tree(root)
+    names = git(root, 'diff', '--name-only', '--no-renames', '-z', snap['tree'], current) if current else None
+    now_untracked = untracked_names(root)
+    if names is None or now_untracked is None:
+        return None
+    candidates = [name for name in names.split('\0') if name]
+    if snap.get('untracked') is None:
+        print(f'related-tests: {snap.get("untracked_count")} untracked files exceeded the snapshot cap; '
+              'untracked files count only when the transcript shows them edited', file=sys.stderr)
+        candidates += [name for name in now_untracked if edits is None or (root / name).resolve() in edits]
+        return list(dict.fromkeys(candidates))
+    before = {name: (size, mtime) for name, size, mtime in snap['untracked']}
+    candidates += now_untracked + list(before)
+    return [name for name in dict.fromkeys(candidates)
+            if name not in before or before[name] != file_stat(root, name)]
 
 
 def changed_files(root):
@@ -95,27 +256,92 @@ def record_edits(record):
             yield from (match.strip() for match in PATCH_TARGET.findall(text))
 
 
+def message_texts(record):
+    """The texts of a Claude user message, or None when it holds a tool result."""
+    content = (record.get('message') or {}).get('content')
+    if isinstance(content, str):
+        return [content]
+    blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+    if any(block.get('type') == 'tool_result' for block in blocks):
+        return None
+    return [block.get('text') or '' for block in blocks if block.get('type') == 'text']
+
+
+def is_notification(text):
+    return text.lstrip().startswith('<task-notification>')
+
+
 def is_user_prompt(record):
-    """True for a prompt the user typed: it starts a new turn. Tool results and meta records are not."""
+    """True for a prompt the user typed: it starts a new turn. Tool results, meta records and
+    background task notifications are not."""
     payload = record.get('payload')
     if record.get('type') == 'event_msg' and isinstance(payload, dict):  # Codex
         return payload.get('type') == 'user_message'
     if record.get('type') != 'user' or record.get('isMeta'):  # Claude
         return False
-    content = (record.get('message') or {}).get('content')
-    if isinstance(content, str):
-        return True
-    return isinstance(content, list) and any(
-        isinstance(block, dict) and block.get('type') == 'text' for block in content
-    ) and not any(isinstance(block, dict) and block.get('type') == 'tool_result' for block in content)
+    texts = message_texts(record)
+    return bool(texts) and not any(is_notification(text) for text in texts)
+
+
+def background_launches(record):
+    """(tool use id, task id) of each background agent or workflow whose launch this record reports
+    (Claude). The task id is the `agentId: X` or `Task ID: X` the launch result names, or None."""
+    content = (record.get('message') or {}).get('content') if record.get('type') == 'user' else None
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict) or block.get('type') != 'tool_result':
+            continue
+        result = block.get('content')
+        if isinstance(result, list):
+            result = '\n'.join(part.get('text') or '' for part in result
+                               if isinstance(part, dict) and part.get('type') == 'text')
+        if isinstance(result, str) and result.lstrip().startswith(BACKGROUND_LAUNCH):
+            task = LAUNCH_ID.search(result)
+            yield block.get('tool_use_id'), task.group(1) if task else None
+
+
+def finished_tasks(record):
+    """Task ids and tool use ids whose background task this record reports finished, with any status
+    (completed, failed, killed, ...): a <task-notification> delivered as a user message, a queued
+    command or a queue operation (Claude). Real notifications often carry only the task id."""
+    kind = record.get('type')
+    if kind == 'user':
+        texts = message_texts(record) or []
+    elif kind == 'attachment':
+        texts = [(record.get('attachment') or {}).get('prompt')]
+    elif kind == 'queue-operation':
+        texts = [record.get('content')]
+    else:
+        texts = []
+    for text in texts:
+        if isinstance(text, str) and is_notification(text) and '<status>' in text:
+            yield from (value.strip() for _, value in NOTIFICATION_ID.findall(text))
+
+
+def record_time(record):
+    """The record's timestamp in epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(record['timestamp']).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def still_running(launches, finished):
+    """The launches with no finish notification by either id that are under PENDING_LIMIT old. A
+    launch without a timestamp cannot age out, so it does not hold the turn either."""
+    now = time.time()
+    return {tool_id or task_id for (tool_id, task_id), at in launches.items()
+            if not {tool_id, task_id} & finished and at is not None and now - at < PENDING_LIMIT}
 
 
 def turn_state(record):
     """'ended' when a prompt after this record starts a new turn, 'open' when the turn is still running
     (a tool call or its result), None for records that say neither."""
     kind, payload = record.get('type'), record.get('payload')
-    if kind == 'assistant':  # Claude
-        return 'ended'
+    if kind == 'assistant':  # Claude: a tool call keeps the turn open until its result comes back
+        content = (record.get('message') or {}).get('content')
+        calls = isinstance(content, list) and any(
+            isinstance(block, dict) and block.get('type') == 'tool_use' for block in content)
+        return 'open' if calls else 'ended'
     if kind == 'user' and not record.get('isMeta'):  # Claude: a tool result (prompts are handled first)
         content = (record.get('message') or {}).get('content')
         return 'open' if isinstance(content, list) else None
@@ -131,19 +357,23 @@ def turn_state(record):
     return None
 
 
-def session_edits(transcript_path, cwd):
-    """Resolved paths edited this turn, or None when there is no transcript to read. A prompt the
-    user queues while a turn is running (straight after a tool call or result) does not start a new
-    turn, so the turn's earlier edits stay."""
+def read_turn(transcript_path, cwd, start=None):
+    """(edits, pending) for the current turn: the resolved paths it edited (None when there is no
+    transcript to read) and the ids of background agents or workflows it launched that have not
+    reported back yet (see still_running). With `start`, a byte offset, the turn is everything after it. Otherwise it
+    begins at the last user prompt; a prompt queued while the turn runs (straight after a tool call or
+    result) does not start a new turn, so the turn's earlier edits stay."""
     if not transcript_path:
-        return None
-    edits, state = set(), None
+        return None, set()
+    edits, launched, finished, state = set(), {}, set(), None
     try:
-        with open(transcript_path, errors='replace') as handle:
-            for line in handle:
-                if not any(word in line for word in ('tool_use', 'File: ', 'Move to: ', '"user', '"assistant',
-                                                     '_call', 'agent_message', 'task_complete', 'turn_aborted')):
-                    continue  # most records neither edit nor start or end a turn; skip parsing them
+        with open(transcript_path, 'rb') as handle:
+            if start and start <= os.fstat(handle.fileno()).st_size:
+                handle.seek(start)
+            for raw in handle:
+                line = raw.decode(errors='replace')
+                if not any(word in line for word in TRANSCRIPT_WORDS):
+                    continue
                 try:
                     record = json.loads(line)
                 except ValueError:
@@ -151,15 +381,17 @@ def session_edits(transcript_path, cwd):
                 if not isinstance(record, dict):
                     continue
                 if is_user_prompt(record):
-                    if state in (None, 'ended'):
-                        edits = set()
+                    if start is None and state in (None, 'ended'):
+                        edits, launched = set(), {}
                     state = 'prompt'
                     continue
                 edits.update((Path(cwd) / path).resolve() for path in record_edits(record) if path)
+                launched.update(dict.fromkeys(background_launches(record), record_time(record)))
+                finished.update(finished_tasks(record))
                 state = turn_state(record) or state
     except OSError:
-        return None
-    return edits
+        return None, set()
+    return edits, still_running(launched, finished)
 
 
 def glob_regex(pattern):
@@ -216,7 +448,8 @@ def related_tests(root, changed, config):
                     tests += expand(root, [targets] if isinstance(targets, str) else targets, stem)
         else:
             tests += convention_tests(root, path)
-    return list(dict.fromkeys(t for t in tests if not t.startswith('.')))
+    # A deleted test file maps to itself but no longer exists: only existing tests run.
+    return list(dict.fromkeys(t for t in tests if not t.startswith('.') and (root / t).is_file()))
 
 
 def nearest(root, path, name):
@@ -331,20 +564,40 @@ def load_config(root):
 def verdict(event):
     if event.get('stop_hook_active'):
         return None
-    top = git(event.get('cwd') or os.getcwd(), 'rev-parse', '--show-toplevel')
-    if not top:
+    cwd = event.get('cwd') or os.getcwd()
+    root = repo_root(cwd)
+    if not root:
         return None
-    root = Path(top.strip())
-    changed = changed_files(root)
-    edits = session_edits(event.get('transcript_path'), event.get('cwd') or os.getcwd())
-    if edits is not None:
-        changed = [path for path in changed if (root / path).resolve() in edits]
+    file = snapshot_file(event['session_id'], root) if event.get('session_id') else None
+    data = load_snapshot(file) if file else None
+    transcript = event.get('transcript_path')
+    # A snapshot past the transcript's end belongs to an earlier or truncated transcript: not this turn's.
+    snap = data if data and data.get('offset', 0) <= transcript_size(transcript) else None
+    edits, pending = read_turn(transcript, cwd, snap.get('offset', 0) if snap else None)
+    if pending:
+        return None  # a background agent or workflow is still part of this turn; a later Stop tests it
+    changed = snapshot_changes(root, snap, edits) if snap else None
+    if changed is None:
+        changed = changed_files(root)
+        if edits is not None:
+            changed = [path for path in changed if (root / path).resolve() in edits]
+    result, finished = test_changes(root, changed)
+    if finished and file:
+        file.unlink(missing_ok=True)  # the turn is tested; the next prompt takes a new snapshot
+    elif result and data:
+        write_snapshot(file, {**data, 'blocked': True})  # the next prompt replaces it
+    return result
+
+
+def test_changes(root, changed):
+    """(verdict, finished): the deny verdict when related tests fail, and whether the turn's testing is
+    done (False on a failure or a timeout, so the snapshot stays and the next Stop tests again)."""
     if not changed:
-        return None
+        return None, True
     config = load_config(root)
     tests = related_tests(root, changed, config)
     if not tests:
-        return None
+        return None, True
     if config.get('command'):
         commands = [(root, config['command'].replace('{files}', shlex.join(tests)))]
     else:
@@ -360,18 +613,22 @@ def verdict(event):
         code, output = run_all(commands, int(config.get('timeout', DEFAULT_TIMEOUT)))
         if code is None:
             print('related-tests: timed out; the turn may end', file=sys.stderr)
-            return None
+            return None, False
         CACHE.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps({'exit': code, 'output': output, 'tests': tests}))
     if code == 0:
-        return None
+        return None, True
     tail = '\n'.join(output.splitlines()[-TAIL_LINES:])
     return {'decision': 'deny',
             'reason': f'Related tests fail ({", ".join(tests)}). Fix them before finishing. '
-                      f'Full log: {cache}\n\n{tail}'}
+                      f'Full log: {cache}\n\n{tail}'}, False
 
 
 if __name__ == '__main__':
-    result = verdict(json.loads(sys.stdin.read() or '{}'))
-    if result:
-        print(json.dumps(result))
+    hook_event = json.loads(sys.stdin.read() or '{}')
+    if '--snapshot' in sys.argv[1:]:
+        snapshot(hook_event)
+    else:
+        result = verdict(hook_event)
+        if result:
+            print(json.dumps(result))

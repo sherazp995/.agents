@@ -32,6 +32,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / 'bin'
 # Native event name -> normalized name. Claude and Codex share these names.
 EVENTS = {
     'SessionStart': 'session_started',
+    'UserPromptSubmit': 'prompt_submitted',
     'PreToolUse': 'before_tool',
     'PostToolUse': 'after_tool',
     'Stop': 'turn_completed',

@@ -1,0 +1,3 @@
+#!/bin/sh
+# UserPromptSubmit hook: record the turn-start snapshot that the related-tests Stop hook diffs against.
+exec "$(dirname "$0")/related-tests" --snapshot

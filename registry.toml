@@ -42,6 +42,7 @@ account_links = [
 separate = ["~/.claude.json", ".claude.json"]
 memory = "native auto-memory; projects/<key>/memory link into memory/scopes, created by the SessionStart hook"
 hooks = [
+  { name = "related-tests-snapshot", event = "UserPromptSubmit", kind = "command", matcher = "", timeout = 60 },
   { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 300 },
   { name = "completion-check", event = "Stop", kind = "prompt", matcher = "" },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
