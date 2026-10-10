@@ -1,4 +1,4 @@
-"""The related-tests Stop hook: map changed files to tests, run them, block on failure."""
+"""The related-tests Stop hook: map the session's changed files to tests, run them, block on failure."""
 from importlib.machinery import SourceFileLoader
 import json
 import os
@@ -22,10 +22,10 @@ class RelatedTestsHookTests(unittest.TestCase):
         self.repo.mkdir()
         self.cache = Path(self.tmp.name) / 'cache'
         for args in (['init', '-q'], ['config', 'user.email', 't@t'], ['config', 'user.name', 't']):
-            subprocess.run(['git', '-C', str(self.repo), *args], check=True)
+            self.git(*args)
         self.write('README', 'x\n')
-        subprocess.run(['git', '-C', str(self.repo), 'add', '.'], check=True)
-        subprocess.run(['git', '-C', str(self.repo), 'commit', '-qm', 'init'], check=True)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'init')
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -34,6 +34,23 @@ class RelatedTestsHookTests(unittest.TestCase):
         file = self.repo / path
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(text)
+
+    def git(self, *args):
+        subprocess.run(['git', '-C', str(self.repo), *args], check=True)
+
+    def transcript(self, *records):
+        file = Path(self.tmp.name) / 'session.jsonl'
+        file.write_text(''.join(json.dumps(record) + '\n' for record in records))
+        return str(file)
+
+    def claude_edit(self, path):
+        return {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'name': 'Write', 'input': {'file_path': str(self.repo / path)}}]}}
+
+    def codex_patch(self, path):
+        patch = f'*** Begin Patch\n*** Add File: {path}\n+x\n*** End Patch\n'
+        return {'type': 'response_item', 'payload': {'type': 'custom_tool_call', 'name': 'apply_patch',
+                                                     'input': patch}}
 
     def run_hook(self, **event):
         event = {'event': 'turn_completed', 'cwd': str(self.repo), **event}
@@ -54,23 +71,55 @@ class RelatedTestsHookTests(unittest.TestCase):
         self.write('tests/test_widget.py', PASSING)
         self.assertIsNone(self.run_hook())
 
+    def test_only_files_the_session_edited_are_tested(self):
+        self.write('tests/test_builder.py', FAILING)  # another agent's half-written file
+        self.write('notes.txt', 'mine\n')
+        mine = self.transcript(self.claude_edit('notes.txt'))
+
+        self.assertIsNone(self.run_hook(transcript_path=mine))
+        verdict = self.run_hook(transcript_path=self.transcript(self.codex_patch('tests/test_builder.py')))
+        self.assertIn('tests/test_builder.py', verdict['reason'])
+
+    def test_only_this_turns_edits_are_tested(self):
+        self.write('tests/test_widget.py', FAILING)
+        earlier_edit = self.claude_edit('tests/test_widget.py')
+        claude_prompt = {'type': 'user', 'message': {'role': 'user', 'content': 'a question'}}
+        codex_prompt = {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'a question'}}
+        tool_result = {'type': 'user', 'message': {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'x', 'content': 'ok'}]}}
+
+        self.assertIsNone(self.run_hook(transcript_path=self.transcript(earlier_edit, claude_prompt)))
+        self.assertIsNone(self.run_hook(transcript_path=self.transcript(earlier_edit, codex_prompt)))
+        verdict = self.run_hook(transcript_path=self.transcript(claude_prompt, earlier_edit, tool_result))
+        self.assertIn('tests/test_widget.py', verdict['reason'])
+        # A prompt queued while the turn runs lands after a tool result and keeps the turn's edits.
+        queued = self.transcript(claude_prompt, earlier_edit, tool_result, claude_prompt)
+        self.assertIn('tests/test_widget.py', self.run_hook(transcript_path=queued)['reason'])
+
     def test_no_changes_or_an_already_blocked_stop_end_silently(self):
         self.assertIsNone(self.run_hook())
         self.write('tests/test_widget.py', FAILING)
         self.assertIsNone(self.run_hook(stop_hook_active=True))
 
-    def test_project_toml_command_and_map_win_and_an_unchanged_state_is_cached(self):
+    def test_project_toml_command_and_map_win_and_only_an_unchanged_state_is_cached(self):
         log = Path(self.tmp.name) / 'runs.log'
         self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\n'
                                            '[tests.map]\n"src/**/*.txt" = ["checks/{stem}.sh"]\n')
         self.write('src/deep/note.txt', 'changed\n')
         self.write('checks/note.sh', f'echo ran >> {log}\necho custom failure\nexit 1\n')
 
-        first, second = self.run_hook(), self.run_hook()
+        session = self.transcript(self.claude_edit('src/deep/note.txt'))
+
+        first, second = self.run_hook(transcript_path=session), self.run_hook(transcript_path=session)
 
         self.assertIn('custom failure', first['reason'])
         self.assertEqual(first, second)
         self.assertEqual(log.read_text(), 'ran\n')  # the second stop read the cache
+        self.git('commit', '-q', '--allow-empty', '-m', 'new HEAD')
+        self.run_hook(transcript_path=session)
+        self.write('Gemfile.lock', 'changed dependency\n')
+        self.run_hook(transcript_path=session)
+        self.assertEqual(log.read_text(), 'ran\nran\nran\n')  # a new HEAD and a lockfile change each reran
 
 
 class ConventionTests(unittest.TestCase):

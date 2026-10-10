@@ -1,6 +1,7 @@
-Review a code change from its DIFF ONLY, the way GitHub Copilot's PR reviewer does. This is a read-only review: do not modify, commit or push anything, and do not open any other file.
+Review a code change from its DIFF ONLY, the way GitHub Copilot's PR reviewer does. This is a read-only review: do not modify, commit or push anything (the output file below is the one exception), and do not open any other file. Start no agents.
 
 - Diff: {DIFF}. Read it fully. It is all you get: no intent, no repo, no history.
+- Output file: {OUT}. When that is a file path, write your list there as well as returning it; it is the only file you may write, and a review lead running beside you waits for it. When it is `n/a` or still reads as a placeholder, only return the list.
 
 Over-flag on purpose. A later reviewer with full context will drop what is wrong, so recall matters more than precision here. Check every hunk for:
 - **Correctness edge cases:** boolean and nil handling (`return nil unless raw` silently drops a JSON `false`; check presence, not truthiness), off-by-one, defaults, empty, zero and negative values, comparison type mismatches.

@@ -2,12 +2,9 @@
 """Enforce the git rules agents tend to skip (AGENTS-RULES.md 43, 48 and 54) before a shell command runs.
 
 Reads the normalized hook event (see ../adapters/run.py). For a rule break it returns
-{"decision": "ask", "reason": ...}: Claude Code then asks the user, and Codex (which has
-no "ask") refuses and tells the agent to ask the user. Only the user can override.
-
-One break the agent can fix alone: a second commit on a branch with one unpushed commit.
-That returns {"decision": "deny"} with the amend command to run instead, so the agent
-self-corrects without bothering the user.
+{"decision": "deny", "reason": ...} that says what to run instead (the `cd` form of a
+`git -C` command, the amend command, a one-line message, or to leave the change uncommitted
+and report), so the agent corrects itself. It never asks the user: agents run unattended.
 """
 import json
 import os
@@ -245,23 +242,50 @@ def check_commit(directory, args):
     problems = []
     messages = commit_messages(args)
     if len(messages) > 1 or any('\n' in m.strip() for m in messages):
-        problems.append('rule 48: the commit message must be a single line')
+        problems.append(Correction('rule 48: the commit message must be a single line. Rerun it with one `-m "<one line>"`'))
     if any(ATTRIBUTION.search(m) for m in messages):
-        problems.append('rule 48: no Claude attribution in commits')
+        problems.append(Correction('rule 48: no Claude attribution in commits. Rerun it without the attribution line'))
+    if not os.path.isdir(directory):
+        return problems  # a path only the shell knows ($D from mktemp): not the user's branch
     has_head = git(directory, 'rev-parse', '--verify', '-q', 'HEAD') is not None
     unpushed = int(git(directory, 'rev-list', '--count', 'HEAD', '--not', '--remotes') or 0) if has_head else 0
     amend = '--amend' in args
     if unpushed > 1:
-        problems.append(f'rule 54: this branch already has {unpushed} unpushed commits; '
-                        'ask the user whether to squash them into one first')
+        problems.append(Correction(f'rule 54: this branch already has {unpushed} unpushed commits. Do not commit or '
+                                   'squash; leave the change uncommitted and tell the user the branch needs squashing first'))
     elif unpushed == 1 and not amend:
+        subject = git(directory, 'log', '-1', '--format=%s') or ''
         problems.append(Correction(
-            'rule 54: one unpushed commit already exists, so do not add a second one. Rerun this as '
+            f'rule 54: one unpushed commit already exists ("{subject}"), so do not add a second one. '
+            'If this change belongs with it, rerun this as '
             '`git commit --amend --no-edit` to fold the change into it, or `git commit --amend -m "<one line>"` '
-            'to also update its message'))
+            'to also update its message. If it is unrelated work, do not amend; report that the branch already holds it'))
     elif unpushed == 0 and amend and has_head:
-        problems.append('rule 54: --amend here would rewrite a commit that is already pushed')
+        problems.append(Correction('rule 54: --amend here would rewrite a commit that is already pushed. '
+                                   'Rerun it as a new commit, without --amend'))
     return problems
+
+
+def shell_path(path):
+    """A path as the agent should type it: `~` and `$NAME` stay live, anything unsafe is quoted."""
+    return path if re.fullmatch(r'[\w~$.{}/+:@%-]+', path) else shlex.quote(path)
+
+
+def rule_43_correction(options, subcommand, args):
+    """The git command rewritten to cd into each -C directory first, for the agent to rerun."""
+    dirs, rest, i = [], [], 0
+    while i < len(options):
+        if options[i] == '-C':
+            dirs.append(options[i + 1] if i + 1 < len(options) else '<dir>')
+            i += 2
+        else:
+            rest.append(options[i])
+            i += 1
+    rest += ([subcommand] if subcommand else []) + list(args)
+    cds = ' && '.join(f'cd {shell_path(d)}' for d in dirs)
+    rewritten = f'{cds} && git {shlex.join(rest)}'.rstrip()
+    return Correction('rule 43: run git from inside the repo, not with `git -C`. Rerun it as '
+                      f'`{rewritten}`, keeping anything that came before `git` (env assignments, wrappers)')
 
 
 def problems_in(parsed, cwd):
@@ -280,7 +304,8 @@ def problems_in(parsed, cwd):
             continue
         options, subcommand, args = invocation
         if '-C' in options:  # only git's own -C; `git log -C` is a different option
-            problems.append('rule 43: run git from inside the repo (cd into it), not with `git -C`')
+            problems.append(rule_43_correction(options, subcommand, args))
+            continue  # the rerun in the right directory gets the commit checks
         if subcommand == 'commit':
             problems += check_commit(directory, args)
     return problems
@@ -296,14 +321,15 @@ def verdict(event):
         command = command.replace('\\\n', '')
         if not re.search(r'\bgit\b[^\n]*(?:\bcommit\b|(?<!\S)-C(?:\s|$))', command):
             return None
-        problems = [f'could not check this git command against rules 43, 48 and 54 ({error})']
+        if not re.search(r'\bgit\b[^\n]*\bcommit\b', command):
+            return {'decision': 'deny', 'reason': 'Git rules (AGENTS-RULES.md): rule 43: this command could not be '
+                    f'parsed ({error}) and may use `git -C`. Rewrite it as plain `cd <dir> && git ...` commands.'}
+        return {'decision': 'deny', 'reason': 'Git rules (AGENTS-RULES.md): this command could not be checked against '
+                f'rules 43, 48 and 54 ({error}). Split it into simple commands, each `cd <dir> && git ...`, and rerun them.'}
     if not problems:
         return None
-    if all(isinstance(problem, Correction) for problem in problems):
-        return {'decision': 'deny', 'reason': 'Git rules (AGENTS-RULES.md): ' + '; '.join(problems) + '.'}
-    return {'decision': 'ask', 'reason': 'Git rules (AGENTS-RULES.md): ' + '; '.join(problems)
-            + '. Only the user can approve going ahead anyway.'}
-
+    # Every problem says what to do instead, so the agent corrects itself; nothing waits for the user.
+    return {'decision': 'deny', 'reason': 'Git rules (AGENTS-RULES.md): ' + '; '.join(problems) + '.'}
 
 if __name__ == '__main__':
     result = verdict(json.loads(sys.stdin.read() or '{}'))

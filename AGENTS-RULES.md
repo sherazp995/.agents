@@ -212,7 +212,7 @@ For purely additive diffs (new files, new functions, appended entries), run only
 Full integration runs happen once per phase in a dedicated task, not in every intermediate loop.
 
 ### 43. Run git from inside the repo, never with `git -C <path>`
-`cd` into the repo once, then run git there. (The `git-guard` hook enforces this in Claude Code and Codex.)
+`cd` into the repo once, then run git there. (The `git-guard` hook enforces this in Claude Code and Codex: it denies `git -C` with the same command rewritten as `cd <dir> && git ...`, so the agent reruns it without asking the user.)
 
 ### 44. Review every code change with the Unified Review Protocol (HARD REQUIREMENT)
 No code change is "done" until reviewed under the protocol below with verdict **PASS**: every introduced blocker resolved, every introduced high and medium fixed. Protocol is identical for self-review, Codex, or dispatched subagents.
@@ -255,7 +255,7 @@ Counts (introduced / pre-existing): blocker A/B · high C/D · medium E/F · low
 When zero introduced blocker/high/medium findings, emit: `Verdict: PASS` + `✅ LGTM: No critical issues found.`
 
 ### 54. Keep exactly one unpushed commit per branch
-Before committing, count unpushed commits with `git rev-list --count HEAD --not --remotes`. If one exists, fold the new work into it with `git commit --amend --no-edit` (or `--amend -m` to update the one-line message) without asking; if several exist, ask the user whether to squash them first. Never rewrite a commit that is already on a remote. (The `git-guard` hook enforces this for commits and amends in Claude Code and Codex; resets, rebases and force-pushes are on you.)
+Before committing, count unpushed commits with `git rev-list --count HEAD --not --remotes`. If one exists, fold the new work into it with `git commit --amend --no-edit` (or `--amend -m` to update the one-line message) without asking; if several exist, do not commit or squash: leave the change uncommitted and tell the user the branch needs squashing first. Never rewrite a commit that is already on a remote. (The `git-guard` hook enforces this for commits and amends in Claude Code and Codex; resets, rebases and force-pushes are on you.)
 
 ## Communication Style
 

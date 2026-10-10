@@ -1,4 +1,4 @@
 interface:
   display_name: "Branch Visual QA and Review"
-  short_description: "Browser QA and Cohabit code review in one report"
-  default_prompt: "Use $branch-visual-qa to test this branch and, for cohabit-web, run $cohabit_pr_review on the same snapshot; combine review comments, test evidence and matched screenshots in one local index.html report without changing the branch."
+  short_description: "Browser QA and code review in one report"
+  default_prompt: "Use $branch-visual-qa to test this branch and run $general-review on the same snapshot; combine review comments, test evidence and matched screenshots in one local index.html report without changing the branch."

@@ -106,12 +106,14 @@ memory = "agents-hub (instructions in AGENTS.md)"
 
 # Claude permission rules install.py keeps in ~/.claude/settings.json permissions.allow.
 # Only rules install.py added itself (listed in ~/.claude/agents-hub-permissions.json)
-# are ever removed; rules you added by hand stay. Read-only commands, tests and linters only.
+# are ever removed; rules you added by hand stay. Read-only git and gh commands; git add and
+# git commit, which write but stay guarded by git-guard (rules 48 and 54); and test runners and
+# linters, which are not read-only either: they run the repository's own code.
 [permissions]
 claude = [
   "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
   "Bash(git blame:*)", "Bash(git rev-parse:*)", "Bash(git branch --show-current:*)", "Bash(git branch --list:*)", "Bash(git merge-base:*)",
-  "Bash(git ls-files:*)", "Bash(git rev-list:*)", "Bash(git fetch:*)",
+  "Bash(git ls-files:*)", "Bash(git rev-list:*)", "Bash(git fetch:*)", "Bash(git add:*)", "Bash(git commit:*)",
   "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr diff:*)", "Bash(gh pr list:*)",
   "Bash(gh run view:*)", "Bash(gh run list:*)",
   "Bash(bundle exec rspec:*)", "Bash(bundle exec rubocop:*)", "Bash(npx eslint:*)",

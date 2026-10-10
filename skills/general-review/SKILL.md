@@ -21,7 +21,7 @@ Pick the mode before P0:
 
 | Mode | When | How |
 | --- | --- | --- |
-| Single review | Uncommitted work, selected files, a whole codebase, or one PR or branch. | One fresh lead agent runs sections 1 to 6 ([single lead](references/single-lead.md)); this session coordinates (see "Who reviews"). Findings are proven by reading code and running read-only checks. |
+| Single review | Uncommitted work, selected files, a whole codebase, or one PR or branch. | One fresh lead agent runs sections 1 to 6 ([single lead](references/single-lead.md)), with a sibling diff-only agent; this session coordinates (see "Who reviews"). Findings are proven by reading code and running read-only checks. |
 | PR batch | Two or more PRs or branches, or any PR or branch request with "batch", "prove with tests", "in parallel", or a repo profile in `profiles/` that the user asks to use. | [PR batch mode](references/pr-batch.md): one lead agent per target proves each finding with a throwaway test in an isolated worktree. Its leads use this file's severity, origin, root-cause and verdict rules. |
 
 When the mode is unclear for a single PR or branch, use single review and mention that PR batch mode can prove findings with tests.
@@ -34,36 +34,52 @@ The review is always done by an agent that did not write or discuss the change. 
 
 Coordinator steps for a single review (PR batch has its own in [PR batch mode](references/pr-batch.md)):
 
-1. **Identity and scope.** Set RUNNER, RUN_ID, REPO and REVIEW_TMP ([ledger](references/ledger.md)). Freeze the target: its kind, base and head (fetch first for a PR or branch, as in section 1), or the manifest and STATE for uncommitted work or files. Write the manifest to `REVIEW_TMP/<KEY>/manifest.txt`.
+1. **Identity and scope.** Set RUNNER, RUN_ID, REPO and REVIEW_TMP ([ledger](references/ledger.md)). Freeze the target: its kind, base and head (fetch first for a PR or branch, as in section 1), or the manifest and STATE for uncommitted work or files. Write the manifest to `REVIEW_TMP/<KEY>/manifest.txt` and the frozen diff to `REVIEW_TMP/<KEY>/diff.patch` (for uncommitted work, the tracked diff plus each untracked file in scope as `git diff --no-index /dev/null <file>`; for a codebase or current-file assessment, write `n/a`).
 2. **Ledger lookup.** Note READ_RUN_ID and pick review, recheck or "no changes". For "no changes", report it and stop; no lead starts. Otherwise write `REVIEW_TMP/<KEY>/earlier.md` as defined under EARLIER in the ledger file.
 3. **Intent, requirements only.** Write the user's request in their words, the PR title and description, the ticket and acceptance criteria, and any plan requirements the user approved. Leave out this session's own explanations of how the code works or why it is correct, and its claims about what is fixed: the lead must judge those fresh.
-4. **Start the lead.** One fresh `general-purpose` agent, not a fork (a fork inherits this conversation), with `references/single-lead.md` and every placeholder filled (`EARLIER_DIR` = `REVIEW_TMP/<KEY>`, `EARLIER` = its `earlier.md`, `INTENT` = the text from step 3, `LENS` = `all`, or the one lens of a single-lens run). Wait for it.
+4. **Start the lead and the diff-only agent side by side.** Subagents cannot start subagents, so the coordinator starts both, in one message, as siblings:
+   - the lead: one fresh `general-purpose` agent, not a fork (a fork inherits this conversation), with `references/single-lead.md` and every placeholder filled (`EARLIER_DIR` = `REVIEW_TMP/<KEY>`, `EARLIER` = its `earlier.md`, `INTENT` = the text from step 3, `LENS` = `all`, or the one lens of a single-lens run, `TIER` from "Review tiers");
+   - the diff-only agent: one fresh `general-purpose` agent with `references/lenses/diff-only.md`, `{DIFF}` = `REVIEW_TMP/<KEY>/diff.patch` and `{OUT}` = `REVIEW_TMP/<KEY>/diff-only.md`, and nothing else (model and effort in "Review lenses"). Skip it for a codebase or current-file assessment and for a structural single-lens run.
+
+   The diff-only agent writes its list to `diff-only.md`; the lead waits for that file before its section 5 merge and re-proves every candidate in it. If the agent fails or returns without writing the file, write its returned list there yourself, or `diff-only: not run (<reason>)` so the lead records the limitation instead of waiting. Wait for the lead.
 5. **Spot-check.** For each blocker or high finding, read only the cited lines. If the code does not support a claim, or a dropped finding looks real, ask the lead one question with SendMessage before relaying.
 6. **Record and relay.** Corrections come only from the lead, which amends its own `REVIEW_TMP/<KEY>/record.md` after your step 5 question; you never change a status, severity or line. If you still disagree, add a `coordinator_note: <finding id> — <reason>` line and say so in the relay. Publish the record with `scripts/publish_record.py` (ledger "Locking"), run cleanup, then relay the lead's report as it is, one line per correction, and the final line. A lead that returns no record.md is reported "incomplete, not recorded".
 
-**Fallback:** when the host has no agent tool, or the user explicitly asks for an inline review, run sections 1 to 6 in this session and start the report with "Not independent: reviewed by the session that requested it."
+**Fallback:** when the host has no agent tool, or the user explicitly asks for an inline review, run sections 1 to 6 in this session and start the report with "Not independent: reviewed by the session that requested it." Run the diff-only pass first, from `diff.patch` alone, before reading other files, and record in the verification log that it was not blind to this session's context.
 
 **Both modes keep a ledger.** Read [the review ledger](references/ledger.md) in P0, before any write. It sets the runner identity and run ID, the per-repo ledger location and lock, the record key for each kind of target, and whether this run is a first review, a recheck of new changes, or "no changes since the last review". `--full` or "full review" archives the record and starts fresh.
 
 ## Review lenses
 
-Every review runs these five lenses over the same frozen scope, then merges them into one list (section 5). A small diff still runs all five, reported compactly.
+Every review runs these five lenses over the same frozen scope, then merges them into one list (section 5). A small diff still runs all five, reported compactly; only a self-review at the small tier runs fewer ("Review tiers" below).
 
 | Lens | What it covers | Who runs it, model and effort | Source |
 | --- | --- | --- | --- |
 | Senior engineer | Correctness, regressions and blast radius, security, data, concurrency, performance, compatibility, tests. | Single: the lead (session model, effort high). Batch: Codex `gpt-6-astra`, reasoning high. | [Review checklist](references/review-checklist.md) steps 1 to 11. |
 | Structural (thermo-nuclear) | Code-judo simplifications, spaghetti growth, files crossing 1000 lines, thin wrappers, casts and optionality, logic in the wrong layer. | Single: the lead. Batch: a fresh agent, sonnet, effort high. | [Structural lens](references/structural-lens.md), standards in [structural standards](references/structural-standards.md). |
 | Simplicity and architecture | Whether this is the simplest correct change, in the right layer, reusing existing facilities; dead code the change leaves behind; over-deletion of live code. | Single: the lead. Batch: two fresh agents, sonnet, effort medium. | Section 2 and checklist steps 3 and 12; batch prompts in `references/lenses/`. |
-| Diff-only blind pass | What GitHub Copilot posts on a PR: nil versus false, method visibility, error paths, layer consistency, accessibility, stale comments, config parsing, test gaps, hygiene. | Always a separate fresh agent that receives only the diff: sonnet, effort low. | [Diff-only lens](references/lenses/diff-only.md). |
+| Diff-only blind pass | What GitHub Copilot posts on a PR: nil versus false, method visibility, error paths, layer consistency, accessibility, stale comments, config parsing, test gaps, hygiene. | A separate fresh agent that receives only the diff, started by the coordinator next to the lead (never by the lead: subagents cannot nest): sonnet, effort low. | [Diff-only lens](references/lenses/diff-only.md). |
 | Codex second opinion | An independent review by the other model, run read-only and in parallel: Codex on `gpt-6-astra` when Claude hosts the review, Claude when Codex hosts it. | `gpt-6-astra`, reasoning high (Claude on the session model when Codex hosts). | [Codex handoff](references/codex-handoff.md). |
 
-Pass the model and effort to each agent call when the host's agent tool accepts them; otherwise record the default used in the verification log. The diff-only agent gets the lens prompt with `{DIFF}` set to a file holding the frozen diff, and nothing else: no intent, no conversation, no other paths.
+Pass the model and effort to each agent call when the host's agent tool accepts them; otherwise record the default used in the verification log. The diff-only agent gets the lens prompt with `{DIFF}` set to a file holding the frozen diff and `{OUT}` set to the file it writes its list to, and nothing else: no intent, no conversation, no other paths.
 
-Start the Codex review and the diff-only agent as soon as the scope is frozen (end of P0) so they run while you review. Their findings are candidates, never results, until re-proven in P4.
+The coordinator starts the diff-only agent with the lead ("Who reviews" step 4); the lead starts the Codex review as soon as it has read the frozen scope (end of P0) so it runs while the lead reviews. Their findings are candidates, never results, until the lead re-proves them in P4.
+
+### Review tiers
+
+A standalone review request always runs at the normal tier. When an authorized implementation task self-reviews (rule 44, for example the doing-substantial-work build workflow), the caller picks a tier from the change and passes it as `TIER`:
+
+| Tier | When | Lenses | Rounds |
+| --- | --- | --- | --- |
+| small | 3 changed files or fewer and none of the caller's escalation categories (schema or data migration, auth, payments, unresolved design). | The lead's senior engineer lens plus the diff-only agent; no structural, simplicity or Codex lens. | 2: one fix, then a recheck of the fix diff |
+| normal | Everything else. | Senior, structural, simplicity and diff-only, each required; Codex when it is installed, its absence recorded as a limitation. | Up to 3 |
+| risky | Any escalation category. | The same lenses as normal, each required (Codex when installed, its absence recorded as a limitation); a required lens that did not run means the caller must not treat the round as done. The lead checks the escalation paths hardest. | Up to 3 |
+
+The lead lists the lenses that actually ran (`Lenses run:` in the verification log), so the caller can check the tier was honoured instead of trusting the verdict line. Round 1 reviews the whole frozen change. Each later round rechecks only the earlier findings plus the fix diff since the previous round (a new `diff.patch` holding that fix diff for the diff-only agent); it does not reopen an unbounded audit (see [review closure](references/review-closure.md)).
 
 ### Single-lens runs
 
-Two aliases run one lens on its own with the same scope, re-proof, severity, origin and report rules. The coordinator runs "Who reviews" steps 1, 3 and 4 only (no ledger lookup or record), and tells the lead which lens to run. For the diff-only lens the lead starts the diff-only agent and re-proves its list with full context; for the structural lens the lead applies it itself.
+Two aliases run one lens on its own with the same scope, re-proof, severity, origin and report rules. The coordinator runs "Who reviews" steps 1, 3 and 4 only (no ledger lookup or record), and tells the lead which lens to run. For the diff-only lens the coordinator starts the diff-only agent (step 4; it may start the lead after the agent returns, since the lead has nothing else to do) and the lead re-proves its list with full context; for the structural lens the coordinator starts no diff-only agent and the lead applies the lens itself. Neither alias asks a subagent to start another agent.
 
 - `copilot-review`: only the diff-only blind pass, then the re-proof in section 5. When the user also asked for fixes, the session that invoked the alias then fixes the kept findings one at a time, smallest change first, and runs the narrow tests and linter. Without that request it reports only.
 - `thermo-nuclear-code-quality-review` and `/thermonuke`: only the structural lens, reported in the section 6 template.

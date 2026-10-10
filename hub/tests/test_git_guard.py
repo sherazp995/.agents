@@ -54,40 +54,56 @@ class GitGuardTests(unittest.TestCase):
         verdict = self.verdict("git commit -m 'More'")
         self.assertEqual(verdict['decision'], 'deny')
         self.assertIn('git commit --amend --no-edit', verdict['reason'])
+        self.assertIn('("c0")', verdict['reason'])
         self.assertNotIn('user', verdict['reason'])
         self.assertIsNone(self.guard("git commit --amend --no-edit"))
 
-    def test_a_second_commit_with_a_rule_48_break_still_asks_the_user(self):
+    def test_a_second_commit_with_a_rule_48_break_is_denied_with_both_corrections(self):
         self.commit(1)
 
         verdict = self.verdict("git commit -m 'Title' -m 'Body'")
-        self.assertEqual(verdict['decision'], 'ask')
+        self.assertEqual(verdict['decision'], 'deny')
         self.assertIn('--amend', verdict['reason'])
+        self.assertIn('one `-m', verdict['reason'])
 
-    def test_several_unpushed_commits_ask_about_squashing_even_for_amend(self):
+    def test_git_dash_c_is_denied_with_the_command_rewritten_to_cd_first(self):
+        verdict = self.verdict("git -C '/tmp/a b' log -1 --format=%s")
+        self.assertEqual(verdict['decision'], 'deny')
+        self.assertIn("`cd '/tmp/a b' && git log -1 --format=%s`", verdict['reason'])
+        self.assertIsNone(self.verdict('git log -C -1'))
+
+    def test_several_unpushed_commits_deny_and_say_to_leave_it_uncommitted_and_report(self):
         self.commit(2)
 
         for command in ("git commit -m 'x'", 'git commit --amend --no-edit'):
             verdict = self.verdict(command)
-            self.assertEqual(verdict['decision'], 'ask', command)
-            self.assertIn('ask the user whether to squash', verdict['reason'])
+            self.assertEqual(verdict['decision'], 'deny', command)
+            self.assertIn('leave the change uncommitted and tell the user', verdict['reason'])
 
-    def test_amending_a_pushed_commit_asks(self):
+    def test_amending_a_pushed_commit_is_denied_with_a_new_commit_instead(self):
         self.commit(1)
         self.push_all()
 
         verdict = self.verdict('git commit --amend --no-edit')
-        self.assertEqual(verdict['decision'], 'ask')
-        self.assertIn('already pushed', verdict['reason'])
+        self.assertEqual(verdict['decision'], 'deny')
+        self.assertIn('already pushed. Rerun it as a new commit', verdict['reason'])
 
-    def test_multi_line_messages_and_claude_attribution_ask(self):
+    def test_no_rule_break_ever_asks_the_user(self):
+        self.commit(2)
+        for command in ("git commit -m 'x'", "git -C . commit -m 'a' -m 'b'", "git commit -m x\necho '"):
+            self.assertEqual(self.verdict(command)['decision'], 'deny', command)
+
+    def test_multi_line_messages_and_claude_attribution_are_denied(self):
         self.assertIn('single line', self.guard("git commit -m 'Title' -m 'Body'"))
         heredoc = "git commit -m \"$(cat <<'EOF'\nTitle\n\nBody\nEOF\n)\""
         self.assertIn('single line', self.guard(heredoc) or '')
         self.assertIn('attribution', self.guard("git commit -m 'Fix Co-Authored-By: Claude <x>'"))
 
-    def test_git_dash_c_asks(self):
+    def test_git_dash_c_is_denied_with_cd_rewrites_that_keep_home_and_variables_live(self):
         self.assertIn('rule 43', self.guard(f'git -C {self.repo} status'))
+        self.assertIn('`cd ~/repo && git log`', self.guard('git -C ~/repo log'))
+        self.assertIn('`cd $HOME/repo && git log`', self.guard('git -C $HOME/repo log'))
+        self.assertIn('`cd a && cd b && git log`', self.guard('git -C a -C b log'))
 
     def test_cd_into_another_repo_checks_that_repo(self):
         self.commit(1)
@@ -95,8 +111,10 @@ class GitGuardTests(unittest.TestCase):
 
         self.assertIn('--amend', self.guard(f"cd {self.repo} && git commit -m 'x'", cwd=elsewhere))
 
-    def test_a_git_commit_that_cannot_be_checked_is_asked_about(self):
-        self.assertIn('could not check', self.guard("cd /no/such/folder && git commit -m 'x'"))
+    def test_a_commit_in_a_folder_only_the_shell_knows_is_allowed(self):
+        self.assertIsNone(self.guard("D=$(mktemp -d); cd $D && git init -q && git commit -m 'x'"))
+        self.assertIsNone(self.guard("cd /no/such/folder && git commit -m 'x'"))
+        self.assertIn('single line', self.guard("cd $D && git commit -m 'a' -m 'b'") or '')
 
     def test_commits_hidden_by_newlines_comments_or_subshells_are_still_checked(self):
         self.commit(1)
@@ -147,11 +165,12 @@ class GitGuardTests(unittest.TestCase):
         self.assertIn('--amend', self.guard(f'echo "$(cd {elsewhere})"; git commit -m two') or '')
         self.assertIn('--amend', self.guard(f'cd {self.repo}; echo "$(git commit -m two)"', cwd=elsewhere) or '')
 
-    def test_heredoc_apostrophes_and_parse_failures_still_ask_about_git_dash_c(self):
+    def test_heredoc_apostrophes_and_parse_failures_are_still_caught_for_git_dash_c(self):
         command = f"git -C {self.repo} status && cat <<EOF\ndon't\nEOF"
         self.assertIn('rule 43', self.guard(command) or '')
         self.assertIn('rule 43', self.guard("cat <<EOF\nit's literal\nEOF\ngit -C /tmp log") or '')
-        self.assertIn('could not check', self.guard(command + "\necho '") or '')
+        self.assertIn('could not be parsed', self.guard(command + "\necho '") or '')
+        self.assertIn('could not be checked', self.guard(f"git -C {self.repo} commit -m x\necho '") or '')
 
     def test_quoted_heredoc_substitutions_are_literal_but_unquoted_ones_execute(self):
         for delimiter in ("'EOF'", '"EOF"', r'\EOF'):

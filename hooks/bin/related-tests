@@ -2,8 +2,13 @@
 """Stop hook: run only the tests related to this turn's changed files.
 
 Reads the normalized hook event (see ../adapters/run.py). In the git repository of the
-event's cwd it takes the changed files (`git diff HEAD` names plus untracked files), maps
-each to its tests and runs only those. Failing tests block the stop with the output tail
+event's cwd it takes the changed files (`git diff HEAD` names plus untracked files) that this
+session edited itself in this turn, maps each to its tests and runs only those. The edits come
+from its transcript after the last user prompt (Claude Edit, Write, MultiEdit and NotebookEdit
+calls; Codex apply_patch), so a Stop during a build wave never tests files other agents are still
+writing, and a turn that edits nothing never retests an earlier turn's files. Files changed
+only through shell commands are not seen. Without a readable transcript every changed file
+counts. Failing tests block the stop with the output tail
 ({"decision": "deny", "reason": ...}). No changes, no related tests, a timeout or a hook
 already sending the agent back (stop_hook_active) let the turn end silently.
 
@@ -20,8 +25,8 @@ Otherwise conventions apply (a changed test file maps to itself):
 Without `command` each group runs with the repo's runner (rspec, rails test, vitest, jest,
 node --test, pytest or unittest).
 
-Results are cached by the hash of the commands and the changed and test files' contents
-(rule 41), in tmp/test-cache/related-tests/ of this hub, so an unchanged state never reruns.
+Results are cached by the hash of the commands, HEAD, the lockfiles beside each command and
+the changed and test files' contents (rule 41), in tmp/test-cache/related-tests/ of this hub, so an unchanged state never reruns.
 """
 import hashlib
 import json
@@ -41,6 +46,10 @@ TAIL_LINES = 60
 
 TEST_NAME = re.compile(r'(_spec|_test)\.rb$|^test_.*\.py$|_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$')
 JS_EXT = re.compile(r'\.[cm]?[jt]sx?$')
+EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+PATCH_TARGET = re.compile(r'^\*\*\* (?:Add File|Update File|Move to): (.+)$', re.M)
+LOCKFILES = ('Gemfile.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock',
+             'poetry.lock', 'uv.lock', 'Pipfile.lock', 'requirements.txt', 'Cargo.lock', 'go.sum')
 
 
 def git(root, *args):
@@ -56,6 +65,101 @@ def changed_files(root):
     untracked = git(root, 'ls-files', '--others', '--exclude-standard') or ''
     names = dict.fromkeys(line for line in (tracked + untracked).splitlines() if line)
     return [name for name in names if (root / name).is_file()]
+
+
+def strings(value):
+    """Every string inside a JSON value, decoding strings that are themselves JSON."""
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return [value]
+        return strings(decoded) if isinstance(decoded, (dict, list)) else [value]
+    if isinstance(value, dict):
+        return [s for item in value.values() for s in strings(item)]
+    if isinstance(value, list):
+        return [s for item in value for s in strings(item)]
+    return []
+
+
+def record_edits(record):
+    """Paths one transcript record edited, as written in the tool call."""
+    content = (record.get('message') or {}).get('content')
+    for block in content if isinstance(content, list) else []:  # Claude
+        if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name') in EDIT_TOOLS:
+            tool_input = block.get('input') or {}
+            yield tool_input.get('file_path') or tool_input.get('notebook_path') or ''
+    payload = record.get('payload')
+    if isinstance(payload, dict) and payload.get('type') in ('function_call', 'custom_tool_call'):  # Codex
+        for text in strings(payload.get('arguments') or payload.get('input') or ''):
+            yield from (match.strip() for match in PATCH_TARGET.findall(text))
+
+
+def is_user_prompt(record):
+    """True for a prompt the user typed: it starts a new turn. Tool results and meta records are not."""
+    payload = record.get('payload')
+    if record.get('type') == 'event_msg' and isinstance(payload, dict):  # Codex
+        return payload.get('type') == 'user_message'
+    if record.get('type') != 'user' or record.get('isMeta'):  # Claude
+        return False
+    content = (record.get('message') or {}).get('content')
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get('type') == 'text' for block in content
+    ) and not any(isinstance(block, dict) and block.get('type') == 'tool_result' for block in content)
+
+
+def turn_state(record):
+    """'ended' when a prompt after this record starts a new turn, 'open' when the turn is still running
+    (a tool call or its result), None for records that say neither."""
+    kind, payload = record.get('type'), record.get('payload')
+    if kind == 'assistant':  # Claude
+        return 'ended'
+    if kind == 'user' and not record.get('isMeta'):  # Claude: a tool result (prompts are handled first)
+        content = (record.get('message') or {}).get('content')
+        return 'open' if isinstance(content, list) else None
+    if not isinstance(payload, dict):
+        return None
+    ptype = payload.get('type') or ''
+    if kind == 'response_item':  # Codex
+        if ptype == 'message':
+            return 'ended' if payload.get('role') == 'assistant' else None
+        return 'open' if ptype.endswith(('_call', '_call_output')) else None
+    if kind == 'event_msg' and ptype in ('agent_message', 'task_complete', 'turn_aborted'):  # Codex
+        return 'ended'
+    return None
+
+
+def session_edits(transcript_path, cwd):
+    """Resolved paths edited this turn, or None when there is no transcript to read. A prompt the
+    user queues while a turn is running (straight after a tool call or result) does not start a new
+    turn, so the turn's earlier edits stay."""
+    if not transcript_path:
+        return None
+    edits, state = set(), None
+    try:
+        with open(transcript_path, errors='replace') as handle:
+            for line in handle:
+                if not any(word in line for word in ('tool_use', 'File: ', 'Move to: ', '"user', '"assistant',
+                                                     '_call', 'agent_message', 'task_complete', 'turn_aborted')):
+                    continue  # most records neither edit nor start or end a turn; skip parsing them
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if is_user_prompt(record):
+                    if state in (None, 'ended'):
+                        edits = set()
+                    state = 'prompt'
+                    continue
+                edits.update((Path(cwd) / path).resolve() for path in record_edits(record) if path)
+                state = turn_state(record) or state
+    except OSError:
+        return None
+    return edits
 
 
 def glob_regex(pattern):
@@ -175,6 +279,13 @@ def runner_commands(root, tests):
     return [(Path(cwd), list(argv) + [p for p in paths if p]) for (cwd, argv), paths in groups.items()]
 
 
+def lockfiles(root, commands):
+    """Repo-relative lockfiles in the repo root and in each command's folder."""
+    folders = dict.fromkeys([root, *(Path(cwd) for cwd, _ in commands)])
+    return [str((folder / name).relative_to(root)) for folder in folders for name in LOCKFILES
+            if (folder / name).is_file()]
+
+
 def file_digest(root, paths):
     digest = hashlib.sha256()
     for path in sorted(set(paths)):
@@ -225,6 +336,9 @@ def verdict(event):
         return None
     root = Path(top.strip())
     changed = changed_files(root)
+    edits = session_edits(event.get('transcript_path'), event.get('cwd') or os.getcwd())
+    if edits is not None:
+        changed = [path for path in changed if (root / path).resolve() in edits]
     if not changed:
         return None
     config = load_config(root)
@@ -235,8 +349,9 @@ def verdict(event):
         commands = [(root, config['command'].replace('{files}', shlex.join(tests)))]
     else:
         commands = runner_commands(root, tests)
-    digest = file_digest(root, changed + tests)
-    digest.update(json.dumps([str(root), [[str(c), a] for c, a in commands]]).encode())
+    digest = file_digest(root, changed + tests + lockfiles(root, commands))
+    head = (git(root, 'rev-parse', 'HEAD') or '').strip()
+    digest.update(json.dumps([str(root), head, [[str(c), a] for c, a in commands]]).encode())
     cache = CACHE / f'{digest.hexdigest()}.json'
     try:
         cached = json.loads(cache.read_text())
