@@ -139,3 +139,5 @@ stay in Time Machine backups; the rebuildable `chats/` index does not.
 `python3 check.py` runs every section (skills and rules, clients, Ponytail, hub)
 and lists all failures and warnings. Run it after installing, after an agent
 update (an app can replace a symlink), and whenever something looks off.
+`python3 check.py --repo-only` checks only the checkout (selected skills and
+AGENTS.md links), without a provisioned home; CI runs it.

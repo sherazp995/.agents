@@ -12,6 +12,7 @@ const fakeClaude = here('./fake-claude.mjs')
 const runner = here('../run-workflow.mjs')
 const councilScript = here('../../llm-council/council-workflow.js')
 const secondOpinionScript = here('../second-opinion.js')
+const buildScript = here('../../doing-substantial-work/build-workflow.js')
 
 process.env.WORKFLOW_RUNNER_CLAUDE = fakeClaude
 const { allowedScript, createRuntime, loadScript } = await import(runner)
@@ -128,6 +129,7 @@ test('a symlink to an approved workflow resolves to the approved file itself, ot
   const alias = join(dir, 'alias.js')
   symlinkSync(councilScript, alias)
   assert.equal(allowedScript(alias), realpathSync(councilScript))
+  assert.equal(allowedScript(buildScript), realpathSync(buildScript))
   assert.equal(allowedScript(join(dir, 'a.txt')), null)
   assert.equal(allowedScript(join(dir, 'missing.js')), null)
 })

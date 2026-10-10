@@ -29,7 +29,7 @@ mkdir -p "$REVIEW_TMP"
 cat > "$REVIEW_TMP/codex-review-<short-tag>.prompt" <<'CODEX_REVIEW_PROMPT'
 <prompt below>
 CODEX_REVIEW_PROMPT
-timeout 1800 codex exec -m gpt-6-astra --sandbox read-only --ephemeral --color never -c 'mcp_servers={}' - \
+timeout 1800 codex exec -m gpt-6-astra --sandbox read-only --ephemeral --color never -c 'model_reasoning_effort="high"' -c 'mcp_servers={}' - \
   < "$REVIEW_TMP/codex-review-<short-tag>.prompt" \
   > "$REVIEW_TMP/codex-review-<short-tag>.log" 2>&1
 ```

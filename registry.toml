@@ -42,6 +42,7 @@ account_links = [
 separate = ["~/.claude.json", ".claude.json"]
 memory = "native auto-memory; projects/<key>/memory link into memory/scopes, created by the SessionStart hook"
 hooks = [
+  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 300 },
   { name = "completion-check", event = "Stop", kind = "prompt", matcher = "" },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
@@ -61,6 +62,7 @@ memory_folder = "memories"
 separate = ["auth.json", "config.toml"]
 memory = "agents-hub memory show / add (instructions in AGENTS.md)"
 hooks = [
+  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 300 },
   { name = "completion-check", event = "Stop", kind = "command", matcher = "", timeout = 240 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
@@ -101,6 +103,22 @@ rules = "config.yaml"
 rules_mode = "merge"
 separate = []
 memory = "agents-hub (instructions in AGENTS.md)"
+
+# Claude permission rules install.py keeps in ~/.claude/settings.json permissions.allow.
+# Only rules install.py added itself (listed in ~/.claude/agents-hub-permissions.json)
+# are ever removed; rules you added by hand stay. Read-only commands, tests and linters only.
+[permissions]
+claude = [
+  "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+  "Bash(git blame:*)", "Bash(git rev-parse:*)", "Bash(git branch --show-current:*)", "Bash(git branch --list:*)", "Bash(git merge-base:*)",
+  "Bash(git ls-files:*)", "Bash(git rev-list:*)", "Bash(git fetch:*)",
+  "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr diff:*)", "Bash(gh pr list:*)",
+  "Bash(gh run view:*)", "Bash(gh run list:*)",
+  "Bash(bundle exec rspec:*)", "Bash(bundle exec rubocop:*)", "Bash(npx eslint:*)",
+  "Bash(npx vitest:*)", "Bash(npx jest:*)", "Bash(npm test:*)", "Bash(python3 -m unittest:*)",
+  "Bash(python3 -m pytest:*)", "Bash(node --test:*)", "Bash(node --check:*)",
+  "Bash(agents-hub search:*)", "Bash(agents-hub memory show:*)", "Bash(agents-hub recent:*)",
+]
 
 # Explicit scope sharing. Without an alias, a path only ever uses its own scope.
 # `path` may be a repository or any folder inside one.

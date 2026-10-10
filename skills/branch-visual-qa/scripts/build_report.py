@@ -115,7 +115,7 @@ def artifact_links(items):
 
 def review_html(review):
     status = review['status']
-    body = ('<section id="code-review"><h2>Combined QA and Cohabit PR review</h2>'
+    body = ('<section id="code-review"><h2>Combined QA and code review</h2>'
             f'<p class="status {review["combined_status"]}"><strong>Combined result: '
             f'{esc(review["combined_status"])}</strong></p>'
             f'<p>{esc(review["combined_result"])}</p>'

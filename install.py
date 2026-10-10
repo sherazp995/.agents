@@ -37,6 +37,7 @@ CRON_MARK = '# agents-hub scheduled job'
 INTERVAL_SECONDS = 900
 PROVISION_TIMEOUT = 20
 HOOK_CONFIG = {'claude': 'settings.json', 'codex': 'hooks.json'}
+PERMISSIONS_STATE = 'agents-hub-permissions.json'  # the allow rules install.py added
 
 
 def write_json(path, data):
@@ -48,6 +49,26 @@ def write_json(path, data):
     if real.exists():
         shutil.copymode(real, temporary)
     os.replace(temporary, real)
+
+
+def merge_permissions(config, owned, wanted):
+    """(new config, rules the hub now owns, change messages) for permissions.allow.
+
+    Rules in `owned` that are no longer `wanted` are removed; `wanted` rules that are missing are
+    appended and become owned; a wanted rule already present and not owned stays the user's.
+    """
+    allow = (config.get('permissions') or {}).get('allow') or []
+    dropped = [rule for rule in owned if rule not in wanted]
+    kept = [rule for rule in allow if rule not in dropped]
+    added = [rule for rule in dict.fromkeys(wanted) if rule not in kept]
+    now_owned = [rule for rule in dict.fromkeys(wanted) if rule in owned or rule in added]
+    messages = [f'allow {rule}' for rule in added]
+    messages += [f'removed allow {rule} (no longer in registry.toml)' for rule in dropped if rule in allow]
+    if not messages:
+        return config, now_owned, []
+    updated = copy.deepcopy(config)
+    updated.setdefault('permissions', {})['allow'] = kept + added
+    return updated, now_owned, messages
 
 
 class Installer:
@@ -339,6 +360,34 @@ class Installer:
             events.setdefault(event, []).append({**({'matcher': matcher} if matcher else {}), 'hooks': [hook]})
         return updated, messages
 
+    # permissions
+
+    def permissions(self, client):
+        """Merge the registry's [permissions] list for this client into settings.json permissions.allow.
+
+        A permission rule cannot carry a marker, so the rules install.py added are recorded in
+        PERMISSIONS_STATE next to settings.json. Only those are ever removed; a rule that was
+        already there (the user's own) is never recorded, so it stays when the hub drops it.
+        """
+        wanted = registry.load(HUB).get('permissions', {}).get(client['name'], [])
+        primary, _extras = registry.profiles(self.home, client)  # extras share settings.json
+        if client['name'] != 'claude':
+            if wanted:
+                self.conflicts.append(f"{client['name']}: permissions are supported only for claude")
+            return
+        state_path = primary / PERMISSIONS_STATE
+        if not primary.is_dir() or (not wanted and not state_path.exists()):
+            return
+        config_path = primary / 'settings.json'
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        updated, owned, messages = merge_permissions(config, state.get('allow', []), wanted)
+        if messages:
+            self.change(f'{config_path}: ' + '; '.join(messages), lambda: write_json(config_path, updated))
+        if owned != state.get('allow'):
+            self.change(f'write {state_path}',
+                        lambda: write_json(state_path, {'_comment': MARKER, 'allow': owned}))
+
     # command line and scheduler
 
     def cli(self):
@@ -442,6 +491,7 @@ class Installer:
                 self.rules(client)
                 self.agents(client)
                 self.hooks(client)
+                self.permissions(client)
         self.claude_memory()
         self.skill_dirs()
         self.cli()

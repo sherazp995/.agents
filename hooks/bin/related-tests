@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Stop hook: run only the tests related to this turn's changed files.
+
+Reads the normalized hook event (see ../adapters/run.py). In the git repository of the
+event's cwd it takes the changed files (`git diff HEAD` names plus untracked files), maps
+each to its tests and runs only those. Failing tests block the stop with the output tail
+({"decision": "deny", "reason": ...}). No changes, no related tests, a timeout or a hook
+already sending the agent back (stop_hook_active) let the turn end silently.
+
+Mapping: a repo file `.agents/project.toml` wins when it has a [tests] table:
+    [tests]
+    command = "bin/rails test {files}"    # {files}: the matched test paths, shell-quoted
+    timeout = 300                         # seconds for the whole run
+    [tests.map]
+    "app/**/*.rb" = ["test/**/{stem}_test.rb"]   # {stem}: changed file name without extension
+Otherwise conventions apply (a changed test file maps to itself):
+    Ruby  app/**/x.rb, lib/**/x.rb -> spec/**/x_spec.rb, test/**/x_test.rb
+    JS/TS dir/x.ts -> dir/x.test.*, dir/x.spec.*, dir/__tests__/x.*
+    Python a/b.py -> tests/test_b.py, a/test_b.py
+Without `command` each group runs with the repo's runner (rspec, rails test, vitest, jest,
+node --test, pytest or unittest).
+
+Results are cached by the hash of the commands and the changed and test files' contents
+(rule 41), in tmp/test-cache/related-tests/ of this hub, so an unchanged state never reruns.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+import tomllib
+
+HUB = Path(__file__).resolve().parents[2]
+CACHE = Path(os.environ.get('RELATED_TESTS_CACHE') or HUB / 'tmp' / 'test-cache' / 'related-tests')  # git-ignored
+DEFAULT_TIMEOUT = 270  # below the registry timeout so the hook answers before the host kills it
+TAIL_LINES = 60
+
+TEST_NAME = re.compile(r'(_spec|_test)\.rb$|^test_.*\.py$|_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$')
+JS_EXT = re.compile(r'\.[cm]?[jt]sx?$')
+
+
+def git(root, *args):
+    result = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def changed_files(root):
+    """Repo-relative paths that differ from HEAD or are untracked, and still exist."""
+    tracked = git(root, 'diff', 'HEAD', '--name-only')
+    if tracked is None:  # no commit yet: everything tracked counts as changed
+        tracked = git(root, 'ls-files') or ''
+    untracked = git(root, 'ls-files', '--others', '--exclude-standard') or ''
+    names = dict.fromkeys(line for line in (tracked + untracked).splitlines() if line)
+    return [name for name in names if (root / name).is_file()]
+
+
+def glob_regex(pattern):
+    """A glob with ** (any directories) as a full-match regex."""
+    out, i = '', 0
+    while i < len(pattern):
+        if pattern.startswith('**/', i):
+            out, i = out + '(?:.*/)?', i + 3
+        elif pattern.startswith('**', i):
+            out, i = out + '.*', i + 2
+        elif pattern[i] == '*':
+            out, i = out + '[^/]*', i + 1
+        elif pattern[i] == '?':
+            out, i = out + '[^/]', i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out + r'\Z')
+
+
+def expand(root, patterns, stem):
+    found = []
+    for pattern in patterns:
+        found += sorted(str(p.relative_to(root)) for p in root.glob(pattern.replace('{stem}', stem)) if p.is_file())
+    return found
+
+
+def is_test(path):
+    return bool(TEST_NAME.search(Path(path).name))
+
+
+def convention_tests(root, path):
+    if is_test(path):
+        return [path]
+    p = Path(path)
+    stem, parent = p.stem, p.parent
+    if p.suffix == '.rb' and p.parts[0] in ('app', 'lib'):
+        return expand(root, ['spec/**/{stem}_spec.rb', 'test/**/{stem}_test.rb'], stem)
+    if JS_EXT.search(p.name):
+        return expand(root, [f'{parent}/{stem}.test.*', f'{parent}/{stem}.spec.*',
+                             f'{parent}/__tests__/{stem}.*'], stem)
+    if p.suffix == '.py':
+        return expand(root, ['tests/test_{stem}.py', f'{parent}/test_{stem}.py'], stem)
+    return []
+
+
+def related_tests(root, changed, config):
+    tests = []
+    mapping = config.get('map')
+    for path in changed:
+        if mapping:
+            stem = Path(path).stem
+            for source, targets in mapping.items():
+                if glob_regex(source).match(path):
+                    tests += expand(root, [targets] if isinstance(targets, str) else targets, stem)
+        else:
+            tests += convention_tests(root, path)
+    return list(dict.fromkeys(t for t in tests if not t.startswith('.')))
+
+
+def nearest(root, path, name):
+    """The closest directory from `path` up to `root` that holds `name`."""
+    for folder in [*(root / path).parents]:
+        if (folder / name).exists():
+            return folder
+        if folder == root:
+            break
+    return None
+
+
+def js_runner(package):
+    try:
+        data = json.loads((package / 'package.json').read_text())
+    except (OSError, ValueError):
+        data = {}
+    deps = {**data.get('dependencies', {}), **data.get('devDependencies', {})}
+    if 'vitest' in deps:
+        return ['npx', 'vitest', 'run']
+    if 'jest' in deps:
+        return ['npx', 'jest']
+    return ['node', '--test']
+
+
+def uses_pytest(root):
+    if (root / 'pytest.ini').exists() or (root / 'conftest.py').exists():
+        return True
+    for name in ('pyproject.toml', 'setup.cfg', 'tox.ini'):
+        file = root / name
+        if file.exists() and 'pytest' in file.read_text(errors='ignore'):
+            return True
+    return False
+
+
+def runner_commands(root, tests):
+    """[(cwd, argv)] grouping the tests by the runner that runs them."""
+    groups = {}
+
+    def add(cwd, argv, path):
+        groups.setdefault((str(cwd), tuple(argv)), []).append(path)
+
+    for test in tests:
+        if test.endswith('_spec.rb'):
+            add(root, ['bundle', 'exec', 'rspec'] if (root / 'Gemfile').exists() else ['rspec'], test)
+        elif test.endswith('_test.rb'):
+            if (root / 'bin' / 'rails').exists():
+                add(root, ['bin/rails', 'test'], test)
+            else:
+                add(root, ['ruby', '-Itest', '-e', 'ARGV.each { |f| require File.expand_path(f) }'], test)
+        elif JS_EXT.search(test):
+            package = nearest(root, test, 'package.json') or root
+            add(package, js_runner(package), str((root / test).relative_to(package)))
+        elif test.endswith('.py'):
+            if uses_pytest(root):
+                add(root, [sys.executable, '-m', 'pytest', '-q'], test)
+            else:  # unittest takes no file paths reliably: discover each file in its own folder
+                folder, name = os.path.split(test)
+                add(root, [sys.executable, '-m', 'unittest', 'discover', '-s', folder or '.', '-p', name], None)
+    return [(Path(cwd), list(argv) + [p for p in paths if p]) for (cwd, argv), paths in groups.items()]
+
+
+def file_digest(root, paths):
+    digest = hashlib.sha256()
+    for path in sorted(set(paths)):
+        digest.update(path.encode() + b'\0')
+        try:
+            digest.update((root / path).read_bytes())
+        except OSError:
+            pass
+    return digest
+
+
+def run_all(commands, timeout):
+    """(exit code, combined output). Exit None means the run timed out."""
+    deadline, output = time.monotonic() + timeout, []
+    for cwd, argv in commands:
+        shown = argv if isinstance(argv, str) else shlex.join(argv)
+        try:
+            result = subprocess.run(argv, cwd=cwd, shell=isinstance(argv, str), capture_output=True, text=True,
+                                    env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+                                    timeout=max(1, deadline - time.monotonic()), start_new_session=True)
+        except subprocess.TimeoutExpired:
+            return None, '\n'.join(output)
+        except OSError as error:
+            output.append(f'$ {shown}\n{error}')
+            return 127, '\n'.join(output)
+        output.append(f'$ {shown}\n{result.stdout}{result.stderr}')
+        if result.returncode != 0:
+            return result.returncode, '\n'.join(output)
+    return 0, '\n'.join(output)
+
+
+def load_config(root):
+    file = root / '.agents' / 'project.toml'
+    if not file.exists():
+        return {}
+    try:
+        return tomllib.loads(file.read_text()).get('tests', {})
+    except tomllib.TOMLDecodeError as error:
+        print(f'related-tests: ignoring {file}: {error}', file=sys.stderr)
+        return {}
+
+
+def verdict(event):
+    if event.get('stop_hook_active'):
+        return None
+    top = git(event.get('cwd') or os.getcwd(), 'rev-parse', '--show-toplevel')
+    if not top:
+        return None
+    root = Path(top.strip())
+    changed = changed_files(root)
+    if not changed:
+        return None
+    config = load_config(root)
+    tests = related_tests(root, changed, config)
+    if not tests:
+        return None
+    if config.get('command'):
+        commands = [(root, config['command'].replace('{files}', shlex.join(tests)))]
+    else:
+        commands = runner_commands(root, tests)
+    digest = file_digest(root, changed + tests)
+    digest.update(json.dumps([str(root), [[str(c), a] for c, a in commands]]).encode())
+    cache = CACHE / f'{digest.hexdigest()}.json'
+    try:
+        cached = json.loads(cache.read_text())
+        code, output = cached['exit'], cached['output']
+    except (OSError, ValueError, KeyError):
+        code, output = run_all(commands, int(config.get('timeout', DEFAULT_TIMEOUT)))
+        if code is None:
+            print('related-tests: timed out; the turn may end', file=sys.stderr)
+            return None
+        CACHE.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({'exit': code, 'output': output, 'tests': tests}))
+    if code == 0:
+        return None
+    tail = '\n'.join(output.splitlines()[-TAIL_LINES:])
+    return {'decision': 'deny',
+            'reason': f'Related tests fail ({", ".join(tests)}). Fix them before finishing. '
+                      f'Full log: {cache}\n\n{tail}'}
+
+
+if __name__ == '__main__':
+    result = verdict(json.loads(sys.stdin.read() or '{}'))
+    if result:
+        print(json.dumps(result))

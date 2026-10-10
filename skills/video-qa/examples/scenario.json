@@ -1,0 +1,18 @@
+{
+  "id": "login-wrong-password-message",
+  "title": "Wrong password now explains what went wrong",
+  "subtitle": "Bug: a wrong password reloaded the form with no message",
+  "viewport": {"width": 1280, "height": 800},
+  "versions": [
+    {"label": "BEFORE", "detail": "origin/develop 1a2b3c4", "baseUrl": "http://localhost:3030"},
+    {"label": "AFTER", "detail": "fix/login-error 5d6e7f8", "baseUrl": "http://localhost:3031"}
+  ],
+  "steps": [
+    {"caption": "Open the sign in page", "action": "goto", "url": "/users/sign_in"},
+    {"caption": "Enter the QA user's email", "action": "fill", "selector": "role=textbox[name=\"Email\"]", "value": "qa@example.test"},
+    {"caption": "Enter a wrong password", "action": "fill", "selector": "[data-testid=password]", "value": "not-the-password"},
+    {"caption": "Click Sign in (this triggered the bug)", "action": "click", "selector": "role=button[name=\"Sign in\"]"},
+    {"caption": "Stay on the sign in page", "action": "expect_url", "contains": "/users/sign_in"},
+    {"caption": "User should see why sign in failed", "action": "expect_text", "text": "Invalid email or password", "timeoutMs": 3000, "pass": "error message shown", "fail": "form reloaded with no message"}
+  ]
+}

@@ -1,6 +1,6 @@
 Run owner: {RUNNER}; run ID: {RUN_ID}. The parent has selected the isolated ledger namespace {L} and holds any required lock. Clean only that namespace. Never change locks, legacy root records, other runner namespaces, worktrees or databases.
 
-Clean the PR review ledger at {L}. Delete only the records of work that is finished: merged or closed PRs, and branches that are merged or deleted. Do not post to GitHub or Slack. The only git commands allowed are the read-only ones below, run with `git -C {REPO}`. Never fetch, checkout or change refs.
+Clean the PR review ledger at {L}. Delete only the records of work that is finished: merged or closed PRs, and branches that are merged or deleted. Do not post to GitHub or Slack. The only git commands allowed are the read-only ones below, run as `cd {REPO} && git …` (never `git -C`, global rule 43). Never fetch, checkout or change refs.
 
 1. List the record keys in {L}:
    - PR keys look like `<n>`; branch keys look like `branch-<name>`.
@@ -12,8 +12,8 @@ Clean the PR review ledger at {L}. Delete only the records of work that is finis
    - **Branch key:**
      - Read `branch:` and `base:` from `<key>.md`. The branch name is the key without `branch-`, with `__` turned back into `/`.
      - If `gh pr list --repo cohabitplatforms/cohabit-web --head <branch> --state all --json number -q '.[0].number'` returns a number → keep it. The main session will move it to the PR key.
-     - Else, if `git -C {REPO} ls-remote --heads origin <branch>` succeeds and prints nothing → finished only if the branch is also absent locally (`git show-ref --verify refs/heads/<branch>`). Preserve active local-only branches. A failed remote lookup is not evidence of deletion.
-     - Else, if `git -C {REPO} merge-base --is-ancestor origin/<branch> origin/<base>` succeeds (already merged) → finished.
+     - Else, if `cd {REPO} && git ls-remote --heads origin <branch>` succeeds and prints nothing → finished only if the branch is also absent locally (`git show-ref --verify refs/heads/<branch>`). Preserve active local-only branches. A failed remote lookup is not evidence of deletion.
+     - Else, if `cd {REPO} && git merge-base --is-ancestor origin/<branch> origin/<base>` succeeds (already merged) → finished.
      - Otherwise → keep it.
 3. For each finished key:
    - Read `<key>.md` (or the newest `<key>.old-*.md` if there is no current one).

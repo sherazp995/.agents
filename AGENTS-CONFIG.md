@@ -20,6 +20,21 @@ Ponytail is off by default in every coding agent. Use it only when the user expl
 
 Project rules may add project-specific instructions via a project-level `CLAUDE.md`. They must not fork the global setup.
 
+## Related Tests on Stop (`.agents/project.toml`)
+
+The `related-tests` Stop hook runs only the tests for files changed since HEAD (plus untracked files). Failing tests block the stop with the output tail. Results are cached by file hashes in `~/.agents/tmp/test-cache/related-tests/`.
+
+Without a project file it uses conventions: Ruby `app|lib/**/x.rb` to `x_spec.rb` / `x_test.rb`, JS/TS `x.ts` to `x.test.*`, `x.spec.*`, `__tests__/x.*`, Python `a/b.py` to `tests/test_b.py`, `a/test_b.py`. A repo can override both mapping and runner:
+
+```toml
+# <repo>/.agents/project.toml
+[tests]
+command = "bin/rails test {files}"   # {files}: matched test paths, shell-quoted
+timeout = 300                        # seconds for the whole run
+[tests.map]
+"app/**/*.rb" = ["test/**/{stem}_test.rb"]   # {stem}: changed file name without extension
+```
+
 ## Application-Managed Resources
 
 Application-managed credentials, sessions, native tools, and bundled runtime components retain the formats required by their host application.

@@ -32,11 +32,15 @@ class GitGuardTests(unittest.TestCase):
     def push_all(self):
         self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')  # as if pushed
 
-    def guard(self, command, cwd=None):
+    def verdict(self, command, cwd=None):
         event = {'event': 'before_tool', 'cwd': str(cwd or self.repo), 'input': {'command': command}}
         result = subprocess.run([sys.executable, str(GUARD)], input=json.dumps(event), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)['reason'] if result.stdout.strip() else None
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
+    def guard(self, command, cwd=None):
+        verdict = self.verdict(command, cwd)
+        return verdict['reason'] if verdict else None
 
     def test_first_commit_on_a_clean_branch_is_allowed(self):
         self.assertIsNone(self.guard("git commit -m 'Add thing'"))
@@ -44,23 +48,37 @@ class GitGuardTests(unittest.TestCase):
         self.push_all()
         self.assertIsNone(self.guard("git commit -m 'Next thing'"))
 
-    def test_a_second_unpushed_commit_asks_and_amend_is_allowed(self):
+    def test_a_second_unpushed_commit_is_denied_with_the_amend_to_run_instead(self):
         self.commit(1)
 
-        self.assertIn('git commit --amend', self.guard("git commit -m 'More'"))
+        verdict = self.verdict("git commit -m 'More'")
+        self.assertEqual(verdict['decision'], 'deny')
+        self.assertIn('git commit --amend --no-edit', verdict['reason'])
+        self.assertNotIn('user', verdict['reason'])
         self.assertIsNone(self.guard("git commit --amend --no-edit"))
+
+    def test_a_second_commit_with_a_rule_48_break_still_asks_the_user(self):
+        self.commit(1)
+
+        verdict = self.verdict("git commit -m 'Title' -m 'Body'")
+        self.assertEqual(verdict['decision'], 'ask')
+        self.assertIn('--amend', verdict['reason'])
 
     def test_several_unpushed_commits_ask_about_squashing_even_for_amend(self):
         self.commit(2)
 
         for command in ("git commit -m 'x'", 'git commit --amend --no-edit'):
-            self.assertIn('ask the user whether to squash', self.guard(command))
+            verdict = self.verdict(command)
+            self.assertEqual(verdict['decision'], 'ask', command)
+            self.assertIn('ask the user whether to squash', verdict['reason'])
 
     def test_amending_a_pushed_commit_asks(self):
         self.commit(1)
         self.push_all()
 
-        self.assertIn('already pushed', self.guard('git commit --amend --no-edit'))
+        verdict = self.verdict('git commit --amend --no-edit')
+        self.assertEqual(verdict['decision'], 'ask')
+        self.assertIn('already pushed', verdict['reason'])
 
     def test_multi_line_messages_and_claude_attribution_ask(self):
         self.assertIn('single line', self.guard("git commit -m 'Title' -m 'Body'"))
@@ -177,15 +195,15 @@ class GitGuardTests(unittest.TestCase):
         self.assertIsNone(self.guard('ls -la && echo commit'))
 
 
-class AdapterAskTests(unittest.TestCase):
-    def run_adapter(self, agent):
+class AdapterVerdictTests(unittest.TestCase):
+    def run_adapter(self, agent, decision='ask'):
         with tempfile.TemporaryDirectory() as tmp:
             hooks = Path(tmp)
             (hooks / 'adapters').mkdir()
             (hooks / 'bin').mkdir()
             shutil.copy(ADAPTER, hooks / 'adapters' / 'run.py')
             script = hooks / 'bin' / 'probe'
-            script.write_text('#!/bin/sh\necho \'{"decision": "ask", "reason": "rule 54"}\'\n')
+            script.write_text(f'#!/bin/sh\necho \'{{"decision": "{decision}", "reason": "rule 54"}}\'\n')
             script.chmod(0o755)
             native = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': 'git commit'}}
             return subprocess.run([sys.executable, str(hooks / 'adapters' / 'run.py'), agent, 'probe'],
@@ -203,6 +221,15 @@ class AdapterAskTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         reason = json.loads(result.stdout)['hookSpecificOutput']['permissionDecisionReason']
         self.assertIn('they run it themselves', reason)
+
+    def test_a_deny_reaches_both_agents_without_asking_the_user(self):
+        for agent in ('claude', 'codex'):
+            result = self.run_adapter(agent, decision='deny')
+
+            self.assertEqual(result.returncode, 2, agent)
+            output = json.loads(result.stdout)['hookSpecificOutput']
+            self.assertEqual(output['permissionDecision'], 'deny', agent)
+            self.assertEqual(output['permissionDecisionReason'], 'rule 54', agent)
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@ Answer first, short lines, no dashes joining clauses. Every claim names its evid
 ```markdown
 **<Done | Done with open items | Stopped>:** <one line outcome>
 
-Mode: <fast | thorough>. Base: <sha>. Nothing committed.
+Mode: <fast | thorough>. Base: <sha>. Commit: <sha, amended or new; never pushed>.
 
 **What changed**
 - <file or area>: <what>

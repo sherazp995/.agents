@@ -102,6 +102,13 @@ const codexBuilderPrompt =
   '   Put any summary Codex printed at the end of its log into notes.\n\n' +
   `=== TASK ===\n${workBrief}\nDo not commit. Do not invoke or follow any skills.\n=== END TASK ===`
 
+// Model and effort per agent. Cost scales with how much each call decides:
+//   agent          model      effort  why
+//   builder:claude session    session the session already chose its tier for this task
+//   builder:codex  haiku      low     a relay that only runs `codex exec` and the checks
+//   judge J1       opus       high    the deciding read of both diffs
+//   judge J2       sonnet     medium  an independent second vote at lower cost
+//   judge J3       opus       high    tie-breaker, called only when J1 and J2 split or one fails
 const BUILDERS = [
   { id: 'claude', prompt: claudeBuilderPrompt, opts: { agentType: 'general-purpose' } },
   { id: 'codex', prompt: codexBuilderPrompt, opts: { model: 'haiku', effort: 'low' } },
@@ -190,9 +197,13 @@ const judgePrompt =
   ' Verify claims by reading the code. This is read-only: do not edit files or run' +
   ` commands that change state.\n\nTASK: ${TASK}\n\nAPPROVED PLAN:\n${PLAN}\n\n${candidateBlock}`
 
-const JUDGES = [{ id: 'J1', model: 'opus' }, { id: 'J2', model: 'sonnet' }, { id: 'J3', model: 'opus' }]
+const JUDGES = [
+  { id: 'J1', model: 'opus', effort: 'high' },
+  { id: 'J2', model: 'sonnet', effort: 'medium' },
+  { id: 'J3', model: 'opus', effort: 'high' },
+]
 const judge = (j) =>
-  agent(judgePrompt, { label: `judge:${j.id}(${j.model})`, phase: 'Judge', model: j.model, agentType: 'Plan', schema: JUDGE_SCHEMA })
+  agent(judgePrompt, { label: `judge:${j.id}(${j.model})`, phase: 'Judge', model: j.model, effort: j.effort, agentType: 'Plan', schema: JUDGE_SCHEMA })
     .then((v) => (v && (v.winner === 'X' || v.winner === 'Y') ? { judge: j.id, model: j.model, ...v } : null))
 
 const votes = (await parallel(JUDGES.slice(0, 2).map((j) => () => judge(j)))).filter(Boolean)

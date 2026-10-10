@@ -5,7 +5,7 @@ Use this mode for two or more pull requests or branches, or for any PR or branch
 Three levels:
 - **Main session:** resolves targets, picks each target's ledger mode, writes a FOCUS list, starts one lead agent per target, spot-checks blocker and high findings, and reports.
 - **Lead agent** (a fresh `general-purpose` agent, not a fork, running `pr-batch-lead.md`): starts the reviewers, runs the tests, proves every finding, and returns a record body. Only the main session writes the ledger.
-- **Reviewers** (started by each lead): Codex `gpt-6-astra` as the senior engineer, plus fresh agents for `lenses/simplicity.md`, `lenses/architecture.md` and `lenses/thermonuclear.md`.
+- **Reviewers** (started by each lead): Codex `gpt-6-astra` as the senior engineer, plus fresh agents for `lenses/simplicity.md`, `lenses/architecture.md`, `lenses/thermonuclear.md` and `lenses/diff-only.md`, with the model and effort from SKILL.md "Review lenses".
 
 ## Fixed rules
 

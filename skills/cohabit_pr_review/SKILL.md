@@ -51,7 +51,7 @@ Before cleanup or any write, identify the **host running this skill**, not a rev
 
 ## Steps
 0. **Find the cohabit-web checkout (REPO).**
-   - A folder counts as cohabit-web when `git -C <dir> remote get-url origin` contains `cohabitplatforms/cohabit-web`.
+   - A folder counts as cohabit-web when `cd <dir> && git remote get-url origin` contains `cohabitplatforms/cohabit-web`.
    - Try `git rev-parse --show-toplevel` in the current folder first. If that is cohabit-web, use it.
    - Otherwise, ask the user with AskUserQuestion: "This folder is not inside cohabit-web. Where is your cohabit-web checkout?"
      - Offer as options any of `~/cohabitplatforms/cohabit-web`, `~/cohabit-web` and `~/code/cohabit-web` that exist and pass the check. The user can type another path with "Other".
@@ -67,7 +67,7 @@ Before cleanup or any write, identify the **host running this skill**, not a rev
        - Head: `origin/<branch>` if it exists on origin (fetch it in step 3). Otherwise use the local branch and mark it "local only, not pushed".
        - Title: the subject of the branch's last commit.
 3. **One fetch, before any review agent starts** (agents never fetch):
-   `git -C <repo> fetch origin <every base> <every pushed head branch>`.
+   `cd <repo> && git fetch origin <every base> <every pushed head branch>`.
    Then set:
    - BASE_REF = `origin/<base>`
    - BASE_SHA = `git rev-parse origin/<base>`
@@ -99,7 +99,7 @@ Before cleanup or any write, identify the **host running this skill**, not a rev
    - FOCUS = the bullets from step 5
 7. Tell the user in 3-5 lines: RUNNER and RUN_ID, which targets run, in which mode, against which `origin/<base>` SHA, and which were skipped and why. While waiting, give a one-line update when a lead reports or when asked. Never guess results.
 8. **Spot-check before relaying,** like a lead engineer.
-   - For each CRITICAL or HIGH finding, and for each finding that says "regression" or "caused by this PR", read only the cited lines: `git -C <repo> show <HEAD_SHA>:<file> | sed -n '<line-10>,<line+10>p'`.
+   - For each CRITICAL or HIGH finding, and for each finding that says "regression" or "caused by this PR", read only the cited lines: `cd <repo> && git show <HEAD_SHA>:<file> | sed -n '<line-10>,<line+10>p'`.
    - If the code does not support the claim, or a dropped finding looks real, send the lead one question with SendMessage before relaying.
    - Check that every earlier OPEN finding in the ledger got a status.
 9. Relay each lead's report as it is (it already follows the style), plus one line for anything you corrected in step 8. Relay the cleanup agent's short list.

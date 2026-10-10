@@ -4,6 +4,10 @@
 Reads the normalized hook event (see ../adapters/run.py). For a rule break it returns
 {"decision": "ask", "reason": ...}: Claude Code then asks the user, and Codex (which has
 no "ask") refuses and tells the agent to ask the user. Only the user can override.
+
+One break the agent can fix alone: a second commit on a branch with one unpushed commit.
+That returns {"decision": "deny"} with the amend command to run instead, so the agent
+self-corrects without bothering the user.
 """
 import json
 import os
@@ -233,6 +237,10 @@ def commit_messages(args):
     return messages
 
 
+class Correction(str):
+    """A problem the agent fixes itself by rerunning differently; no user approval needed."""
+
+
 def check_commit(directory, args):
     problems = []
     messages = commit_messages(args)
@@ -247,8 +255,10 @@ def check_commit(directory, args):
         problems.append(f'rule 54: this branch already has {unpushed} unpushed commits; '
                         'ask the user whether to squash them into one first')
     elif unpushed == 1 and not amend:
-        problems.append('rule 54: one unpushed commit already exists; fold this change into it with '
-                        '`git commit --amend` instead of adding a second commit')
+        problems.append(Correction(
+            'rule 54: one unpushed commit already exists, so do not add a second one. Rerun this as '
+            '`git commit --amend --no-edit` to fold the change into it, or `git commit --amend -m "<one line>"` '
+            'to also update its message'))
     elif unpushed == 0 and amend and has_head:
         problems.append('rule 54: --amend here would rewrite a commit that is already pushed')
     return problems
@@ -289,6 +299,8 @@ def verdict(event):
         problems = [f'could not check this git command against rules 43, 48 and 54 ({error})']
     if not problems:
         return None
+    if all(isinstance(problem, Correction) for problem in problems):
+        return {'decision': 'deny', 'reason': 'Git rules (AGENTS-RULES.md): ' + '; '.join(problems) + '.'}
     return {'decision': 'ask', 'reason': 'Git rules (AGENTS-RULES.md): ' + '; '.join(problems)
             + '. Only the user can approve going ahead anyway.'}
 

@@ -1,4 +1,4 @@
-"""Check that this machine's agents use ~/.agents for rules, skills, agents, Ponytail, memory, chats and hooks.
+"""Check that this machine's agents use ~/.agents for rules, skills, agents, Ponytail, memory, chats, hooks and permissions.
 
 Every section runs even when an earlier one fails, and all failures are listed.
 Clients that are not installed (see registry.toml) are skipped. Run
@@ -48,11 +48,16 @@ def installed_clients(home, hub):
     return {c['name']: c for c in registry.load(hub)['clients'] if registry.installed(home, c)}
 
 
-def check(home):
-    home = home.resolve()
-    hub = home / '.agents'
-    sections = (('skills and rules', check_skills_and_rules), ('clients', check_clients),
-                ('ponytail', check_ponytail), ('hub', check_hub))
+def check(home, repo_only=False):
+    if repo_only:
+        # CI: check the checkout this file lives in, not a provisioned ~/.agents.
+        hub = Path(__file__).resolve().parent
+        sections = (('repository', lambda home, hub: f'{len(check_repo(hub)[1])} shared personal skills'),)
+    else:
+        home = home.resolve()
+        hub = home / '.agents'
+        sections = (('skills and rules', check_skills_and_rules), ('clients', check_clients),
+                    ('ponytail', check_ponytail), ('hub', check_hub))
     passed, failures = [], []
     for name, section in sections:
         try:
@@ -67,7 +72,8 @@ def check(home):
     print('PASS: ' + '; '.join(passed) + '.')
 
 
-def check_skills_and_rules(home, hub):
+def check_repo(hub):
+    """The checks that read only the checkout: selected skills exist and AGENTS.md links survive symlinks."""
     data = json.loads((hub / 'selected-skills.json').read_text())
     shared = hub / 'skills'
     # App-owned folders: Claude syncs organization skills, Codex rewrites its system skills,
@@ -77,12 +83,18 @@ def check_skills_and_rules(home, hub):
     assert set(data['skills']) <= authored, f'Selected skills missing: {sorted(set(data["skills"]) - authored)}'
     if authored - set(data['skills']):
         WARNINGS.append(f'skills not listed in selected-skills.json: {sorted(authored - set(data["skills"]))}')
-    roots = [home / root for root in data['roots'] if (home / root).parent.is_dir()]
-    for path in roots:
-        assert path.is_symlink() and path.resolve(strict=True) == shared, f'Separate skill directory: {path}'
     agents_md = (hub / 'AGENTS.md').read_text()
     assert not re.search(r'\]\((?!~/|/|https?:)', agents_md), 'AGENTS.md has a relative link; it breaks through symlinks'
     assert re.search(r'\]\((/|~/)[^)]*AGENTS-CONFIG\.md\)', agents_md), 'AGENTS.md does not link AGENTS-CONFIG.md'
+    return data, authored
+
+
+def check_skills_and_rules(home, hub):
+    data, authored = check_repo(hub)
+    shared = hub / 'skills'
+    roots = [home / root for root in data['roots'] if (home / root).parent.is_dir()]
+    for path in roots:
+        assert path.is_symlink() and path.resolve(strict=True) == shared, f'Separate skill directory: {path}'
     return f'{len(authored)} shared personal skills in {len(roots)} skill folders'
 
 
@@ -108,6 +120,15 @@ def check_hooks(hub, name, client, config_file):
             f"{name}: {config_file} does not run hook {entry['name']} on {event}/{matcher or '(any)'} " \
             f"as install.py writes it ({len(owned)} owned entries found); run install.py"
     return entries
+
+
+def check_permissions(hub, name, config_file):
+    """Every registry [permissions] rule for this client is in permissions.allow, as install.py writes it."""
+    wanted = registry.load(hub).get('permissions', {}).get(name, [])
+    config = json.loads(config_file.read_text()) if config_file.exists() else {}
+    allow = (config.get('permissions') or {}).get('allow') or []
+    missing = [rule for rule in wanted if rule not in allow]
+    assert not missing, f"{name}: {config_file} permissions.allow lacks {', '.join(missing)}; run install.py"
 
 
 def check_agents(hub, name, primary, extras):
@@ -175,6 +196,7 @@ def check_clients(home, hub):
                         if event == 'SessionStart' and wiring.is_provision_hook(h)]
             assert commands == [wanted], \
                 f'Claude SessionStart provisioning is {commands or "missing"}, expected [{wanted!r}]; run install.py'
+            check_permissions(hub, name, primary / 'settings.json')
         if name == 'codex':
             config_file = primary / 'config.toml'
             config = tomllib.loads(config_file.read_text()) if config_file.exists() else {}
@@ -293,4 +315,7 @@ def check_hub(home, hub):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', type=Path, default=Path.home())
-    check(parser.parse_args().home)
+    parser.add_argument('--repo-only', action='store_true',
+                        help='check only the checkout (selected skills, AGENTS.md links); used by CI')
+    args = parser.parse_args()
+    check(args.home, args.repo_only)

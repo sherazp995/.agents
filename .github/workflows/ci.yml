@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install PyYAML (hub tests parse YAML frontmatter and configs)
+        run: python3 -m pip install pyyaml
+
+      - name: Python hub tests
+        run: python3 -m unittest discover -s hub/tests
+
+      - name: Skill script tests (every skills/*/scripts/test_*.py)
+        run: |
+          for dir in skills/*/scripts; do
+            if ls "$dir"/test_*.py >/dev/null 2>&1; then
+              python3 -B -m unittest discover -s "$dir" -p 'test_*.py' || exit 1
+            fi
+          done
+
+      - name: Workflow script tests
+        # Explicit globs: some Node versions cannot run `node --test <folder>`.
+        run: node --test 'skills/workflow-runner/tests/*.test.mjs' 'skills/doing-substantial-work/tests/*.test.mjs'
+
+      - name: work-council tests and skill lint
+        working-directory: skills/work-council
+        run: |
+          node tests/build-workflow.test.mjs
+          node tests/cleanup-worktrees.test.mjs
+          node tests/lint-skill.mjs
+
+      - name: Syntax check every skill script
+        run: |
+          find skills -type f \( -name '*.mjs' -o -name '*.js' \) -not -path '*/node_modules/*' -print0 \
+            | xargs -0 -n1 node --check
+
+      - name: video-qa recorder dependencies
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fontconfig fonts-noto-core
+          npm ci --prefix skills/video-qa/scripts
+          (cd skills/video-qa/scripts && node node_modules/playwright-core/cli.js install ffmpeg)
+
+      - name: video-qa recorder test (uses the runner's Google Chrome)
+        env:
+          VIDEO_QA_REQUIRE_DEPS: "1"
+        run: node --test 'skills/video-qa/tests/*.test.mjs'
+
+      - name: Repository check (the checkout only; the full check needs a provisioned machine)
+        run: python3 -I check.py --repo-only

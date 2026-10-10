@@ -1,39 +1,45 @@
 ---
 name: branch-visual-qa
-description: "Test a current branch against its base with real browser flows and matched before and after screenshots, and deliver one local index.html report with screenshots, tests and review comments. For cohabit-web, also run the cohabit_pr_review skill as part of the same workflow. Report only: it never edits the branch or commits. It tries fixes in a throwaway copy and reports how to fix each issue. Use for branch QA, visual regression comparisons, or requests to show what a branch fixes against develop or another base. Ordinary code review without browser comparison does not need this workflow."
+description: "Test a current branch against its base with real browser flows and matched before and after screenshots, and deliver one local index.html report with screenshots, tests and review comments. It runs general-review on the same snapshot as its review lane, with the repo's general-review profile when one matches. Report only: it never edits the branch or commits. It tries fixes in a throwaway copy and reports how to fix each issue. Use for branch QA, visual regression comparisons, or requests to show what a branch fixes against develop or another base. Ordinary code review without browser comparison does not need this workflow."
 ---
 
 # Branch Visual QA
 
-Deliver working local pages and one browsable `index.html` containing browser QA, automated checks and code-review comments. For cohabit-web, invoking this skill also invokes `cohabit_pr_review`; the user does not need a separate review request. Before and after screenshots are mandatory for every claimed visual or user-flow comparison. This is execution work, not a test plan alone.
+Deliver working local pages and one browsable `index.html` containing browser QA, automated checks and code-review comments. Invoking this skill also runs `general-review` as the review lane; the user does not need a separate review request. Before and after screenshots are mandatory for every claimed visual or user-flow comparison. This is execution work, not a test plan alone.
 
 **Report only. Never fix.** This workflow never edits application code, specs, styles or JavaScript in the branch under test, never creates commits, and never rewrites, rebases or amends the branch. Every problem found, including ones that look trivial to fix, goes in the report as a finding with its evidence and a suggested fix. The user decides what gets applied and when.
+
+## Who does what: the session coordinates, one runner tests
+
+The chat session resolves the target, base and SHAs, starts the review lane, and merges results. One QA runner subagent (`general-purpose`) does the heavy lifting: both checkouts and servers, fixtures, every browser scenario and screenshot, trial fixes, `build_report.py`, link checks and cleanup. Give it this skill's path, the pinned SHAs, the run directory and the coverage matrix. It returns only: run directory, `index.html` path, coverage statuses, confirmed findings in one line each, and cleanup results.
+
+- Only the runner uses the browser, and only one runner at a time (see the one-browser rule below).
+- The session runs `general-review` itself as coordinator, because it starts the review lead, then passes the review results to the runner for the manifest `review` object.
+- The session reads the runner's summary and spot-checks one or two screenshots; it does not reload the whole report.
+- When a video is also wanted, start the QA runner and then the `video-qa` runner as two sequential agent calls from the session (they share the single browser slot), and link the video in the report's `evidence`.
 
 ## Establish the comparison
 
 - Read relevant repository instructions. Record branch, HEAD, dirty files, base ref and exact SHA. Preserve existing work. Leave the branch exactly as you found it: same HEAD, same working tree.
-- Use the requested base. Otherwise use the PR target, then the repository's documented development branch; for Cohabit, default to `origin/develop`. Fetch the base when possible. Disclose a stale/offline base rather than calling it latest.
+- Use the requested base. Otherwise use the PR target, then the default base in the repo's general-review profile, then the repository's documented development branch. Fetch the base when possible. Disclose a stale/offline base rather than calling it latest.
 - Use the merge-base diff to identify branch changes, but run the actual base tip as the before version. Note base-only changes that affect interpretation. Include a downloadable code diff.
 - Inventory changed behavior, affected routes, shared components, relevant roles and neighboring flows. Make a coverage matrix before testing. Cover every affected behavior, including happy paths, rejection paths, retries, relevant states and permissions. For shared UI changes, test affected consumers; do not equate one page screenshot with testing everything.
 - Default to desktop 1440px, narrow desktop/tablet 768–1024px, and phone 375px; include 320px when cramped controls or smallest-phone support matters. Use identical dimensions within each pair. Respect the project's supported devices.
 
-## Run Cohabit PR review in the same workflow
+## Run general-review as the review lane
 
-For a repository whose origin is `cohabitplatforms/cohabit-web`, read the sibling [cohabit_pr_review skill](../cohabit_pr_review/SKILL.md) and run its full orchestration, not an informal replacement review. Use its lead, four reviewer lenses, proof tests, ledger/recheck rules, high-severity spot-checks and report style. Resolve its supporting files relative to that skill's actual directory. Schedule reviewers within available agent slots; only the visual-QA coordinator uses the browser. Other repositories retain ordinary visual QA without this Cohabit-specific dependency.
+Run `~/.agents/skills/general-review/SKILL.md` in single mode on the same pinned snapshot, as its coordinator. When a profile in `general-review/profiles/` matches the repository's `origin`, general-review applies it, and this workflow also follows that profile's "Branch visual QA" section (default base, required manifest fields). Use PR batch mode instead when the user asks for findings proven with tests. Only the QA runner uses the browser; review agents never do.
 
-The review skill's context limits apply to its review orchestration; they do not prevent the visual-QA coordinator from inspecting code needed to run browser scenarios. The integration rules below take precedence over conflicting standalone-review instructions about output, target resolution, ledger reuse and cleanup.
+The review lead's context limits apply to the review; they do not stop the QA runner from reading code it needs for browser scenarios. The rules below take precedence over conflicting standalone-review instructions about output, target resolution and ledger reuse.
 
-Coordinate the two workflows:
+- **One snapshot.** Resolve the branch or PR and fetch the base once, before either lane starts. Give the review the explicit target, base ref, head and base SHAs, relevant risks and `<run-directory>/review/`. A remote PR head must not silently replace the local branch being tested; if they differ, review the pinned local snapshot and say so. Include dirty changes in both lanes as an isolated snapshot with its diff hash, or exclude them from both.
+- **Integration.** The QA runner merges the head into BASE_SHA in a throwaway copy with `git merge --no-commit --no-ff <BASE_SHA>`, so no merge commit exists, and records the result separately from browser results. A merge conflict cannot become a combined pass.
+- **Reuse.** When general-review reports "no changes" for the same head and base SHAs with no dirty delta, copy that record's findings and statuses into this run and label the review `reused`. A changed base or missing evidence needs a recheck or a fresh review, never an empty successful section.
+- **Merge comments.** Merge duplicate review and browser findings into one comment, keeping every source tag, severity, origin, location, proof and ledger status, and link its comparison cases, suggested patch and trial evidence. Keep pre-existing visual findings. Unconfirmed suspicions stay out; blocked verification shows as a limitation.
+- **Output.** Save the lead report under `review/`, but deliver comments and verdict inline in this skill's `index.html`. Do not post GitHub comments, Slack messages or approvals. Review tests and trial fixes live only in isolated copies; cleanup removes only what this run created.
+- **Always record the lane.** Include a `review` object and a code review coverage row even when the lane is blocked or skipped. A missing tool, unavailable reviewer, closed target or unproven finding never counts as a passed review. Record the reason and finish the browser work that is still possible.
 
-- Resolve the current branch/PR and fetch the base once before starting either lane. Pass the explicit target, base ref, immutable head/base SHAs, relevant risks and `<run-directory>/review/` to the review lead. A remote PR head must not silently replace the local branch being tested. If they differ, review the pinned local snapshot and state that scope rather than approving a different remote head.
-- Both lanes assess the same source snapshot. Include dirty changes in an isolated snapshot and record their diff/hash, or explicitly exclude them in both lanes. Dirty snapshots cannot reuse or update a committed-head ledger entry as though they were identical. Review's merge-into-latest-base checks remain required in its throwaway copy, using `git merge --no-commit --no-ff <BASE_SHA>` so no merge commit is created; record its integration result separately from browser results on the branch head. A merge conflict cannot become a combined pass.
-- Reuse ledger results only when both reviewed head and base SHAs match, no dirty delta exists, and the stored review/proof artifacts are available. Copy the comments, their current statuses and proof artifacts into this run; label the review `reused`. Same head with a changed base requires a recheck: pass the previous base SHA, review the old-base/new-base delta and its interaction with the branch, and rerun integration plus existing proofs. Override the lead/reviewer focus on `PREV_SHA..HEAD_SHA` in this case, since that head diff is empty. Missing review evidence requires a fresh review, not an empty successful section.
-- Share cached test output only when source, environment, fixtures and test command match. Keep proof specs, logs, the lead report and source-tagged comments under `review/` before cleanup. A code-only finding needs proof or the review skill's explicit design-review classification, not invented screenshots. Add a paired browser scenario when it has a reproducible UI consequence.
-- Merge duplicate review and browser findings into one comment, preserving every source tag, severity, origin, location, proof and ledger status. Link its comparison case(s), suggested patch and trial evidence. Keep pre-existing visual findings even though the PR-review lane excludes unrelated inherited issues. Unconfirmed suspicions stay out of confirmed comments; blocked verification is visible as a limitation.
-- Use the review skill's output format for the saved lead report, but deliver comments and verdict inline in this skill's `index.html`. Its terminal-only output rule is replaced by this local report destination for this combined invocation. Do not post GitHub comments, Slack messages or PR approvals. Never apply fixes to the tested branch. Review tests and trial fixes belong only in isolated copies; cleanup removes only resources created by this run, never other worktrees or databases.
-- Include a `review` object and a Cohabit review coverage row even when the lane is blocked or skipped. Missing tools/skill, unavailable reviewers, closed/merged targets or unverified proofs cannot silently count as a passed review. Record the reason and finish independently possible browser work. Preserve required reviewer identities and disclose any fallback allowed by the review skill.
-
-Show separate browser and code-review outcomes, then a combined conclusion. A combined pass requires completed or validly reused review, no unresolved introduced blockers/high/medium findings, successful integration and no failed, blocked or untested QA scenarios in the coverage matrix. A passing test suite alone is not approval. If the checkout moves during the run, keep evidence attached to its tested snapshot; disclose later commits/edits instead of silently mixing versions or overwriting another session's work.
+Show separate browser and code-review outcomes, then a combined conclusion. A combined pass requires a completed or validly reused review, no unresolved introduced blocker, high or medium findings, a clean integration and no failed, blocked or untested QA scenarios. A passing test suite alone is not approval. If the checkout moves during the run, keep evidence attached to its tested snapshot and disclose later commits or edits.
 
 ## Make both versions work
 
@@ -119,7 +125,7 @@ python3 <skill-directory>/scripts/build_report.py <new-report-directory>/manifes
 
 Create every QA run under `<worktree-root>/tmp/visual-qa/<YYYYMMDD-HHMMSS>/`, using the root returned by `git rev-parse --show-toplevel` in the worktree being tested. Resolve this root before switching to a base checkout. Keep the manifest, original screenshots, supporting evidence and generated pages together in that run directory. If the timestamp already exists, append a numeric suffix; preserve earlier reports. Do not default to system `/tmp`, another worktree or an arbitrary output directory. Use another destination only when the user explicitly requests it. Reserve `index.html` and `comparisons/<id>.html` for generated pages; keep source screenshots and evidence at separate paths and never use output symlinks. The report is a disk-openable artifact: do not start an HTTP server to preview or deliver it, and do not publish it externally unless explicitly requested.
 
-For Cohabit runs, the builder also renders the `review` summary and merged comments directly on the index. Code-only comments do not require screenshot cases. The builder arranges screenshots. It must not generate or alter evidence. Missing screenshots require blocked/not-tested status, not mockups. Coverage determines the number of comparisons.
+When the manifest has a `review` object, the builder also renders the review summary and merged comments directly on the index. Code-only comments do not require screenshot cases. The builder arranges screenshots. It must not generate or alter evidence. Missing screenshots require blocked/not-tested status, not mockups. Coverage determines the number of comparisons.
 
 Open `index.html` directly from disk in the same browser window and tab. Inspect the report and representative comparison pages, verify every local link and image, and check the mobile layout. If the browser tool blocks local-file navigation, validate local links and assets programmatically and disclose the browser-preview limitation; do not start a report server as a workaround.
 
@@ -129,7 +135,7 @@ Finish with the full, copyable file URL of the generated `index.html`, shown as 
 
 Place `manifest.json`, original screenshots and evidence in the new report directory. The relative filenames below describe files to create for this run, not existing reference files to locate. The builder uses only Python's standard library and emits `index.html` plus `comparisons/<id>.html`. All text is escaped, image paths must resolve inside the report directory, and generated links are relative. Images remain unchanged.
 
-Required top-level fields: `title`, `base`, `current`, `method`, `coverage`, `cases`. Base/current each contain `ref` and `sha`. Optional: `findings`, `checks`, `limitations`, `manual_steps`, `evidence`, `live_urls`, `review`. `review` is required by this workflow for Cohabit runs; old manifests and non-Cohabit runs remain supported without it.
+Required top-level fields: `title`, `base`, `current`, `method`, `coverage`, `cases`. Base/current each contain `ref` and `sha`. Optional: `findings`, `checks`, `limitations`, `manual_steps`, `evidence`, `live_urls`, `review`. `review` is required by this workflow whenever the review lane runs; old manifests remain supported without it.
 
 Each coverage entry has `scenario`, `status` and `evidence` (plain text). Status is `passed`, `failed`, `blocked` or `not-tested`. This is the coverage ledger; include unexercised relevant scenarios here.
 
@@ -137,7 +143,7 @@ Each case requires `id` (lowercase slug), `title`, `status`, `viewport`, `role`,
 
 `evidence` is a list of `{ "label": "Code diff", "path": "branch.diff" }` local artifacts. `live_urls` is a list of `{ "label": "Base app", "url": "http://localhost:3030/" }`. Never include real credentials in the manifest; give local QA access instructions separately when needed.
 
-### Cohabit review manifest
+### Review manifest
 
 `review` contains `status` (`passed`, `failed`, `blocked`, `not-tested`), `mode` (`review`, `recheck`, `reused`, `skipped`), `verdict`, `combined_status` (the same four statuses), `combined_result` (explanation), `head_sha`, `base_sha`, `integration_status` (the same four statuses), `integration` (what actually ran and its outcome), `summary`, `comments`, and optional `evidence` (the same local label/path objects as above). The builder rejects a combined pass unless review and integration passed, all coverage passed, and no introduced critical/high/medium comment remains unresolved. SHAs must match the top-level comparison; a differently reviewed version is supporting historical evidence, not the current review.
 
@@ -154,7 +160,7 @@ Each merged comment requires `id` (stable lowercase slug), `title`, `severity`, 
   "base_sha": "same-as-base-sha",
   "integration_status": "passed",
   "integration": "Head merged into pinned origin base without conflicts",
-  "summary": "Four review lenses completed. Browser and code evidence merged below.",
+  "summary": "All general-review lenses completed. Browser and code evidence merged below.",
   "comments": [{
     "id": "duplicate-write",
     "title": "Retry creates a duplicate record",

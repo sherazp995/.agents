@@ -1,10 +1,10 @@
 # Structural lens (thermo-nuclear)
 
-This lens brings the thermo-nuclear code quality review into every general review, so it no longer needs a separate call.
+This lens brings the thermo-nuclear code quality review into every general review. `thermo-nuclear-code-quality-review` and `/thermonuke` run this lens on its own (SKILL.md, "Single-lens runs").
 
 ## Source of the standards
 
-Read `~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md` in full and apply its "Non-Negotiable Additional Standards", "Primary Review Questions", "What to Flag Aggressively" and "Preferred Remedies" to the change under review. That file stays the single source of the standards; do not copy or reword them here. Its own report format, tone section and approval bar do not apply inside general-review; this file replaces them with the mapping below.
+Read [the structural standards](structural-standards.md) in full and apply its core prompt, non-negotiable standards, primary review questions, what to flag aggressively and preferred remedies to the change under review. That file is the single source of the standards; do not copy or reword them here. Severity, report format and verdict come from this file and SKILL.md.
 
 ## How to apply inside a general review
 
@@ -18,7 +18,7 @@ Read `~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md` in full and 
 
 | Structural situation | Severity when introduced |
 | --- | --- |
-| Thermo-nuclear "presumptive blocker": pushes a file past 1000 lines, adds ad-hoc branching that tangles an existing flow, scatters feature checks across shared code, adds an unnecessary wrapper or cast-heavy contract, duplicates a canonical helper, or puts logic in the wrong layer | high |
+| A presumptive structural problem from the standards: pushes a file past 1000 lines, adds ad-hoc branching that tangles an existing flow, scatters feature checks across shared code, adds an unnecessary wrapper or cast-heavy contract, duplicates a canonical helper, or puts logic in the wrong layer | high |
 | Missed code-judo simplification with a clear, behavior-preserving path | medium |
 | Thin wrapper, needless optionality or cast, legibility harm with concrete cost | medium |
 | Naming or cosmetic polish | low |

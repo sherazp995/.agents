@@ -1,17 +1,17 @@
 ---
 name: workflow-runner
-description: Run a Claude Code Workflow script (the llm-council and work-council workflows) from Codex or any terminal, with the same hooks and results as Claude Code's Workflow tool. Used by llm-council and work-council when the host agent has no Workflow tool. Not for direct use; load the calling skill instead.
+description: Run a Claude Code Workflow script (the llm-council, work-council and doing-substantial-work workflows) from Codex or any terminal, with the same hooks and results as Claude Code's Workflow tool. Used by llm-council, work-council and doing-substantial-work when the host agent has no Workflow tool. Not for direct use; load the calling skill instead.
 ---
 
 # Workflow runner
 
-[run-workflow.mjs](run-workflow.mjs) gives a workflow script the same hooks Claude Code's Workflow tool gives it (`args`, `agent`, `parallel`, `pipeline`, `phase`, `log`, `budget`), so `llm-council/council-workflow.js` and `work-council/build-workflow.js` run unchanged on both hosts.
+[run-workflow.mjs](run-workflow.mjs) gives a workflow script the same hooks Claude Code's Workflow tool gives it (`args`, `agent`, `parallel`, `pipeline`, `phase`, `log`, `budget`), so `llm-council/council-workflow.js`, `work-council/build-workflow.js` and `doing-substantial-work/build-workflow.js` run unchanged on both hosts.
 
 ```bash
 node <skills folder>/workflow-runner/run-workflow.mjs <script.js> --args '<json>'    # or --args @file.json
 ```
 
-Run it from inside the target repository, with an absolute script path. Progress goes to stderr. Stdout gets one JSON object, `{ "runId": "wf_...", "result": <what the script returned> }`. `runId` plays the part of the Workflow tool's Run ID. It can take several minutes. Each agent may run up to 30 minutes and phases run one after another, so give the command the longest timeout the host allows, or run it in the background and wait for it. It runs only `llm-council/council-workflow.js`, `work-council/build-workflow.js` and its own [second-opinion.js](second-opinion.js) (one read-only Claude agent, args `{ "prompt" }`, result `{ text }` or `{ error }`), and refuses any other script.
+Run it from inside the target repository, with an absolute script path. Progress goes to stderr. Stdout gets one JSON object, `{ "runId": "wf_...", "result": <what the script returned> }`. `runId` plays the part of the Workflow tool's Run ID. It can take several minutes. Each agent may run up to 30 minutes and phases run one after another, so give the command the longest timeout the host allows, or run it in the background and wait for it. It runs only `llm-council/council-workflow.js`, `work-council/build-workflow.js`, `doing-substantial-work/build-workflow.js` and its own [second-opinion.js](second-opinion.js) (one read-only Claude agent, args `{ "prompt" }`, result `{ text }` or `{ error }`), and refuses any other script.
 
 Each `agent()` call runs `claude -p` in the repository:
 

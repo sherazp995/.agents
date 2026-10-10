@@ -11,6 +11,7 @@ TARGET (frozen; do not widen it)
 - pr and branch kinds only: read the head with `git show <head>:<path>` and diff `<base sha>...<head>`; the working tree may be on another branch.
 - Uncommitted, staged or files: the frozen STATE is {STATE}; its manifest is in {EARLIER_DIR}/manifest.txt. If the files change while you review (re-hash them at the end), stop, say which files changed, and write `verdict: INCOMPLETE`: the record's STATE would otherwise label code you did not review.
 - Mode: {MODE} (review | recheck). Previous state: {PREV_STATE}.
+- Lens: {LENS} (all | diff-only | structural). Anything but `all` is a single-lens run (SKILL.md, "Single-lens runs"): run only that lens, write no record.md, and end with the report alone.
 
 INTENT (requirements only; this is the bar the change is judged against)
 {INTENT}
@@ -19,7 +20,7 @@ EARLIER FINDINGS (read-only): {EARLIER}. In recheck mode every one of them gets 
 - If EARLIER has an "other agents" section with records at the same STATE, give each of their OPEN and PARTLY findings your own status and record it as `#<other>:<id> [severity] text — <status> (checked by <your runner>)`. A finding you confirm as still OPEN or PARTLY is a finding of this change and counts toward your verdict like your own; FIXED, N/A, DROPPED and ACCEPTED lines do not. List in the report where you and the other agent disagree.
 
 WHAT TO DO
-1. Read `~/.agents/skills/general-review/SKILL.md` sections 1 to 6 and every file they link, and follow them for this target. You are the lead: run them yourself, including the Codex lens (single-review command in `references/codex-handoff.md`). Do not start another review lead, and skip the "Modes and ledger" and "Who reviews" coordination steps, which are already done.
+1. Read `~/.agents/skills/general-review/SKILL.md` sections 1 to 6 and every file they link, and follow them for this target. You are the lead: run them yourself, including the Codex lens (single-review command in `references/codex-handoff.md`) and the diff-only agent (`references/lenses/diff-only.md`, sonnet, effort low, given only a file with the frozen diff). Do not start another review lead, and skip the "Modes and ledger" and "Who reviews" coordination steps, which are already done.
 2. Read only. Do not edit source, add tests to the checkout, commit, push, or post anything.
 3. Write the record body to {EARLIER_DIR}/record.md in the format from `references/ledger.md`, "Record format" (mode `single`, state = {STATE}, statuses only from that file's list, every finding including pre-existing ones and every earlier finding with its new status). When EARLIER has `imported_from:` and `source_runner:` lines, copy them into the record. Do not write anywhere else in the ledger.
 

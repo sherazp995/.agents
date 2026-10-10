@@ -2,7 +2,7 @@ Do a THERMONUCLEAR structural review of a Rails change. This is a read-only revi
 
 - Checkout (the change merged into the latest base): {WT}
 - Full diff: {DIFF}. In recheck mode, the new commits only: {NEW_DIFF}. Read the diff fully first.
-- Before-version of a file: `git -C {WT} show {BASE_REF}:<path>`.
+- Before-version of a file: `cd {WT} && git show {BASE_REF}:<path>`.
 - Purpose of the change: {PURPOSE}
 
 Look past naming and formatting. Hunt for deep structural problems in the changed code:

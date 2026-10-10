@@ -15,7 +15,7 @@ The partner of `llm-council` and `general-review`: they advise and review, this 
 | Mode | Plan gate | Build | Cost |
 |---|---|---|---|
 | `fast` (default) | One read-only critique from the other model | This session, card by card | One session plus one run of the other model |
-| `thorough` (`--thorough`, or "best of two") | `llm-council` engineering council | [build-workflow.js](build-workflow.js): Claude and Codex build in separate worktrees; checks, then judges, pick one | Measured once, tiny task: 15 agents, about 520k Claude tokens plus 3 Codex runs, about 4 minutes |
+| `thorough` (`--thorough`, or "best of two") | `llm-council` engineering council | [build-workflow.js](build-workflow.js): Claude and Codex build in separate worktrees; checks, then judges, pick one | Estimate, re-measure once Codex is installed: about 15 agents, 3 Codex runs, a few minutes. Model and effort per agent are set in each script's header table: cheap relays (haiku, low), one opus high plus one sonnet medium judge, opus high tie-breaker only on a split |
 
 Both modes pause for the user's approval after the plan. `--auto` (or "don't wait for me") skips that pause only. If the user explicitly says to skip any other step, skip it and list it in the report as "skipped at your request".
 
@@ -113,11 +113,11 @@ Run all three; none replaces another.
 
 ## 6. Fix loop
 
-Fix every introduced blocker, high and medium finding, re-run the affected checks, then recheck with `general-review` (its ledger rechecks only what changed). Stop after **3 review rounds**: if the verdict is still not PASS, stop and report the open findings instead of looping. Introduced lows and pre-existing findings go to the user; do not fix them unasked.
+Fix every introduced blocker, high and medium finding, re-run the affected checks, then recheck with `general-review` (its ledger rechecks only what changed). Stop after **3 review rounds**: if the verdict is still not PASS, stop and report the open findings instead of looping. These fixes happen in the flow without asking the user. Introduced lows and pre-existing findings go to the user; do not fix them unasked.
 
 ## 7. Report
 
-Use [the report template](references/report-template.md). Lead with the outcome. Every claim names its evidence (command and result). List anything skipped, unverified, or missing (Codex down, a builder failed, judges split). Do not commit unless the user asks. Delete `$WC_TMP` at the end.
+Use [the report template](references/report-template.md). Lead with the outcome. Every claim names its evidence (command and result). List anything skipped, unverified, or missing (Codex down, a builder failed, judges split). Once checks and review pass, commit the change (the first commit, or `git commit --amend` onto the one unpushed commit, per rule 54); never push. Builders still only stage. Delete `$WC_TMP` at the end.
 
 ## Red flags: stop and go back a step
 

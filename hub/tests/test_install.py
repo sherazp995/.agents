@@ -322,6 +322,60 @@ class HookTests(HubCase):
             self.check.check_clients(self.home, self.hub)
 
 
+class PermissionTests(HubCase):
+    def set_permissions(self, *rules):
+        registry = (self.hub / 'registry.toml').read_text().split('\n[permissions]')[0]
+        (self.hub / 'registry.toml').write_text(registry + '\n[permissions]\nclaude = ' + json.dumps(list(rules)) + '\n')
+
+    def allow(self):
+        return self.settings()['permissions']['allow']
+
+    def rerun(self):
+        installer = self.module.Installer(self.home, dry_run=False, host=False)
+        installer.run()
+        return installer
+
+    def test_rules_merge_into_empty_settings_and_a_second_run_changes_nothing(self):
+        self.set_permissions('Bash(git status:*)', 'Bash(npm test:*)')
+        self.installer.run()
+
+        self.assertEqual(self.allow(), ['Bash(git status:*)', 'Bash(npm test:*)'])
+        self.check.check_clients(self.home, self.hub)
+        self.assertEqual(self.rerun().changes, [])
+
+    def test_user_rules_and_other_settings_are_kept(self):
+        (self.home / '.claude/settings.json').write_text(json.dumps(
+            {'model': 'x', 'permissions': {'allow': ['Bash(make:*)'], 'deny': ['Bash(rm:*)']}}))
+        self.set_permissions('Bash(git status:*)')
+        self.installer.run()
+
+        self.assertEqual(self.settings()['model'], 'x')
+        self.assertEqual(self.settings()['permissions'], {'allow': ['Bash(make:*)', 'Bash(git status:*)'],
+                                                          'deny': ['Bash(rm:*)']})
+
+    def test_a_rule_dropped_from_the_registry_leaves_settings_but_user_rules_stay(self):
+        (self.home / '.claude/settings.json').write_text(json.dumps(
+            {'permissions': {'allow': ['Bash(make:*)', 'Bash(npm test:*)']}}))
+        self.set_permissions('Bash(git status:*)', 'Bash(git diff:*)', 'Bash(npm test:*)')
+        self.installer.run()
+        self.set_permissions('Bash(git diff:*)')
+
+        changes = self.rerun().changes
+        self.assertEqual(self.allow(), ['Bash(make:*)', 'Bash(npm test:*)', 'Bash(git diff:*)'])
+        self.assertTrue(any('removed allow Bash(git status:*)' in c for c in changes))
+        self.check.check_clients(self.home, self.hub)
+
+    def test_check_fails_when_a_rule_is_missing(self):
+        self.set_permissions('Bash(git status:*)')
+        self.installer.run()
+        settings = self.settings()
+        settings['permissions']['allow'] = []
+        (self.home / '.claude/settings.json').write_text(json.dumps(settings))
+
+        with self.assertRaisesRegex(AssertionError, 'lacks Bash\\(git status:\\*\\)'):
+            self.check.check_clients(self.home, self.hub)
+
+
 class SchedulerTests(HubCase):
     def setUp(self):
         super().setUp()
@@ -434,6 +488,21 @@ class CheckTests(HubCase):
 
         with self.assertRaisesRegex(AssertionError, r'project_doc_max_bytes \(10\)'):
             self.check.check_clients(self.home, self.hub)
+
+    def test_repo_only_checks_the_checkout_without_a_provisioned_home(self):
+        empty = self.home / 'empty-home'
+        empty.mkdir()
+        run = lambda: subprocess.run([sys.executable, '-I', str(self.hub / 'check.py'), '--repo-only'],
+                                     capture_output=True, text=True, env={**os.environ, 'HOME': str(empty)})
+
+        passed = run()
+        skill = json.loads((self.hub / 'selected-skills.json').read_text())['skills'][0]
+        (self.hub / 'skills' / skill).rmdir()
+        failed = run()
+
+        self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn(f'Selected skills missing: [{skill!r}]', failed.stdout)
 
 
 class HistoryTests(HubCase):

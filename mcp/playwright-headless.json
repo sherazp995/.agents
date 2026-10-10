@@ -1,0 +1,13 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "isolated": true,
+    "launchOptions": { "channel": "chrome", "headless": true },
+    "contextOptions": {
+      "viewport": { "width": 1440, "height": 900 },
+      "deviceScaleFactor": 3,
+      "ignoreHTTPSErrors": true
+    }
+  },
+  "outputDir": "/home/sheraz/Documents/screenshots"
+}

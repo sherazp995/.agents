@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs a Claude Code Workflow script (llm-council, work-council) outside Claude Code, e.g. from Codex.
+// Runs a Claude Code Workflow script (llm-council, work-council, doing-substantial-work) outside Claude Code, e.g. from Codex.
 //
 //   node run-workflow.mjs <script.js> [--args <json or @file>] [--out <file>]
 //
@@ -28,7 +28,12 @@ const fail = (message) => {
 
 // Codex lets this file run outside its sandbox, so it runs only the workflows shipped beside it,
 // never an arbitrary script.
-const ALLOWED_SCRIPTS = ['../llm-council/council-workflow.js', '../work-council/build-workflow.js', './second-opinion.js']
+const ALLOWED_SCRIPTS = [
+  '../llm-council/council-workflow.js',
+  '../work-council/build-workflow.js',
+  '../doing-substantial-work/build-workflow.js',
+  './second-opinion.js',
+]
   .map((rel) => realpathSync(fileURLToPath(new URL(rel, import.meta.url))))
 
 // The canonical approved path the given path resolves to, or null.

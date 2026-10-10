@@ -45,7 +45,7 @@ ENV: right after step 1, build `{WORKDIR}/ruby-env.sh` once. Then prefix every r
 
 STEPS
 1. **Worktree:** the change merged into the latest origin base, which is what CI tests.
-   - `git -C {REPO} worktree add --detach {WORKDIR}/wt {HEAD_SHA}`
+   - `cd {REPO} && git worktree add --detach {WORKDIR}/wt {HEAD_SHA}`
    - then in `{WORKDIR}/wt`: `git -c user.name=review -c user.email=review@local merge --no-commit --no-ff {BASE_SHA}`
    - Merge conflicts are a finding: list the files, run `git merge --abort`, and continue on the head. Never push.
 2. **Context:**
@@ -86,7 +86,7 @@ STEPS
    - `repro: {REPRO}`.
 8. **Cleanup:**
    - Copy the proof specs to {REPRO}. It survives the session; the scratchpad may not.
-   - Remove every worktree you made with `git -C {REPO} worktree remove --force <path>`.
+   - Remove every worktree you made with `cd {REPO} && git worktree remove --force <path>`.
    - Run `dropdb -U postgres --if-exists cohabit_test{TEST_ENV_NUMBER}`.
 
 FINAL MESSAGE: include runner, run ID, ledger and proof paths. Use the format in style.md for MODE={MODE}. Put a source tag on each item: (Codex / thermonuclear / simplicity / architecture). Under 900 words (600 in recheck mode).

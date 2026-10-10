@@ -10,6 +10,12 @@ Values the PR batch mode and the ledger cannot detect for this repo. Fill the le
 - Base branches to offer for a branch with no PR: `staging` (Recommended), `develop`, `master`.
 - Stack: Rails app with Postgres, Redis, Pundit, Stimulus, RSpec.
 
+## Branch visual QA (branch-visual-qa)
+
+- Default base when there is no PR target: `origin/develop`. Offer the base branches above when the user names none and develop does not fit.
+- The QA manifest must include the `review` object and a code review coverage row, even when the review lane is blocked or skipped.
+- Review lane: general-review single mode on the pinned snapshot. Use PR batch mode instead when the user asks for findings proven with tests.
+
 ## TEST_SETUP
 
 ```

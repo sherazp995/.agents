@@ -15,7 +15,7 @@ Five members, each with a distinct lens, grounded in the repository in the curre
 Protocol:
 
 1. **Deliberate**: each member answers the question independently.
-2. **Peer review**: each member ranks every answer, anonymized as "Response A, B, C…", to curb
+2. **Peer review**: one `sonnet` reviewer per member ranks every answer, anonymized as "Response A, B, C…", to curb
    self-preference bias. Only complete rankings (every label once, ranks 1..n once) count toward
    the mean-rank leaderboard.
 3. **Synthesis**: an `opus` chairman writes the final answer from the answers and rankings
@@ -141,5 +141,8 @@ Start with one line naming the council that ran. Then render two parts, in this 
 - The rosters, lenses, and models live in `COUNCILS` in `council-workflow.js`; the table above
   summarises them. Edit that file to retune members, providers (`claude` or `codex`), models,
   or each council's chairman (`chairmanModel`).
+- Model and effort per stage live in `STAGE` in the same file: Claude members answer at effort
+  medium, Codex relays run on haiku low, every peer reviewer is sonnet low, and the chairman is
+  opus high. Cost is an estimate (about 11 agents); re-measure once Codex is installed.
 - With fewer than two answers, the workflow returns the single answer (or a failure note)
   and skips review and synthesis.

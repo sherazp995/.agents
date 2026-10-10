@@ -2,7 +2,7 @@ Review a Rails change through a SIMPLICITY lens only. This is a read-only review
 
 - Checkout (the change merged into the latest base): {WT}
 - Full diff: {DIFF}. In recheck mode, the new commits only: {NEW_DIFF}. Read the diff fully first.
-- Before-version of a file: `git -C {WT} show {BASE_REF}:<path>`.
+- Before-version of a file: `cd {WT} && git show {BASE_REF}:<path>`.
 - Purpose of the change: {PURPOSE}
 
 The question: could a mid-level engineer understand the changed code in one read?

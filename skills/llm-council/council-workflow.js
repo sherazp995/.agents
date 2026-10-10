@@ -44,14 +44,13 @@ const COUNCILS = {
       ' Lead with the strongest consensus, graft the best points from runners-up, and explicitly note any' +
       ' meaningful disagreement and your call on it. Verify any claim you keep against the code. Cite files where relevant.',
     // provider 'claude': the subagent answers directly on `model`.
-    // provider 'codex': a Claude relay on `relayModel` runs the Codex CLI and returns its answer verbatim.
-    //   `reviewModel` (a Claude tier) does that member's structured peer review.
+    // provider 'codex': a Claude relay (STAGE.relay) runs the Codex CLI on `model` and returns its answer verbatim.
     members: [
       { id: 'M1', provider: 'claude', model: 'opus', lens: 'First-principles architect: reason from fundamentals, name the core problem and the cleanest design; ignore sunk cost.' },
       { id: 'M2', provider: 'claude', model: 'sonnet', lens: 'Pragmatic shipping engineer: weigh effort against payoff, propose the smallest change that works, and flag risk and rollout.' },
       { id: 'M3', provider: 'claude', model: 'haiku', lens: 'Simplicity and YAGNI advocate: push for the least code and least abstraction; prefer deleting over adding.' },
-      { id: 'M4', provider: 'codex', model: 'gpt-6-astra', relayModel: 'haiku', reviewModel: 'sonnet', lens: 'Contrarian red-teamer: attack the obvious answer, surface failure modes, edge cases, and where it breaks at scale.' },
-      { id: 'M5', provider: 'codex', model: 'gpt-6-astra', relayModel: 'haiku', reviewModel: 'sonnet', lens: 'Conventions and integration steward: make the answer fit existing repository patterns, naming, tests, and instruction-file rules.' },
+      { id: 'M4', provider: 'codex', model: 'gpt-6-astra', lens: 'Contrarian red-teamer: attack the obvious answer, surface failure modes, edge cases, and where it breaks at scale.' },
+      { id: 'M5', provider: 'codex', model: 'gpt-6-astra', lens: 'Conventions and integration steward: make the answer fit existing repository patterns, naming, tests, and instruction-file rules.' },
     ],
   },
   design: {
@@ -76,11 +75,11 @@ const COUNCILS = {
     // 3 Codex + 2 Claude: GPT-6 Astra leads the visual-design arenas (Design Arena UI Components,
     // Arena Image-to-WebDev) by margins inside the error bars; Claude keeps the functional lenses.
     members: [
-      { id: 'M1', provider: 'codex', model: 'gpt-6-astra', relayModel: 'haiku', reviewModel: 'sonnet', lens: 'Visual and hierarchy designer: layout, spacing, typographic hierarchy, visual weight, and where the eye should land first.' },
+      { id: 'M1', provider: 'codex', model: 'gpt-6-astra', lens: 'Visual and hierarchy designer: layout, spacing, typographic hierarchy, visual weight, and where the eye should land first.' },
       { id: 'M2', provider: 'claude', model: 'sonnet', lens: 'Accessibility advocate: WCAG, color contrast, keyboard and focus order, screen-reader semantics, hit-target size, and motion safety.' },
       { id: 'M3', provider: 'claude', model: 'opus', lens: 'Interaction and information-architecture lead: user journey, navigation, discoverability, and the empty, loading, error, and edge states.' },
-      { id: 'M4', provider: 'codex', model: 'gpt-6-astra', relayModel: 'haiku', reviewModel: 'sonnet', lens: 'Microcopy and content designer: labels, button text, tone, clarity, and whether affordances read as what they do.' },
-      { id: 'M5', provider: 'codex', model: 'gpt-6-astra', relayModel: 'haiku', reviewModel: 'sonnet', lens: 'Design-system steward: correct use of the existing component library and styling approach, token and naming consistency, responsive breakpoints, and repository design rules.' },
+      { id: 'M4', provider: 'codex', model: 'gpt-6-astra', lens: 'Microcopy and content designer: labels, button text, tone, clarity, and whether affordances read as what they do.' },
+      { id: 'M5', provider: 'codex', model: 'gpt-6-astra', lens: 'Design-system steward: correct use of the existing component library and styling approach, token and naming consistency, responsive breakpoints, and repository design rules.' },
     ],
   },
 }
@@ -94,6 +93,19 @@ if (!QUESTION || !COUNCIL) {
 }
 
 const LABELS = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+
+// Model and effort per stage. Cost scales with how much each stage decides:
+//   stage          model                      effort  why
+//   deliberate     member.model (Claude)      medium  independent answers; lens matters more than depth
+//   codex relay    haiku                      low     only runs `codex exec` and copies the answer
+//   peer review    sonnet                     low     ranking anonymized answers is a narrow task
+//   chairman       COUNCIL.chairmanModel      high    the one synthesis the user acts on
+const STAGE = {
+  deliberate: { effort: 'medium' },
+  relay: { model: 'haiku', effort: 'low' },
+  review: { model: 'sonnet', effort: 'low' },
+  chairman: { model: COUNCIL.chairmanModel, effort: 'high' },
+}
 
 // Claude members, reviewers, and the chairman run as the read-only Plan agent (no Edit or
 // Write tools), so "advice only" is enforced by tool access, not just the prompt. The Codex
@@ -148,8 +160,7 @@ const deliberate = (member) => {
     return agent(codexRelayPrompt(member), {
       label: `member:${member.id}(${member.model})`,
       phase: 'Deliberate',
-      model: member.relayModel,
-      effort: 'low',
+      ...STAGE.relay,
       schema: RELAY_SCHEMA,
     }).then((relay) => ({
       ...member,
@@ -160,6 +171,7 @@ const deliberate = (member) => {
     label: `member:${member.id}(${member.model})`,
     phase: 'Deliberate',
     model: member.model,
+    effort: STAGE.deliberate.effort,
     agentType: READ_ONLY_AGENT,
   }).then((text) => ({ ...member, text: typeof text === 'string' ? text.trim() : '' }))
 }
@@ -241,7 +253,7 @@ const reviewResults = (await parallel(labeled.map((member) => () =>
     ` question. Rank ALL of them from best (rank 1) to worst on ${COUNCIL.reviewCriteria}.` +
     ' Check claims against the code before rewarding them. Ranks must be unique: no ties.' +
     ` Give a one-line reason per response.\n\n${COUNCIL.questionHeading}:\n${QUESTION}\n\n${anonBlock}`,
-    { label: `review:${member.label}`, phase: 'Peer Review', model: member.reviewModel ?? member.model, schema: RANK_SCHEMA, agentType: READ_ONLY_AGENT },
+    { label: `review:${member.label}`, phase: 'Peer Review', ...STAGE.review, schema: RANK_SCHEMA, agentType: READ_ONLY_AGENT },
   ).then((result) => ({
     reviewer: member.label,
     rankings: (result?.rankings ?? []).slice().sort((a, b) => a.rank - b.rank),
@@ -303,7 +315,7 @@ const chairmanText = await agent(
   `${COUNCIL.context}\n\nYou are the ${COUNCIL.chairmanRole}. ${COUNCIL.chairmanAsk}\n\n` +
   `${COUNCIL.questionHeading}:\n${QUESTION}\n\nMEMBER ${COUNCIL.answerNoun.toUpperCase()}S (anonymized):\n${anonBlock}\n\n` +
   `PEER RANKINGS:\n${rankingsText}\n\nLEADERBOARD (best first):\n${leaderboardText}`,
-  { label: `chairman(${COUNCIL.chairmanModel})`, phase: 'Synthesis', model: COUNCIL.chairmanModel, agentType: READ_ONLY_AGENT },
+  { label: `chairman(${STAGE.chairman.model})`, phase: 'Synthesis', ...STAGE.chairman, agentType: READ_ONLY_AGENT },
 )
 
 const synthesisFailed = typeof chairmanText !== 'string' || !chairmanText.trim()

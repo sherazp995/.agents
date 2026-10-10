@@ -25,8 +25,17 @@ Your global rules are split across focused files to save context. Load each when
 ## Workflow
 
 - Project instructions (`CLAUDE.md`, `AGENTS.md`, and rule files they reference) override these global rules. Read them before changing code.
-- Discuss planned edits with the user before substantial code changes.
-- Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill.
+- Before substantial code changes, show the plan and get the user's approval. After approval, build, review and fix run without check-ins unless something changes the plan.
+- Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill. It is the single entry point for building features and fixes, and it decides when risky work escalates to `work-council --thorough`. It takes precedence over any plugin skill that also claims build tasks. Use `work-council` directly only when the user asks for it.
+
+## Keep the Chat Session Clean
+
+- The chat session coordinates: plan, decisions, questions to the user, short results.
+- Subagents do the heavy lifting: code search, building, test runs, browser QA, video recording.
+- Each subagent returns only a short result: files changed, commands with exit codes, evidence paths, what it could not do.
+- Subagents cannot start subagents. When a step needs several agents, the session runs it as one workflow (Claude Code: the Workflow tool; Codex: the `workflow-runner` skill). A skill that says to run a workflow is the opt-in.
+- Steps that start their own agents or workflows stay in the session (`general-review`, `cohabit_pr_review`, `llm-council`, `work-council`).
+- `doing-substantial-work`, `branch-visual-qa` and `video-qa` each say how they split the work.
 
 ## Agent Dispatch
 
@@ -49,6 +58,8 @@ Every agent on this machine shares one memory store and one chat library through
 ## Shared Configuration
 
 See [`AGENTS-CONFIG.md`](~/.agents/AGENTS-CONFIG.md) for managing global rules, skills, and agents across all sessions.
+
+**MCP servers:** two Playwright servers, headless `playwright` (default) and `playwright-extension` (the user's real Chrome). → [`AGENTS-MCP.md`](~/.agents/AGENTS-MCP.md)
 
 ---
 
