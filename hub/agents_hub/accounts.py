@@ -54,6 +54,17 @@ def plan(primary, folder, client):
             for entry in client['account_links']]
 
 
+def stale_links(primary, folder, client):
+    """Links in an account to a first-login entry that is no longer in account_links and does not
+    exist: left behind when an entry is dropped from the registry. Nothing is behind them."""
+    if not folder.is_dir():
+        return []
+    shared = set(client['account_links'])
+    return [path for path in sorted(folder.iterdir())
+            if path.name not in shared and path.is_symlink() and not path.exists()
+            and link_state(path, primary / path.name) in ('ok', 'full')]
+
+
 def account_clients(home):
     return {c['name']: c for c in registry.load(home / '.agents')['clients'] if c.get('account_links')}
 

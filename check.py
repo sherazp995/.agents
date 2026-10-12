@@ -1,4 +1,5 @@
-"""Check that this machine's agents use ~/.agents for rules, skills, agents, Ponytail, memory, chats, hooks and permissions.
+"""Check that this machine's agents use ~/.agents for rules, skills, agents, Ponytail, memory, chats,
+hooks, permissions, MCP servers and the shared config in local/.
 
 Every section runs even when an earlier one fails, and all failures are listed.
 Clients that are not installed (see registry.toml) are skipped. Run
@@ -15,7 +16,6 @@ import re
 import sqlite3
 import subprocess
 import sys
-import tomllib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'hub'))
 
@@ -23,7 +23,9 @@ from agents_hub import interpreter  # noqa: E402
 
 interpreter.ensure(str(Path(__file__).resolve()))
 
-from agents_hub import accounts, memory, registry, relocate, wiring  # noqa: E402
+import tomllib  # noqa: E402  (3.11+, so only after ensure() has found a new enough Python)
+
+from agents_hub import accounts, memory, registry, relocate, shared_config, wiring  # noqa: E402
 from agents_hub.paths import Paths  # noqa: E402
 
 IGNORED = ['.DS_Store', '.git']
@@ -131,6 +133,66 @@ def check_permissions(hub, name, config_file):
     assert not missing, f"{name}: {config_file} permissions.allow lacks {', '.join(missing)}; run install.py"
 
 
+def check_mcp(home, hub, name, primary, extras):
+    """Every mcp/servers.json server meant for this client is in each login's config, as install.py writes it.
+
+    Servers the user added are not checked. Codex is given only stdio servers.
+    """
+    path = hub / wiring.MCP_SERVERS
+    if name not in wiring.MCP_KEY or not path.exists():
+        return
+    servers = wiring.mcp_wanted(json.loads(path.read_text()).get('mcpServers', {}), name)
+    wanted = {n: wiring.mcp_server(name, s) for n, s in servers.items()
+              if name == 'claude' or s.get('type', 'stdio') == 'stdio'}
+    for login in [primary] + extras:
+        config_path = wiring.mcp_config_path(home, name, login, primary)
+        text = config_path.read_text() if config_path.exists() else ''
+        config = json.loads(text or '{}') if name == 'claude' else tomllib.loads(text)
+        present = config.get(wiring.MCP_KEY[name]) or {}
+        for server_name, server in wanted.items():
+            have = present.get(server_name)
+            assert have is not None, f'{name}: {config_path} lacks MCP server {server_name}; run install.py'
+            assert wiring.mcp_server(name, have) == server, \
+                f'{name}: MCP server {server_name} in {config_path} differs from {path}; run install.py'
+
+
+def check_local_ignored(hub):
+    """local/ holds machine-specific config, so git must ignore it (skipped when the hub is not a checkout)."""
+    if not (hub / 'local').exists() or not (hub / '.git').exists():
+        return
+    result = subprocess.run(['git', 'check-ignore', '-q', 'local/'], cwd=hub, capture_output=True, text=True)
+    if result.returncode == 128:
+        WARNINGS.append(f'could not ask git whether {hub / "local"} is ignored: {result.stderr.strip()}')
+        return
+    assert result.returncode == 0, f'{hub / "local"} is not git-ignored; add local/ to {hub / ".gitignore"}'
+
+
+def check_local_shared(home, hub, name, client, primary, extras):
+    """Each `local_shared` entry resolves to its hub copy in local/<client>/, in the first login and in
+    every extra login that links it (account_links), and each Codex login's shared_config keys match
+    local/codex/config.shared.toml (a warning: install.py reports why a login differs)."""
+    linked = set(client.get('account_links', []))
+    for entry in client.get('local_shared', []):
+        source, dest = primary / entry, hub / 'local' / name / entry
+        if dest.exists() or dest.is_symlink():
+            logins = [primary] + [extra for extra in extras if entry in linked]
+            for login in logins:
+                path = login / entry
+                assert path.resolve() == dest.resolve(), f'{name}: {path} should link to {dest}; run install.py'
+        elif source.exists() and not source.is_symlink():
+            WARNINGS.append(f'{source} is not in {hub / "local"} yet; close Claude and Codex, then run install.py')
+    shared = hub / shared_config.PATH
+    if not client.get('shared_config') or not shared.exists():
+        return
+    wanted = shared_config.units(tomllib.loads(shared.read_text()), shared_config.listed_paths(client))
+    for login in [primary] + extras:
+        config_path = login / 'config.toml'
+        config = tomllib.loads(config_path.read_text()) if config_path.exists() else {}
+        differ = shared_config.drift(config, wanted)
+        if differ:
+            WARNINGS.append(f'{config_path} differs from {shared} in {", ".join(differ)}; run install.py')
+
+
 def check_agents(hub, name, primary, extras):
     """Claude links the shared agents and commands; Codex has a generated .toml for every agent."""
     if name == 'claude':
@@ -138,6 +200,8 @@ def check_agents(hub, name, primary, extras):
         assert folder.is_symlink() and folder.resolve(strict=True) == (hub / 'agents').resolve(), \
             f'{folder} is not a link to {hub / "agents"}; run install.py'
         for command in sorted((hub / 'commands').glob('*.md')):
+            if not command.exists():
+                continue  # install.py skips a command whose target is missing on this machine
             link = primary / 'commands' / command.name
             assert link.is_symlink() and link.resolve(strict=True) == command.resolve(), \
                 f'{link} is not a link to {command}; run install.py'
@@ -159,6 +223,7 @@ def check_clients(home, hub):
     """Every installed client and profile is wired the way registry.toml says."""
     agents_md = hub / 'AGENTS.md'
     clients = installed_clients(home, hub)
+    check_local_ignored(hub)
     for name, client in clients.items():
         primary, extras = registry.profiles(home, client)
         for profile in [primary] + extras:
@@ -190,6 +255,8 @@ def check_clients(home, hub):
             elif status not in ('moved', 'absent'):
                 raise AssertionError(f'{name}: {status}')
         check_agents(hub, name, primary, extras)
+        check_mcp(home, hub, name, primary, extras)
+        check_local_shared(home, hub, name, client, primary, extras)
         if name == 'claude':
             wanted = wiring.provision_command(hub)
             commands = [h.get('command') for event, _m, h in check_hooks(hub, name, {}, primary / 'settings.json')

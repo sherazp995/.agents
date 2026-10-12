@@ -15,3 +15,5 @@ review-ledger/
 # Machine-local extra logins (agents-hub account).
 accounts.toml
 history/
+# Machine-specific shared config (install.py moves Claude settings and Codex hooks/prompts/rules here).
+local/

@@ -129,7 +129,7 @@ class HookCase(unittest.TestCase):
 class SnapshotTests(HookCase):
     def test_the_turn_is_the_diff_from_its_start_snapshot(self):
         def shell_edit():
-            subprocess.run(['sed', '-i', 's/1/2/', 'lib/a.py'], cwd=self.repo, check=True)
+            subprocess.run(['perl', '-pi', '-e', 's/1/2/', 'lib/a.py'], cwd=self.repo, check=True)  # sed -i differs on BSD
 
         def new_untracked_file():
             self.write('lib/fresh.py', 'F = 1\n')

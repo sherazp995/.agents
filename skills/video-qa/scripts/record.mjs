@@ -11,6 +11,8 @@ const EXPECT_TIMEOUT_MS = 5000;
 const ACTION_TIMEOUT_MS = 10000;
 const NAVIGATION_TIMEOUT_MS = 30000;
 const BANNER_HEIGHT = 56;
+const CAPTION_MARGIN = 24;
+const STRIP_COLOUR = '0x111827';
 const CARD_SECONDS = 3;
 const FPS = 25;
 
@@ -23,8 +25,12 @@ if (!scenarioPath) {
 const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8'));
 const outDir = resolve(outArg || join(dirname(resolve(scenarioPath)), 'video'));
 const viewport = scenario.viewport || { width: 1280, height: 800 };
-// The banner gets its own strip above the page, so it never hides the top of the page.
+// The banner gets its own strip above the page and the captions their own strip below it,
+// so neither ever hides part of the page. The caption strip height is set once all captions are known.
 const frame = { width: viewport.width, height: viewport.height + BANNER_HEIGHT };
+let stripHeight = 0;
+// libass sizes SRT fonts against a 288px-high script; this keeps the size captions had over a bannered frame.
+const CAPTION_PX = Math.round(20 * (viewport.height + BANNER_HEIGHT) / 288);
 
 // Human pacing: a visible cursor glides to each target, typing has an uneven rhythm,
 // and there is a short varied pause before every action. "pace": "fast" turns it off.
@@ -226,8 +232,9 @@ async function recordVersion(browser, version) {
     results.push({ step: i + 1, caption: step.caption, action: step.action, kind, ...(outcome || { ok: true, note: 'done' }) });
   }
 
-  const shot = join(outDir, `${slug}-final.png`);
-  await page.screenshot({ path: shot, fullPage: false });
+  // The page alone; the caption strip is added to it with the video.
+  const pageShot = join(rawDir, `${slug}-final-page.png`);
+  await page.screenshot({ path: pageShot, fullPage: false });
   const video = page.video();
   await context.close();
   const webm = join(rawDir, `${slug}.webm`);
@@ -236,7 +243,7 @@ async function recordVersion(browser, version) {
   writeFileSync(join(outDir, `${slug}.srt`), cues
     .map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${c.text}\n`).join('\n'));
 
-  return { ...version, slug, webm, results, aborted, consoleErrors, screenshot: shot };
+  return { ...version, slug, webm, cues, results, aborted, consoleErrors, pageShot, screenshot: join(outDir, `${slug}-final.png`) };
 }
 
 function ffmpeg(args) {
@@ -251,25 +258,54 @@ function textFile(name, text) {
 // drawtext reads % as an expansion; expansion=none prints user text exactly as written.
 const drawText = (file, options) => `drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontcolor=white:${options}`;
 
-// Banner strip above the page naming the version, plus burned-in step captions.
+// Tall enough for the longest caption once wrapped (at least two lines), so every clip and card share one size.
+function stripHeightFor(texts) {
+  const perLine = Math.floor((viewport.width - 2 * CAPTION_MARGIN) / (CAPTION_PX * 0.5));
+  const lines = Math.max(2, ...texts.map((text) => text.split('\n')
+    .reduce((n, line) => n + Math.max(1, Math.ceil(line.length / perLine)), 0)));
+  // libx264 needs an even frame height.
+  const height = Math.ceil(lines * CAPTION_PX * 1.2 + CAPTION_PX);
+  return height + ((viewport.height + height) % 2);
+}
+
+// Dark strip with the captions centred in it. force_style reads Alignment as legacy SSA, where 10 is middle centre.
+function captionStrip(srt) {
+  const style = `PlayResX=${viewport.width},PlayResY=${stripHeight},FontName=Noto Sans,FontSize=${CAPTION_PX},Bold=1,`
+    + `PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=0,Shadow=0,Alignment=10,`
+    + `MarginL=${CAPTION_MARGIN},MarginR=${CAPTION_MARGIN},MarginV=0`;
+  return `color=c=${STRIP_COLOUR}:s=${viewport.width}x${stripHeight}:r=${FPS},subtitles=${srt}:force_style='${style}'`;
+}
+
+// Page filters, then the caption strip stacked below the page.
+const withStrip = (pageFilters, srt, tail) => ['-filter_complex',
+  `[0:v]${pageFilters}[page];${captionStrip(srt)}[strip];[page][strip]vstack=inputs=2:shortest=1${tail}[v]`, '-map', '[v]'];
+
+// Banner strip above the page naming the version, step captions in the strip below it.
 function burnCaptions(rec) {
   const banner = textFile(`${rec.slug}-banner.txt`, `${rec.label}${rec.detail ? `  ·  ${rec.detail}` : ''}`);
   const colour = rec.role === 'before' ? '0xB42318' : '0x067647';
-  // BorderStyle=4 draws one box behind a multi-line caption (libass 0.17+).
-  const style = 'FontName=Noto Sans,FontSize=20,Bold=1,PrimaryColour=&H00FFFFFF,BorderStyle=4,'
-    + 'OutlineColour=&HFF000000,BackColour=&H40000000,Outline=10,Shadow=0,MarginV=28';
-  const filters = [
-    `scale=${viewport.width}:${viewport.height}`,
-    `pad=${frame.width}:${frame.height}:0:${BANNER_HEIGHT}:color=${colour}`,
-    drawText(banner, 'fontsize=26:x=24:y=15'),
-    `subtitles=${rec.slug}.srt:force_style='${style}'`,
-    `fps=${FPS}`, 'format=yuv420p', 'setsar=1',
-  ].join(',');
+  const srt = `${rec.slug}.srt`;
+  const tail = ',format=yuv420p,setsar=1';
+  const scale = `scale=${viewport.width}:${viewport.height}`;
+  const page = `${scale},fps=${FPS}`;
+  const bannerStrip = `pad=${viewport.width}:${viewport.height + BANNER_HEIGHT}:0:${BANNER_HEIGHT}:color=${colour},`
+    + drawText(banner, 'fontsize=26:x=24:y=15');
+  const bannered = `${page},${bannerStrip}`;
   const out = `${rec.slug}.mp4`;
-  ffmpeg(['-i', rec.webm, '-vf', filters, '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', out]);
+  ffmpeg(['-i', rec.webm, ...withStrip(bannered, srt, tail), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', out]);
+  // The same footage and captions with no version banner or cards, to share on its own.
+  ffmpeg(['-i', rec.webm, ...withStrip(page, srt, tail), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22',
+    '-movflags', '+faststart', cleanName(rec)]);
+  // The last frame keeps the banner and shows the last caption in the strip.
+  const last = rec.cues.at(-1);
+  const lastSrt = textFile(`${rec.slug}-final.srt`, `1\n${srtTime(0)} --> ${srtTime(3600000)}\n${last ? last.text : ''}\n`);
+  ffmpeg(['-loop', '1', '-i', rec.pageShot, ...withStrip(`${scale},${bannerStrip}`, lastSrt, ''), '-frames:v', '1', rec.screenshot]);
   contactSheet(out, `${rec.slug}-sheet.png`);
   return out;
 }
+
+// <id>-before.mp4 and <id>-after.mp4; a version without a role keeps its slug.
+const cleanName = (rec) => `${scenario.id || 'video-qa'}-${rec.role || rec.slug}.mp4`;
 
 // Twelve frames spread evenly over the whole clip, so a reviewer sees the trigger and the result.
 function contactSheet(clip, sheet) {
@@ -322,6 +358,8 @@ try {
 } finally {
   await browser.close();
 }
+stripHeight = stripHeightFor(recordings.flatMap((rec) => rec.cues.map((cue) => cue.text)));
+frame.height = viewport.height + BANNER_HEIGHT + stripHeight;
 
 const segments = [card('title', [scenario.title, '', ...(scenario.subtitle ? [scenario.subtitle] : []),
   ...recordings.map((r) => `${r.label}: ${r.detail || r.baseUrl}`)])];
@@ -350,12 +388,14 @@ const report = {
   video: join(outDir, finalName),
   sideBySide: existsSync(join(outDir, 'side-by-side.mp4')) ? join(outDir, 'side-by-side.mp4') : null,
   versions: recordings.map(({ label, detail, baseUrl, role, slug, results, aborted, consoleErrors, screenshot }) => ({
-    label, detail, baseUrl, role, clip: join(outDir, `${slug}.mp4`), captions: join(outDir, `${slug}.srt`),
+    label, detail, baseUrl, role, clip: join(outDir, `${slug}.mp4`),
+    cleanClip: join(outDir, cleanName({ role, slug })), captions: join(outDir, `${slug}.srt`),
     sheet: join(outDir, `${slug}-sheet.png`), screenshot, aborted, results, consoleErrors,
   })),
 };
 writeFileSync(join(outDir, 'results.json'), JSON.stringify(report, null, 2));
 console.log(JSON.stringify({ verdict: outcome, video: report.video, sideBySide: report.sideBySide,
+  cleanClips: report.versions.map((v) => v.cleanClip),
   sheets: report.versions.map((v) => v.sheet),
   summary: recordings.map(summaryLine) }, null, 2));
 const EXIT_CODES = { FIXED: 0, WORKING: 0, INCOMPLETE: 2 };

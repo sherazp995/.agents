@@ -5,17 +5,19 @@ description: Record a captioned before and after video that proves a fix or feat
 
 # Video QA
 
-Produce one MP4 that shows, step by step, how a bug was triggered on the base version, then the same steps working on the changed version. Each step is captioned, and every check ends with PASS or FAIL in the caption. The video is evidence, so it must show what really happened.
+Produce two MP4s, one showing step by step how a bug was triggered on the base version and one showing the same steps working on the changed version, plus a combined film of both. Each step is captioned, and every check ends with PASS or FAIL in the caption. The video is evidence, so it must show what really happened.
 
 ## Who does what: the session coordinates, one runner records
 
-The chat session states the claim to prove (bug and fix, or feature) and the versions to compare. One runner subagent (`general-purpose`) does steps 1 to 5: servers, flow discovery with the Playwright MCP, scenario, recording, contact sheet check and server cleanup. Give it this skill's path and the claim. It returns only: verdict, exit code, absolute path of `<id>.mp4`, both contact sheet paths, the trigger steps, console errors, whether every server it started was stopped, and anything it could not do. The session looks at both contact sheets before reporting. When run with `branch-visual-qa`, the session starts the two runners as two agent calls, one after the other, so they share the single browser slot.
+The chat session states the claim to prove (bug and fix, or feature) and the versions to compare. One runner subagent (`general-purpose`) does steps 1 to 5: servers, flow discovery with the Playwright MCP, scenario, recording, contact sheet check and server cleanup. Give it this skill's path and the claim. It returns only: verdict, exit code, absolute paths of `<id>-before.mp4`, `<id>-after.mp4` and `<id>.mp4`, both contact sheet paths, the trigger steps, console errors, whether every server it started was stopped, and anything it could not do. The session looks at both contact sheets before reporting. When run with `branch-visual-qa`, the session starts the two runners as two agent calls, one after the other, so they share the single browser slot.
 
 ## 1. Run both versions
 
 Follow the "Establish the comparison" and "Make both versions work" sections of [branch-visual-qa](../branch-visual-qa/SKILL.md): base and branch in separate checkouts on separate ports, isolated QA databases with identical fixtures, each server verified to run its own SHA. Record each SHA; `detail` on the video banner is `<ref> <short sha>`. Versions that are not git checkouts (static builds, deployed URLs) get a plain description in `detail`, such as `staging build 2026-10-10`. For a new feature with no "before", record the changed version alone.
 
 Start each server in the background on a port you checked is free (`ss -ltn`), record its PID, and when finished kill only those PIDs and confirm the ports are closed. Leave servers that were running before the run alone. Preserve the user's checkout: no edits, commits or branch changes.
+
+A flow behind staff or IdP sign-in (admin, super admin, impersonation) is not blocked in cohabit-web: start the version with the `server-tunnel` skill, which brings up the portal and IdP, and tear it down afterwards (see `cohabit-local-browser-testing`).
 
 ## 2. Find the flow with the Playwright MCP
 
@@ -75,14 +77,15 @@ Before reporting, look at the video yourself: the recorder writes `before-sheet.
 
 ## Outputs
 
-In the run folder:
+Every video, contact sheet and `*-final.png` shows the step captions in a dark strip below the page, sized for the longest caption, so a caption never covers the page. In the run folder:
 
-- `<id>.mp4`: title card, BEFORE clip, AFTER clip, verdict card. This is the deliverable.
+- `<id>-before.mp4` and `<id>-after.mp4`: each version on its own, with its step captions but no version banner, title or verdict card. These are the deliverables to share, one video per version (a single-version run makes only its own, `<id>-<role>.mp4`, or `<id>-<slug>.mp4` without a role).
+- `<id>.mp4`: title card, BEFORE clip, AFTER clip, verdict card, with the version banner. Kept as the combined proof.
 - `side-by-side.mp4`: both clips next to each other (set `"sideBySide": false` to skip).
 - `before.mp4`, `after.mp4`, `*-sheet.png` contact sheets, `*.srt` captions, `*-final.png` last frames.
 - `results.json`: verdict, per step PASS or FAIL, console errors per version. It records that the run was automated.
 
-Keep videos out of git. Report the verdict, the absolute path of `<id>.mp4`, the steps that trigger the bug, and any console errors. When run inside branch-visual-qa, add the videos to that report's `evidence` list.
+Keep videos out of git. Report the verdict, the absolute paths of `<id>-before.mp4` and `<id>-after.mp4` first, then `<id>.mp4`, the steps that trigger the bug, and any console errors. When run inside branch-visual-qa, add the videos to that report's `evidence` list.
 
 ## Honesty
 

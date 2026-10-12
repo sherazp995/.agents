@@ -97,7 +97,14 @@ test('a check failing on BEFORE and passing on AFTER is FIXED, with % titles and
     assert.equal(run.code, 0, run.stderr);
     assert.equal(run.results.verdict, 'FIXED');
     assert.doesNotMatch(run.stderr, /Stray %/);
-    assert.equal(frameHeight(join(run.dir, 'before.mp4')), VIEWPORT.height + BANNER_HEIGHT);
+    // Captions sit in a strip below the page; the shareable clips have the same strip but no banner.
+    const clean = frameHeight(join(run.dir, 'flow-before.mp4'));
+    assert.ok(clean > VIEWPORT.height);
+    assert.equal(frameHeight(join(run.dir, 'flow-after.mp4')), clean);
+    assert.equal(frameHeight(join(run.dir, 'before.mp4')), clean + BANNER_HEIGHT);
+    assert.equal(frameHeight(join(run.dir, 'title.mp4')), clean + BANNER_HEIGHT);
+    assert.deepEqual(run.results.versions.map((v) => v.cleanClip),
+      [join(run.dir, 'flow-before.mp4'), join(run.dir, 'flow-after.mp4')]);
   } finally {
     rmSync(run.dir, { recursive: true, force: true });
   }

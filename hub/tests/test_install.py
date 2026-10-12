@@ -30,6 +30,7 @@ account_env = "CLAUDE_CONFIG_DIR"
 account_command = "claude"
 history = ["projects"]
 account_links = ["agents", "CLAUDE.md", "projects", "settings.json", "skills"]
+local_shared = ["settings.json", "settings.local.json"]
 separate = []
 {claude_hooks}
 
@@ -40,7 +41,10 @@ profiles = ["~/.codex"]
 rules = "AGENTS.md"
 rules_mode = "link"
 account_command = "codex"
+account_links = ["agents", "hooks.json", "prompts"]
+local_shared = ["hooks.json", "prompts", "rules"]
 separate = []
+shared_config = ["model", "plugins", "tui.nux"]
 {codex_hooks}
 
 [[clients]]
@@ -67,8 +71,10 @@ def make_hub(home, claude_hooks='', codex_hooks=''):
     hub.mkdir()
     for name in ('install.py', 'check.py', 'AGENTS.md', 'selected-skills.json', 'ponytail.json'):
         shutil.copy(CHECKOUT / name, hub / name)
-    for folder in ('integrations', 'agents', 'commands'):
+    for folder in ('integrations', 'agents'):
         shutil.copytree(CHECKOUT / folder, hub / folder)
+    # Commands linked to another checkout stay links (dangling here), as on a machine without it.
+    shutil.copytree(CHECKOUT / 'commands', hub / 'commands', symlinks=True)
     (hub / 'hub').mkdir()
     shutil.copy(CHECKOUT / 'hub/agents-hub', hub / 'hub/agents-hub')
     shutil.copytree(CHECKOUT / 'hub/agents_hub', hub / 'hub/agents_hub',
@@ -164,6 +170,31 @@ class InstallTests(HubCase):
             self.assertIn(path, result.stdout)
         self.assertEqual((self.home / '.claude/CLAUDE.md').read_text(), 'my own rules')
         self.assertFalse((self.home / '.claude/agents').is_symlink())
+
+    def test_a_command_linked_outside_the_hub_is_reached_through_the_hub(self):
+        outside = self.home / 'project/pin.md'
+        outside.parent.mkdir()
+        outside.write_text('pin')
+        (self.hub / 'commands/pin.md').symlink_to(outside)
+        link = self.home / '.claude/commands/pin.md'
+        link.parent.mkdir()
+        link.symlink_to(outside)  # hand-made link straight to the other checkout
+
+        result = install(self.hub, self.home)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(os.readlink(link), '../../.agents/commands/pin.md')
+        self.assertEqual(link.read_text(), 'pin')
+
+    def test_a_command_whose_target_is_missing_is_skipped_with_a_note(self):
+        (self.hub / 'commands/gone.md').symlink_to(self.home / 'missing/gone.md')
+
+        result = install(self.hub, self.home)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('which is missing here; skipped', result.stdout)
+        self.assertFalse((self.home / '.claude/commands/gone.md').is_symlink())
+        self.check.check_clients(self.home, self.hub)
 
     def test_an_old_symlinked_cursor_rule_is_replaced_without_touching_the_template(self):
         template = self.hub / 'integrations/cursor.mdc'
@@ -376,6 +407,207 @@ class PermissionTests(HubCase):
             self.check.check_clients(self.home, self.hub)
 
 
+class McpTests(HubCase):
+    EXT = {'type': 'stdio', 'command': 'npx', 'args': ['-y', '@playwright/mcp@latest', '--extension'],
+           'env': {}, 'env_vars': ['TOKEN']}
+
+    def set_servers(self, **servers):
+        (self.hub / 'mcp').mkdir(exist_ok=True)
+        (self.hub / 'mcp/servers.json').write_text(json.dumps({'mcpServers': servers}))
+
+    def claude_json(self, folder='', **config):
+        path = self.home / folder / '.claude.json'
+        if config:
+            path.write_text(json.dumps(config))
+        return json.loads(path.read_text())
+
+    def rerun(self):
+        installer = self.module.Installer(self.home, dry_run=False, host=False)
+        installer.run()
+        return installer
+
+    def test_servers_are_added_project_servers_kept_and_a_second_run_changes_nothing(self):
+        project = {'/p': {'mcpServers': {'local': {'command': 'x'}}}}
+        self.claude_json(projects=project, userID='u')
+        self.set_servers(**{'playwright-extension': self.EXT})
+        self.installer.run()
+
+        config = self.claude_json()
+        self.assertEqual(config['mcpServers']['playwright-extension'],
+                         {k: v for k, v in self.EXT.items() if k != 'env_vars'})
+        self.assertEqual((config['projects'], config['userID']), (project, 'u'))
+        self.assertEqual(tomllib.loads((self.home / '.codex/config.toml').read_text())['mcp_servers'],
+                         {'playwright-extension': {k: v for k, v in self.EXT.items() if k not in ('type', 'env')}})
+        self.assertEqual(self.rerun().changes, [])
+
+    def test_owned_servers_are_updated_and_removed_but_user_servers_stay(self):
+        mine = {'type': 'stdio', 'command': 'mine', 'args': [], 'env': {}}
+        self.claude_json(mcpServers={'mine': mine, 'same': {'command': 'same'}})
+        self.set_servers(a={'command': 'a1'}, same={'command': 'same'})
+        self.installer.run()
+        self.assertEqual(self.claude_json()['mcpServers']['a']['command'], 'a1')
+
+        self.set_servers(a={'command': 'a2'}, b={'command': 'b'})
+        self.rerun()
+        config = self.claude_json()
+        self.assertEqual(config['mcpServers']['a']['command'], 'a2')
+        config['mcpServers']['b']['args'] = ['edited']
+        (self.home / '.claude.json').write_text(json.dumps(config))
+
+        self.set_servers()
+        changes = self.rerun().changes
+        self.assertEqual(sorted(self.claude_json()['mcpServers']), ['b', 'mine', 'same'])
+        self.assertEqual(self.claude_json()['mcpServers']['mine'], mine)
+        self.assertTrue(any('removed MCP server a ' in c for c in changes), changes)
+
+    def test_a_different_server_under_a_hub_name_is_a_conflict_and_is_kept(self):
+        self.claude_json(mcpServers={'a': {'command': 'user'}})
+        self.set_servers(a={'command': 'hub'})
+        result = install(self.hub, self.home)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('MCP server a differs from mcp/servers.json', result.stdout)
+        self.assertEqual(self.claude_json()['mcpServers'], {'a': {'command': 'user'}})
+
+    def test_a_plain_hand_added_playwright_ext_is_replaced_and_any_other_is_noted(self):
+        legacy = {'type': 'stdio', 'command': 'npx', 'args': ['@playwright/mcp@latest', '--extension'], 'env': {}}
+        self.claude_json(mcpServers={'playwright-ext': legacy})
+        self.claude_json('.claude1', mcpServers={'playwright-ext': {**legacy, 'args': ['--other']}})
+        (self.hub / 'accounts.toml').write_text('[[accounts]]\nclient = "claude"\nalias = "c1"\ndir = "~/.claude1"\n')
+        self.set_servers(**{'playwright-extension': self.EXT})
+        self.installer.run()
+
+        self.assertEqual(list(self.claude_json()['mcpServers']), ['playwright-extension'])
+        self.assertIn('replaced hand-added MCP server playwright-ext with playwright-extension',
+                      ' '.join(self.installer.changes))
+        extra = self.claude_json('.claude1')['mcpServers']
+        self.assertEqual(sorted(extra), ['playwright-ext', 'playwright-extension'])
+        self.assertTrue(any('left hand-added MCP server playwright-ext' in n for n in self.installer.notes))
+        self.assertTrue((self.home / '.claude1' / self.module.MCP_STATE).exists())
+
+    def test_codex_playwright_extension_in_the_older_env_form_is_adopted_keeping_tool_approvals(self):
+        config = self.home / '.codex/config.toml'
+        config.write_text('[mcp_servers.playwright-extension]\ncommand = "npx"\nargs = ["@playwright/mcp@latest"]\n'
+                          'env = { PLAYWRIGHT_MCP_EXTENSION = "true" }\nenv_vars = ["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]\n\n'
+                          '[mcp_servers.playwright-extension.tools.click]\napproval_mode = "approve"\n')
+        self.set_servers(**{'playwright-extension': self.EXT})
+        self.installer.run()
+
+        self.assertEqual(self.installer.conflicts, [])
+        self.assertIn('replaced hand-added MCP server playwright-extension (older form)',
+                      ' '.join(self.installer.changes))
+        self.assertEqual(tomllib.loads(config.read_text())['mcp_servers']['playwright-extension'],
+                         {'command': 'npx', 'args': self.EXT['args'], 'env_vars': ['TOKEN'],
+                          'tools': {'click': {'approval_mode': 'approve'}}})
+        self.assertEqual(self.rerun().changes, [])
+
+    def test_legacy_servers_with_any_setting_of_their_own_are_kept(self):
+        config = self.home / '.codex/config.toml'
+        text = ('[mcp_servers.playwright-extension]\ncommand = "npx"\nargs = ["@playwright/mcp@latest"]\n'
+                'env = { PLAYWRIGHT_MCP_EXTENSION = "true" }\nenabled = false\nstartup_timeout_sec = 60\n')
+        config.write_text(text)
+        ext = {'type': 'stdio', 'command': 'npx', 'args': ['@playwright/mcp@latest', '--extension'],
+               'env': {'FOO': 'bar'}}
+        self.claude_json(mcpServers={'playwright-ext': ext})
+        self.set_servers(**{'playwright-extension': self.EXT})
+        self.installer.run()
+
+        self.assertEqual(config.read_text(), text)
+        self.assertTrue(any('playwright-extension differs' in c for c in self.installer.conflicts))
+        self.assertEqual(self.claude_json()['mcpServers']['playwright-ext'], ext)
+        self.assertTrue(any('left hand-added MCP server playwright-ext' in n for n in self.installer.notes))
+
+    def test_an_owned_server_edited_by_hand_stays_owned_until_it_matches_again(self):
+        self.set_servers(a={'command': 'a1'})
+        self.installer.run()
+        state = self.home / '.claude' / self.module.MCP_STATE
+        config = self.claude_json()
+        written = dict(config['mcpServers']['a'])
+        config['mcpServers']['a']['args'] = ['edited']
+        (self.home / '.claude.json').write_text(json.dumps(config))
+
+        result = install(self.hub, self.home)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('MCP server a was changed by hand', result.stdout)
+        self.assertIn('a', json.loads(state.read_text())['servers'])
+
+        config['mcpServers']['a'] = written
+        (self.home / '.claude.json').write_text(json.dumps(config))
+        self.assertEqual(self.rerun().changes, [])
+        self.set_servers(a={'command': 'a2'})
+        installer = self.rerun()
+        self.assertEqual((installer.conflicts, self.claude_json()['mcpServers']['a']['command']), ([], 'a2'))
+        self.set_servers()
+        self.rerun()
+        self.assertNotIn('a', self.claude_json()['mcpServers'])
+
+    def test_the_shipped_servers_reach_every_codex_login_and_keep_identical_hand_added_ones(self):
+        shutil.copytree(CHECKOUT / 'mcp', self.hub / 'mcp')
+        (self.home / '.codex1').mkdir()
+        (self.hub / 'accounts.toml').write_text('[[accounts]]\nclient = "codex"\nalias = "x1"\ndir = "~/.codex1"\n')
+        hand_added = '[mcp_servers.playwright]\ncommand = "npx"\nargs = ["@playwright/mcp@latest"]\n'
+        (self.home / '.codex/config.toml').write_text(hand_added)
+        self.installer.run()
+
+        self.assertEqual(self.installer.conflicts, [])
+        for login in ('.codex', '.codex1'):
+            servers = tomllib.loads((self.home / login / 'config.toml').read_text())['mcp_servers']
+            self.assertEqual(servers['playwright'], {'command': 'npx', 'args': ['@playwright/mcp@latest']})
+            self.assertIn('playwright-extension', servers)
+        self.assertTrue((self.home / '.codex/config.toml').read_text().startswith(hand_added))
+        self.assertEqual(sorted(self.claude_json()['mcpServers']), ['playwright-extension'])
+        self.assertEqual(self.rerun().changes, [])
+        self.check.check_mcp(self.home, self.hub, 'codex', self.home / '.codex', [self.home / '.codex1'])
+
+    def test_check_needs_every_hub_server_as_written_but_ignores_user_servers(self):
+        (self.home / '.claude1').mkdir(exist_ok=True)
+        (self.hub / 'accounts.toml').write_text('[[accounts]]\nclient = "claude"\nalias = "c1"\ndir = "~/.claude1"\n')
+        self.claude_json(mcpServers={'mine': {'command': 'mine'}})
+        self.set_servers(a={'command': 'a1'})
+        self.installer.run()
+        self.check.check_clients(self.home, self.hub)
+
+        config = self.claude_json('.claude1')
+        config['mcpServers']['a']['args'] = ['edited']
+        (self.home / '.claude1/.claude.json').write_text(json.dumps(config))
+        with self.assertRaisesRegex(AssertionError, 'MCP server a in .*claude1/.claude.json differs'):
+            self.check.check_clients(self.home, self.hub)
+        del config['mcpServers']['a']
+        (self.home / '.claude1/.claude.json').write_text(json.dumps(config))
+        with self.assertRaisesRegex(AssertionError, 'lacks MCP server a'):
+            self.check.check_clients(self.home, self.hub)
+
+    def test_codex_edits_keep_the_rest_of_config_toml_and_tool_approvals(self):
+        config = self.home / '.codex/config.toml'
+        config.write_text('model = "x"  # keep\n\n[mcp_servers.a]\ncommand = "a1"\n\n'
+                          '[mcp_servers.a.tools.click]\napproval_mode = "approve"\n\n[other]\nk = 1\n')
+        (self.home / '.codex' / self.module.MCP_STATE).write_text(json.dumps(
+            {'servers': {'a': {'command': 'a1', 'args': [], 'env': {}, 'env_vars': []}}}))
+        self.set_servers(a={'command': 'a2'})
+        self.installer.run()
+
+        text = config.read_text()
+        self.assertIn('model = "x"  # keep\n', text)
+        self.assertEqual(tomllib.loads(text)['mcp_servers']['a'],
+                         {'command': 'a2', 'tools': {'click': {'approval_mode': 'approve'}}})
+        self.assertEqual(tomllib.loads(text)['other'], {'k': 1})
+
+        self.set_servers()
+        self.rerun()
+        self.assertEqual(tomllib.loads(config.read_text()), {'model': 'x', 'other': {'k': 1}})
+
+    def test_a_codex_server_it_cannot_edit_line_by_line_is_a_conflict(self):
+        config = self.home / '.codex/config.toml'
+        config.write_text('mcp_servers = { a = { command = "a1" } }\n')
+        (self.home / '.codex' / self.module.MCP_STATE).write_text(json.dumps(
+            {'servers': {'a': {'command': 'a1', 'args': [], 'env': {}, 'env_vars': []}}}))
+        self.set_servers(a={'command': 'a2'})
+        self.installer.run()
+
+        self.assertTrue(any('cannot set MCP servers' in c for c in self.installer.conflicts))
+        self.assertEqual(config.read_text(), 'mcp_servers = { a = { command = "a1" } }\n')
+
+
 class SchedulerTests(HubCase):
     def setUp(self):
         super().setUp()
@@ -489,6 +721,30 @@ class CheckTests(HubCase):
         with self.assertRaisesRegex(AssertionError, r'project_doc_max_bytes \(10\)'):
             self.check.check_clients(self.home, self.hub)
 
+    def test_an_extra_login_whose_local_shared_entry_leaves_the_hub_fails(self):
+        (self.hub / 'accounts.toml').write_text('[[accounts]]\nclient = "claude"\nalias = "c1"\ndir = "~/.claude1"\n')
+        install(self.hub, self.home, '--running-ok')  # moves settings.json into local/
+        client = self.check.installed_clients(self.home, self.hub)['claude']
+        stray = self.home / 'elsewhere.json'
+        stray.write_text('{}')
+        settings = self.home / '.claude1/settings.json'
+        settings.unlink()
+        settings.symlink_to(stray)
+
+        with self.assertRaisesRegex(AssertionError, r'\.claude1/settings\.json should link to .*local/claude'):
+            self.check.check_local_shared(self.home, self.hub, 'claude', client,
+                                          self.home / '.claude', [self.home / '.claude1'])
+
+    def test_a_hub_checkout_that_does_not_ignore_local_fails(self):
+        install(self.hub, self.home, '--running-ok')  # creates local/
+        subprocess.run(['git', 'init', '-q'], cwd=self.hub, check=True)
+        (self.hub / '.gitignore').write_text('backup/\n')
+
+        with self.assertRaisesRegex(AssertionError, 'is not git-ignored'):
+            self.check.check_clients(self.home, self.hub)
+        (self.hub / '.gitignore').write_text('backup/\nlocal/\n')
+        self.check.check_clients(self.home, self.hub)
+
     def test_repo_only_checks_the_checkout_without_a_provisioned_home(self):
         empty = self.home / 'empty-home'
         empty.mkdir()
@@ -540,7 +796,8 @@ class HistoryTests(HubCase):
 
         self.assertFalse((self.home / '.claude/projects').is_symlink())
         self.assertFalse(folder.is_symlink())
-        self.assertEqual(sum('close Claude and Codex' in n for n in installer.notes), 2, installer.notes)
+        self.assertFalse((self.home / '.claude/settings.json').is_symlink())  # local/ moves wait too
+        self.assertEqual(sum('close Claude and Codex' in n for n in installer.notes), 3, installer.notes)
 
     def test_history_already_in_the_hub_is_a_conflict_and_nothing_moves(self):
         self.claude_project()

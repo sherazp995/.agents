@@ -1,0 +1,19 @@
+{
+  "_comment": "MCP servers install.py registers in every Claude and Codex login. Claude-style entries; env_vars is Codex-only (variables forwarded from the agent's environment); clients, when present, limits a server to those clients. playwright is Codex-only because Claude already gets a headless playwright server from its playwright plugin.",
+  "mcpServers": {
+    "playwright": {
+      "clients": ["codex"],
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+      "env": {}
+    },
+    "playwright-extension": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--extension"],
+      "env": {},
+      "env_vars": ["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]
+    }
+  }
+}

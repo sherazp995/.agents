@@ -8,6 +8,9 @@ Global rules and personal skills have one source: `~/.agents/AGENTS.md` (symlink
 - Do not replace skill-directory symlinks with real directories.
 - Do not install a separate Ponytail version.
 - Add, edit, remove, and update personal skills in the shared directory (`~/.agents/skills/`) so changes reach every configured agent.
+- Slash commands in `~/.agents/commands/` reach Claude only. Codex does not load custom prompts, so a workflow Codex needs too goes in a skill.
+- Shared MCP servers go in `~/.agents/mcp/servers.json`, then run `install.py` (see `AGENTS-MCP.md`).
+- Machine-specific shared config lives in the git-ignored `~/.agents/local/`. Change Codex model, plugin and marketplace settings in `~/.agents/local/codex/config.shared.toml` (the keys `registry.toml` lists as `shared_config`), then run `install.py`. `install.py` adds a shared key a login lacks and backs up `config.toml` into `~/.agents/backup/` before every write. A login value that differs from the shared file (from before the merge, or changed later, including by Codex's own `/model`) is a conflict, never overwritten; make the two match. Keys Codex rewrites itself (`marketplaces.*.last_updated`, `tui.model_availability_nux`, `notice`) are never shared. Sign-in state, trusted projects and download caches stay per login.
 - Update Ponytail only in `~/.agents/plugins/ponytail`, preserving its native adapter links.
 - Store Ponytail shared defaults in `~/.agents/ponytail.json`.
 - Run `python3 ~/.agents/check.py` after changing setup or updating plugins.

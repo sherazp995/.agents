@@ -18,6 +18,29 @@
 #   memory_folder       the app's own memory folder, linked to memory/<client> in the hub
 #   history             the app's chat history folders; install.py moves them to
 #                       history/<client>/ in the hub and leaves a relative link
+#   local_shared        shared config of the first login that is machine-specific, so not
+#                       tracked: install.py moves each entry to the git-ignored
+#                       local/<client>/ in the hub (backup first, in backup/), links it back,
+#                       and reports a conflict when both exist and differ. Extra accounts
+#                       get the same files through account_links. Download caches
+#                       (plugins/) stay in the login.
+#   shared_config       (codex only) the config.toml keys every login shares. Their values live
+#                       in the git-ignored local/codex/config.shared.toml (seeded from the first
+#                       login on the first run); install.py merges them into the config.toml of
+#                       the first login and of each account, line by line, keeping every other
+#                       line. A dotted name is a nested key; a listed table is merged one entry at
+#                       a time, so a login's own extra plugin stays. Each login's
+#                       agents-hub-config.json records the keys as they last matched. A missing key
+#                       is added; a value that differs and was never recorded, or that the login
+#                       changed after it matched (by hand or by Codex, e.g. /model), is a conflict,
+#                       never overwritten. config.toml is backed up into ~/.agents/backup before
+#                       every write. A key dropped from the shared file is removed only where
+#                       install.py wrote it.
+#                       Everything not listed stays per login: projects (trust), hooks.state, tui,
+#                       notice, login state. Keys Codex rewrites itself (marketplaces.*.last_updated,
+#                       tui.model_availability_nux, notice) are never shared, even if listed
+#                       (shared_config.CODEX_OWNED). mcp_servers is never listed: mcp/servers.json
+#                       owns MCP servers.
 #   separate            files each profile keeps for itself (never symlinked);
 #                       relative to the profile, or absolute with ~
 #   hooks               shared hooks: { name, event, kind, matcher }; kind "prompt" is a
@@ -37,8 +60,12 @@ account_links = [
   "agents", "cache", "chrome", "CLAUDE.md", "commands", "debug", "downloads", "file-history",
   "history.jsonl", "ide", "jobs", "memory", "paste-cache", "plugins", "projects", "session-env",
   "sessions", "settings.json", "settings.local.json", "shell-snapshots", "skills", "tasks", "teams",
-  "telemetry", "todos",
+  "telemetry",
 ]
+# memory/ is an old, empty folder Claude no longer uses: its memory is native auto-memory
+# (below), already in the hub's memory/scopes, so memory/ is not moved. todos/ is gone too
+# (Claude keeps that state in tasks/); install.py removes an account's dangling todos link.
+local_shared = ["settings.json", "settings.local.json"]
 separate = ["~/.claude.json", ".claude.json"]
 memory = "native auto-memory; projects/<key>/memory link into memory/scopes, created by the SessionStart hook"
 hooks = [
@@ -60,7 +87,14 @@ account_command = "codex"
 history = ["sessions"]
 account_links = ["agents", "AGENTS.md", "hooks.json", "memories", "plugins", "prompts", "rules", "sessions", "skills"]
 memory_folder = "memories"
+local_shared = ["hooks.json", "prompts", "rules"]  # hooks step keeps writing hooks.json through the link
+# config.toml stays a real file per login (projects trust, hooks.state and tui differ); its
+# shared keys come from local/codex/config.shared.toml (see shared_config above).
 separate = ["auth.json", "config.toml"]
+shared_config = [
+  "model", "model_reasoning_effort", "service_tier", "approvals_reviewer", "project_doc_max_bytes",
+  "marketplaces", "plugins",
+]
 memory = "agents-hub memory show / add (instructions in AGENTS.md)"
 hooks = [
   { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 300 },

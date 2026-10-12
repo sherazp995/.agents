@@ -1,8 +1,8 @@
 """What install.py writes and check.py verifies: one definition shared by both.
 
 Covers the rules reference each client loads, the hooks the hub owns in Claude
-settings.json and Codex hooks.json, and the Codex agent files generated from
-agents/*.md. Nothing here writes to disk.
+settings.json and Codex hooks.json, the Codex agent files generated from
+agents/*.md, and the MCP servers from mcp/servers.json. Nothing here writes to disk.
 """
 import json
 from pathlib import Path
@@ -187,6 +187,40 @@ def hook_entries(config):
     return [(event, group.get('matcher', ''), hook)
             for event, groups in (config.get('hooks') or {}).items() for group in groups
             for hook in group.get('hooks', [])]
+
+
+# MCP servers
+
+MCP_SERVERS = Path('mcp') / 'servers.json'  # the MCP servers Claude and Codex logins get
+MCP_KEY = {'claude': 'mcpServers', 'codex': 'mcp_servers'}
+
+
+def mcp_config_path(home, client, login, primary):
+    """The file holding a login's user-level MCP servers: Claude's primary login keeps them in
+    ~/.claude.json, an extra account in its own folder's .claude.json; Codex in config.toml."""
+    if client == 'claude':
+        return home / '.claude.json' if login == primary else login / '.claude.json'
+    return login / 'config.toml'
+
+
+def mcp_wanted(servers, client):
+    """The servers.json entries meant for this client: all of them, unless an entry lists `clients`."""
+    return {name: server for name, server in servers.items() if client in server.get('clients', MCP_KEY)}
+
+
+def mcp_server(client, server):
+    """An MCP server in the client's own shape, defaults filled in so equal servers compare equal.
+
+    `clients` is servers.json's own field. Claude has no env_vars (it passes its whole environment
+    on); Codex has no type, and its per-tool approvals (`tools`) are the user's settings, not part
+    of the server.
+    """
+    server = {k: v for k, v in server.items() if k != 'clients'}
+    if client == 'claude':
+        server = {k: v for k, v in server.items() if k != 'env_vars'}
+        return {'type': 'stdio', 'args': [], 'env': {}, **server}
+    server = {k: v for k, v in server.items() if k not in ('type', 'tools')}
+    return {'args': [], 'env': {}, 'env_vars': [], **server}
 
 
 # Agent definitions
