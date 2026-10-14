@@ -134,7 +134,7 @@ const FIXABLE = ['blocker', 'high', 'medium']
 // Codex is never required: general-review runs it only when installed. Keep in step with the
 // "Review tiers" table in general-review SKILL.md.
 const TIERS = {
-  small: { lenses: ['senior', 'diff-only'], rounds: 2 },
+  small: { lenses: ['senior', 'simplicity', 'diff-only'], rounds: 2 },
   normal: { lenses: ['senior', 'structural', 'simplicity', 'diff-only'], rounds: 3 },
   risky: { lenses: ['senior', 'structural', 'simplicity', 'diff-only'], rounds: 3 },
 }
@@ -149,6 +149,7 @@ function builderPrompt(card, previous, waveSize, slot) {
     `The card is done only when this command exits 0: ${card.command}`,
     'Follow the repository instructions and the writing-specs skill for tests. Run tests narrowly.',
     'Do not commit, push, or change files outside the card unless the command cannot pass otherwise; report any such change.',
+    'Write the minimum code the card needs (rule 55): no unrequested features, options or abstractions, and no edits to neighbouring code that works. Put unrelated problems you notice in notes instead of fixing them.',
     waveSize > 1 ? `${waveSize - 1} other builders are editing other cards in this working tree right now. A failure in a file outside your card is theirs: do not edit it; report it in notes.` : '',
     waveSize > 1 ? `If the tests use a database, use your own test database, never the shared one: for example run them with TEST_ENV_NUMBER=${slot + 1} (create that database first if it is missing).` : '',
     previous ? `An earlier attempt failed. Its recheck output:\n${previous}\nFind the cause before changing code again.` : '',
@@ -310,14 +311,15 @@ function diffOnlyPrompt(diffPath, outPath) {
 
 function reviewPrompt({ tier, round, diffPath, files, candidatesPath, earlier }) {
   const lenses = TIERS[tier].lenses
+  const notRun = LENSES.filter((l) => l !== 'codex' && !lenses.includes(l))
   const scope = round === 1
     ? `Target: the change in the diff file ${diffPath} (files: ${files.join(', ')}). It is the real diff of this build against a snapshot taken before it started; other uncommitted changes in the checkout are not part of it.`
     : `Target: only the fix diff in ${diffPath} (files: ${files.join(', ') || 'none'}), plus the earlier findings below. Do not review the rest of the change again.`
   return [
     `You are the REVIEW LEAD for one general-review single review of uncommitted work in ${args.repo}. You did not write or discuss this change; judge it fresh.`,
-    'Read ~/.agents/skills/general-review/SKILL.md sections 1 to 6 and every file they link, and run them yourself.'
+    'Read ~/.agents/skills/general-review/references/single-lead.md and follow its WHAT TO DO step 1 for the reading list, then run SKILL.md sections 1 to 6 yourself.'
       + ' Skip the "Modes and ledger" and "Who reviews" coordinator steps: write no ledger record and start no agent of any kind.',
-    `Review tier: ${tier}. Run these lenses: ${lenses.join(', ')}${tier === 'small' ? ' (skip the structural, simplicity and Codex lenses, as the small tier in the SKILL.md tier table says)' : ', and the Codex lens when codex is installed'}.`,
+    `Review tier: ${tier}. Run these lenses: ${lenses.join(', ')}${tier === 'small' ? ` (skip the ${[...notRun, 'Codex'].join(' and ')} lenses, as the small tier in the SKILL.md tier table says)` : ', and the Codex lens when codex is installed'}.`,
     tier === 'risky' ? 'This change is in an escalation category (schema, data, auth, permissions, payments or an open design): check those paths hardest.' : '',
     `The diff-only lens is already running as a separate agent. Its candidates will appear in ${candidatesPath}; when you reach the merge step, wait for that file (check every 30 seconds, up to 15 minutes, the limit in single-lead.md) and re-prove every candidate with full context. If it never appears, leave diff-only out of lenses_run.`,
     'Read only: do not edit files, add tests to the checkout, commit, push, or post anything.',

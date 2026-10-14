@@ -75,7 +75,7 @@ Maintain coverage statuses: `passed`, `failed`, `blocked`, `not-tested`. A missi
 
 Do not fix the branch. Record each confirmed issue as a finding: what is wrong, where (route, viewport, role, file:line when known), its screenshot for UI issues or execution/source proof for code-only issues, and whether it is caused by the branch or already on the base. Mark the scenario `failed`. Say which findings are inside the branch's scope and which are pre-existing or out of scope.
 
-**Try the fix, but only in a throwaway copy.** For each actionable confirmed finding, try a fix in a separate detached worktree or snapshot inside the run directory (never the user's checkout or branch), rebuild assets there, and re-run the affected scenario to see whether it works. Then report how to fix it:
+**Try the fix, but only in a throwaway copy.** For each actionable confirmed finding, try a fix in a separate detached worktree or snapshot in the agent's scratchpad or a temp directory, as `git-worktrees` sets for throwaway worktrees (never the user's checkout or branch), rebuild assets there, and re-run the affected scenario to see whether it works. Then report how to fix it:
 - the suggested change as a small unified diff, saved as `fixes/<case-id>.diff` in the run directory and linked from the finding;
 - whether the trial fix worked, with its screenshot for UI issues or proof output for code-only issues, or why it could not be tried;
 - any risk or wider effect the fix could have.

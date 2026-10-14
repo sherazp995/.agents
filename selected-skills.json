@@ -12,11 +12,8 @@
     "llm-council",
     "mobile-design",
     "pr-details",
-    "senior-frontend",
-    "senior-fullstack",
     "status-update",
     "thermo-nuclear-code-quality-review",
-    "ui-design-system",
     "video-qa",
     "work-council",
     "workflow-runner",
@@ -27,9 +24,5 @@
     ".codex/skills",
     ".cursor/skills",
     ".config/opencode/skills"
-  ],
-  "ponytail_plugin_paths": [
-    ".claude/plugins/cache/ponytail/ponytail/4.10.3",
-    ".codex/plugins/cache/ponytail/ponytail/4.10.3"
   ]
 }

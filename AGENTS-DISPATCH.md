@@ -2,7 +2,7 @@
 
 Pick the specialist that matches the work. A generic agent is a last resort, not the default. This applies in Claude Code and in Codex: the specialists below are defined once in `~/.agents/agents/` and installed into both, under the same names.
 
-**Blocked:** do NOT use `ruflo-*` subagent types or claude-flow (`npx @claude-flow/cli@latest ...`). Persist memory through the shared hub (`agents-hub memory`, see AGENTS.md).
+**Blocked:** do not use `ruflo-*` subagent types or claude-flow (`npx @claude-flow/cli@latest ...`); memory persists through the shared hub instead (`agents-hub memory`, see AGENTS.md).
 
 ## Specialists (Claude and Codex)
 
@@ -31,7 +31,7 @@ These are built into Claude Code. In Codex, do the same work directly or with a 
 ## Working across Claude and Codex
 
 - **Second opinion from the other model:** from Claude, `codex exec --sandbox read-only -` with the prompt on stdin; from Codex, `claude -p "<prompt>"`. Treat its findings as candidates and re-prove them.
-- **Several models on one task:** the `llm-council` skill (independent opinions, then a synthesis) and the `work-council` skill (plan, build, judge and verify across Claude and Codex).
+- **Several models on one task:** the `llm-council` skill (independent opinions, then a synthesis) and the `work-council` skill (plan critique, then Claude and Codex build and judges pick one).
 - **Handing work to another session or agent:** `agents-hub handoff <agent> <session>` writes a brief the other side can read; long-running parallel builds each get their own git worktree.
 - **Shared state:** every session reads and writes the same memory (`agents-hub memory`) and can search every other session's chats (`agents-hub search`).
 

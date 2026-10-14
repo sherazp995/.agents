@@ -84,6 +84,53 @@ class Validation(Base):
         self.assertEqual(self.bad(body(run_id="R1"), run_id="R1"), [])
 
 
+class EarlierIds(Base):
+    EARLIER = ("source: D/claude.md\nstate: s0\n\n#I-1 [high] a — FIXED\n#codex:I-2 [low] b — OPEN (checked by claude)\n\n"
+               "other agents (read-only):\nsibling: D/codex.md\nrun_id: C1\n#I-9 [low] c — OPEN\n")
+
+    def missing(self, findings):
+        return pr.missing_earlier_ids(self.write("b.md", body(findings=findings)), self.write("e.md", self.EARLIER))
+
+    def test_every_own_earlier_id_with_a_status_passes(self):
+        self.assertEqual(self.missing("#I-1 [high] a — FIXED\n#codex:I-2 [low] b — FIXED (checked by claude)\n"), [])
+
+    def test_missing_id_is_rejected(self):
+        self.assertEqual(self.missing("#I-1 [high] a — FIXED\n"), ["earlier finding #codex:I-2 has no status line"])
+
+    def test_renumbered_id_is_rejected(self):
+        self.assertEqual(self.missing("#I-3 [high] a — FIXED\n#codex:I-2 [low] b — FIXED\n"),
+                         ["earlier finding #I-1 has no status line"])
+
+    def test_same_state_sibling_open_findings_need_a_status(self):
+        earlier = self.write("e.md", "none\n\nother agents (read-only):\n"
+                             "sibling: D/codex.md\nrun_id: C1\nstate: s1\nverdict: CHANGES REQUIRED\n"
+                             "#I-1 [high] c — OPEN\n#I-2 [low] d — FIXED\n"
+                             "sibling: D/cursor.md\nrun_id: K1\nstate: s1\nverdict: CHANGES REQUIRED\n"
+                             "#I-1 [medium] e — PARTLY (half)\n"
+                             "sibling: D/gemini.md\nrun_id: G1\nstate: s0\nverdict: CHANGES REQUIRED\n"
+                             "#I-1 [high] f — OPEN\n")
+
+        def missing(findings):
+            return pr.missing_earlier_ids(self.write("b.md", body(findings=findings)), earlier)
+
+        self.assertEqual(missing("#codex:I-1 [high] c — FIXED (checked by claude)\n"
+                                 "#cursor:I-1 [medium] e — OPEN (checked by claude)\n"), [])
+        self.assertEqual(missing("#cursor:I-1 [medium] e — FIXED (checked by claude)\n"),
+                         ["earlier finding #codex:I-1 has no status line"])
+        self.assertEqual(missing("#codex:I-3 [high] c — FIXED (checked by claude)\n"
+                                 "#cursor:I-1 [medium] e — OPEN (checked by claude)\n"),
+                         ["earlier finding #codex:I-1 has no status line"])
+        self.assertEqual(missing("#codex:I-1 [high] c — FIXED (checked by claude)\n"
+                                 "#I-1 [medium] e — FIXED\n"),
+                         ["earlier finding #cursor:I-1 has no status line"])
+
+    def test_cli_rejects_missing_id_and_writes_nothing(self):
+        rc = self.run_cli("--run-id", "R1", "--read-run-id", "none", "--earlier", self.write("e.md", self.EARLIER),
+                          "--body", self.write("a.md", body(findings="#I-1 [high] a — FIXED\n")))
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(self.D))
+
+
 class Publish(Base):
     def test_first_publish_then_stale_read_then_correct_read(self):
         self.assertEqual(self.run_cli("--run-id", "R1", "--read-run-id", "none", "--body", self.write("a.md", body("R1"))), 0)

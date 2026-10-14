@@ -5,13 +5,13 @@ description: Review code changes, pull requests, branches, selected files, or an
 
 # General review
 
-Review the requested scope, verify suspected defects, and report findings. This review phase ends at the report. During it, do not edit the reviewed checkout, apply fixes to it, create commits, publish comments, or open tickets. Suggested fixes are recommendations only. Two things are not edits of the reviewed code: PR batch mode proves findings and proposed fixes in throwaway worktrees that are removed afterwards, and every review writes only its temp folder, the test cache (rule 41), its own ledger record (creating the ledger folder and its `.origin` file on first use), and in PR batch mode its throwaway worktrees and private test databases, which it removes afterwards. Ledger cleanup deletes only this agent's records of finished work, and lists them instead while list-only mode is on.
+Review the requested scope, verify suspected defects, and report findings. This review phase ends at the report. Read-only for the reviewed checkout: no edits, fixes, commits, comments or tickets; suggested fixes are recommendations only. A review writes only REVIEW_TMP, the test cache (rule 41), its own ledger record (creating the ledger folder and its `.origin` file on first use) and, in PR batch mode, throwaway worktrees and test databases that it removes. Ledger cleanup deletes only this agent's records of finished work, and lists them instead while list-only mode is on.
 
 A standalone review request does not authorize remediation. When an already-authorized implementation task calls this skill for self-review, return the findings to that task; the calling task then re-proves findings, resolves introduced blockers, fixes introduced high and medium findings, and re-reviews under rule 44. Ending this review phase does not end or revoke that implementation task. Introduced lows and pre-existing findings remain subject to the user's decision.
 
-Use the shared `~/.agents/AGENTS.md` and applicable project instructions. Do not copy or modify global configuration. Adapt checks to the detected stack; do not assume Rails, JavaScript, or any particular framework.
+Use the shared `~/.agents/AGENTS.md` and applicable project instructions. Do not copy or modify global configuration.
 
-Before reviewing code, read [the mandatory review checklist](references/review-checklist.md) in full. Execute its steps in order within the P0 through P6 phases below. Every review must account for every step and dimension. Scale investigation depth and report length to actual risk using the checklist's compact reporting option; do not silently skip checks because the diff is small. A checkpoint may be not applicable only with a concrete reason. No process guarantees finding every defect; report the evidence and coverage honestly.
+Read [the mandatory review checklist](references/review-checklist.md) in full before reviewing code. Freeze intent and scope (its steps 1 and 2) first. Account for every step; a step is N/A only with a concrete reason. Scale depth and report length to risk with the checklist's compact option. No process guarantees finding every defect; report evidence and coverage honestly.
 
 For changes spanning multiple workflows or layers, or a user reporting repeated review/fix cycles, also read [bounded review and root-cause closure](references/review-closure.md). It adds workflow ownership, boundary checks, a consolidated repair handoff, and explicit completion criteria. Keep one frozen scope and one finding ledger throughout; do not turn each repaired symptom into a fresh unbounded audit.
 
@@ -34,8 +34,8 @@ The review is always done by an agent that did not write or discuss the change. 
 
 Coordinator steps for a single review (PR batch has its own in [PR batch mode](references/pr-batch.md)):
 
-1. **Identity and scope.** Set RUNNER, RUN_ID, REPO and REVIEW_TMP ([ledger](references/ledger.md)). Freeze the target: its kind, base and head (fetch first for a PR or branch, as in section 1), or the manifest and STATE for uncommitted work or files. Write the manifest to `REVIEW_TMP/<KEY>/manifest.txt` and the frozen diff to `REVIEW_TMP/<KEY>/diff.patch` (for uncommitted work, the tracked diff plus each untracked file in scope as `git diff --no-index /dev/null <file>`; for a codebase or current-file assessment, write `n/a`).
-2. **Ledger lookup.** Note READ_RUN_ID and pick review, recheck or "no changes". For "no changes", report it and stop; no lead starts. Otherwise write `REVIEW_TMP/<KEY>/earlier.md` as defined under EARLIER in the ledger file.
+1. **Identity and scope.** Set RUNNER, RUN_ID, REPO and REVIEW_TMP ([ledger](references/ledger.md)). For a PR or branch, resolve the head first (below). Freeze the target with `cd <REPO> && python3 -I ~/.agents/skills/general-review/scripts/freeze_scope.py --kind <kind> --key <KEY> --tmp <REVIEW_TMP>` (plus `--base <BASE_SHA> --head <HEAD_SHA>` for a PR or branch, or the selected paths for files). It writes `manifest.txt`, `state.txt` (STATE), `tree.txt` and `diff.patch` to `REVIEW_TMP/<KEY>/`, and never writes the repo's objects or index. In self-review rounds 2 and 3 add `--prev <previous round's REVIEW_TMP/<KEY>>`, so `diff.patch` is the fix diff since that round. For a codebase or current-file assessment, write `n/a` to `diff.patch`.
+2. **Ledger lookup.** Read [the review ledger](references/ledger.md) before any write. It sets the ledger location and lock, the record key, and whether this run is a first review, a recheck of new changes, or "no changes since the last review"; `--full` or "full review" archives the record and starts fresh. Note READ_RUN_ID and pick review, recheck or "no changes". For "no changes", report it and stop; no lead starts. Otherwise build `REVIEW_TMP/<KEY>/earlier.md` (ledger, EARLIER) with `python3 -I ~/.agents/skills/general-review/scripts/earlier.py --dir <D> --runner <RUNNER> --out <REVIEW_TMP>/<KEY>/earlier.md`, adding `--source <record>` for each earlier record the mode picked other than `D/<RUNNER>.md`, and `--adapter-output <file>` for the old-record adapter's output. In self-review rounds 2 and 3, pass `--from-record <previous round's record.md> --prev-earlier <previous round's earlier.md>` instead of reading the ledger again: it keeps every earlier finding and re-reads only the sibling records that changed since. In those rounds READ_RUN_ID is the `run_id:` of `D/<RUNNER>.md`, which is the previous round's RUN_ID once that round published; if it did not publish, keep the earlier value.
 3. **Intent, requirements only.** Write the user's request in their words, the PR title and description, the ticket and acceptance criteria, and any plan requirements the user approved. Leave out this session's own explanations of how the code works or why it is correct, and its claims about what is fixed: the lead must judge those fresh.
 4. **Start the lead and the diff-only agent side by side.** Subagents cannot start subagents, so the coordinator starts both, in one message, as siblings:
    - the lead: one fresh `general-purpose` agent, not a fork (a fork inherits this conversation), with `references/single-lead.md` and every placeholder filled (`EARLIER_DIR` = `REVIEW_TMP/<KEY>`, `EARLIER` = its `earlier.md`, `INTENT` = the text from step 3, `LENS` = `all`, or the one lens of a single-lens run, `TIER` from "Review tiers");
@@ -43,11 +43,14 @@ Coordinator steps for a single review (PR batch has its own in [PR batch mode](r
 
    The diff-only agent writes its list to `diff-only.md`; the lead waits for that file before its section 5 merge and re-proves every candidate in it. If the agent fails or returns without writing the file, write its returned list there yourself, or `diff-only: not run (<reason>)` so the lead records the limitation instead of waiting. Wait for the lead.
 5. **Spot-check.** For each blocker or high finding, read only the cited lines. If the code does not support a claim, or a dropped finding looks real, ask the lead one question with SendMessage before relaying.
-6. **Record and relay.** Corrections come only from the lead, which amends its own `REVIEW_TMP/<KEY>/record.md` after your step 5 question; you never change a status, severity or line. If you still disagree, add a `coordinator_note: <finding id> — <reason>` line and say so in the relay. Publish the record with `scripts/publish_record.py` (ledger "Locking"), run cleanup, then relay the lead's report as it is, one line per correction, and the final line. A lead that returns no record.md is reported "incomplete, not recorded".
+6. **Record and relay.** Corrections come only from the lead, which amends its own `REVIEW_TMP/<KEY>/record.md` after your step 5 question; you never change a status, severity or line. If you still disagree, add a `coordinator_note: <finding id> — <reason>` line and say so in the relay. Publish the record with `scripts/publish_record.py --earlier REVIEW_TMP/<KEY>/earlier.md` (ledger "Locking"), which rejects a record that drops an earlier finding ID or leaves one without a status. Run cleanup with `python3 -I ~/.agents/skills/general-review/scripts/ledger_cleanup.py --ledger-root <LEDGER_ROOT> --repo <REPO> --gh-repo <owner/name or none> --runner <RUNNER> --list-only` (ledger "Cleanup"; pass `--delete` instead of `--list-only` only once the user has said to delete) and keep its short list for the relay. Then relay the lead's report as it is, one line per correction, and the final line. A lead that returns no record.md is reported "incomplete, not recorded".
+
+**Resolve the head** (PR and branch targets, in both modes, before the ledger lookup):
+1. Fetch: `git fetch origin <base> <head branch>` (or `pull/<n>/head` for a PR from a fork). If the fetch fails, say so and stop: no change verdict on a stale head.
+2. BASE_SHA = `origin/<base>`; HEAD_SHA = the fetched head (for a PR, its `headRefOid`).
+3. If a local branch with the head branch's name exists, differs from HEAD_SHA, and is **not** an ancestor of it (`git merge-base --is-ancestor <local> <HEAD_SHA>` fails: local is ahead, amended, squashed or rebased), ask the user which to review, showing both SHAs and whether local is ahead or diverged. A local branch that is merely behind needs no question. If they pick local, use its SHA as HEAD_SHA and label the target "local only, not pushed". Ask with AskUserQuestion when the host has it, otherwise in plain text.
 
 **Fallback:** when the host has no agent tool, or the user explicitly asks for an inline review, run sections 1 to 6 in this session and start the report with "Not independent: reviewed by the session that requested it." Run the diff-only pass first, from `diff.patch` alone, before reading other files, and record in the verification log that it was not blind to this session's context.
-
-**Both modes keep a ledger.** Read [the review ledger](references/ledger.md) in P0, before any write. It sets the runner identity and run ID, the per-repo ledger location and lock, the record key for each kind of target, and whether this run is a first review, a recheck of new changes, or "no changes since the last review". `--full` or "full review" archives the record and starts fresh.
 
 ## Review lenses
 
@@ -58,12 +61,12 @@ Every review runs these five lenses over the same frozen scope, then merges them
 | Senior engineer | Correctness, regressions and blast radius, security, data, concurrency, performance, compatibility, tests. | Single: the lead (session model, effort high). Batch: Codex `gpt-6-astra`, reasoning high. | [Review checklist](references/review-checklist.md) steps 1 to 11. |
 | Structural (thermo-nuclear) | Code-judo simplifications, spaghetti growth, files crossing 1000 lines, thin wrappers, casts and optionality, logic in the wrong layer. | Single: the lead. Batch: a fresh agent, sonnet, effort high. | [Structural lens](references/structural-lens.md), standards in [structural standards](references/structural-standards.md). |
 | Simplicity and architecture | Whether this is the simplest correct change, in the right layer, reusing existing facilities; dead code the change leaves behind; over-deletion of live code. | Single: the lead. Batch: two fresh agents, sonnet, effort medium. | Section 2 and checklist steps 3 and 12; batch prompts in `references/lenses/`. |
-| Diff-only blind pass | What GitHub Copilot posts on a PR: nil versus false, method visibility, error paths, layer consistency, accessibility, stale comments, config parsing, test gaps, hygiene. | A separate fresh agent that receives only the diff, started by the coordinator next to the lead (never by the lead: subagents cannot nest): sonnet, effort low. | [Diff-only lens](references/lenses/diff-only.md). |
+| Diff-only blind pass | What GitHub Copilot posts on a PR: nil versus false, method visibility, error paths, layer consistency, accessibility, stale comments, config parsing, test gaps, hygiene. | Fresh agent, diff only; sonnet, low. | [Diff-only lens](references/lenses/diff-only.md). |
 | Codex second opinion | An independent review by the other model, run read-only and in parallel: Codex on `gpt-6-astra` when Claude hosts the review, Claude when Codex hosts it. | `gpt-6-astra`, reasoning high (Claude on the session model when Codex hosts). | [Codex handoff](references/codex-handoff.md). |
 
-Pass the model and effort to each agent call when the host's agent tool accepts them; otherwise record the default used in the verification log. The diff-only agent gets the lens prompt with `{DIFF}` set to a file holding the frozen diff and `{OUT}` set to the file it writes its list to, and nothing else: no intent, no conversation, no other paths.
+Pass the model and effort to each agent call when the host's agent tool accepts them; otherwise record the default used in the verification log.
 
-The coordinator starts the diff-only agent with the lead ("Who reviews" step 4); the lead starts the Codex review as soon as it has read the frozen scope (end of P0) so it runs while the lead reviews. Their findings are candidates, never results, until the lead re-proves them in P4.
+The lead starts the Codex review as soon as it has read the frozen scope (end of P0) so it runs while the lead reviews. Their findings are candidates, never results, until the lead re-proves them in P4.
 
 ### Review tiers
 
@@ -71,15 +74,14 @@ A standalone review request always runs at the normal tier. When an authorized i
 
 | Tier | When | Lenses | Rounds |
 | --- | --- | --- | --- |
-| small | 3 changed files or fewer and none of the caller's escalation categories (schema or data migration, auth, payments, unresolved design). | The lead's senior engineer lens plus the diff-only agent; no structural, simplicity or Codex lens. | 2: one fix, then a recheck of the fix diff |
-| normal | Everything else. | Senior, structural, simplicity and diff-only, each required; Codex when it is installed, its absence recorded as a limitation. | Up to 3 |
-| risky | Any escalation category. | The same lenses as normal, each required (Codex when installed, its absence recorded as a limitation); a required lens that did not run means the caller must not treat the round as done. The lead checks the escalation paths hardest. | Up to 3 |
+| small | 3 changed files or fewer and none of the caller's escalation categories (schema or data migration, auth, payments, unresolved design). | The lead's senior engineer and simplicity lenses plus the diff-only agent; no structural or Codex lens. | 2: one fix, then a recheck of the fix diff |
+| normal / risky | Everything else / any escalation category. | Senior, structural, simplicity and diff-only, each required; Codex when it is installed, its absence recorded as a limitation. Risky: a required lens that did not run means the caller must not treat the round as done, and the lead checks the escalation paths hardest. | Up to 3 |
 
 The lead lists the lenses that actually ran (`Lenses run:` in the verification log), so the caller can check the tier was honoured instead of trusting the verdict line. Round 1 reviews the whole frozen change. Each later round rechecks only the earlier findings plus the fix diff since the previous round (a new `diff.patch` holding that fix diff for the diff-only agent); it does not reopen an unbounded audit (see [review closure](references/review-closure.md)).
 
 ### Single-lens runs
 
-Two aliases run one lens on its own with the same scope, re-proof, severity, origin and report rules. The coordinator runs "Who reviews" steps 1, 3 and 4 only (no ledger lookup or record), and tells the lead which lens to run. For the diff-only lens the coordinator starts the diff-only agent (step 4; it may start the lead after the agent returns, since the lead has nothing else to do) and the lead re-proves its list with full context; for the structural lens the coordinator starts no diff-only agent and the lead applies the lens itself. Neither alias asks a subagent to start another agent.
+Two aliases run one lens on its own with the same scope, re-proof, severity, origin and report rules. The coordinator runs "Who reviews" steps 1, 3 and 4 only (no ledger), and tells the lead which lens to run. Diff-only: start the diff-only agent (the lead may start after it returns), then the lead re-proves its list with full context. Structural: no diff-only agent; the lead applies the lens. Neither alias asks a subagent to start another agent.
 
 - `copilot-review`: only the diff-only blind pass, then the re-proof in section 5. When the user also asked for fixes, the session that invoked the alias then fixes the kept findings one at a time, smallest change first, and runs the narrow tests and linter. Without that request it reports only.
 - `thermo-nuclear-code-quality-review` and `/thermonuke`: only the structural lens, reported in the section 6 template.
@@ -93,14 +95,9 @@ Read the task, acceptance criteria, and intended behavior before critiquing impl
 Determine the review target:
 
 - Uncommitted work: inspect staged and unstaged diffs and relevant untracked files. Keep unrelated work outside scope. A review of staged changes only is its own kind (`staged`), with its own ledger key and state.
-- Pull request or branch: identify the actual base branch and compare from the merge base using triple-dot diffs. Resolve the head with the steps below, then read the target with `git show <HEAD_SHA>:<path>`; never switch or update the user's checkout. Do not assume the base is `main` or that a local reference is current. Read the PR description when available.
+- Pull request or branch: identify the actual base branch and compare from the merge base using triple-dot diffs. Read the target (head resolved in "Who reviews") with `git show <HEAD_SHA>:<path>`; never switch or update the user's checkout. Do not assume the base is `main` or that a local reference is current. Read the PR description when available.
 - Selected files: establish whether the user wants a change review or an assessment of current code.
 - Whole codebase: map architecture, entry points, trust boundaries, persistence, and important user flows. Review one flow at a time, prioritizing high-impact paths. Disclose coverage instead of implying exhaustive review.
-
-**Resolve the head** (PR and branch targets, in both modes, before the ledger lookup):
-1. Fetch: `git fetch origin <base> <head branch>` (or `pull/<n>/head` for a PR from a fork). If the fetch fails, say so and stop: no change verdict on a stale head.
-2. BASE_SHA = `origin/<base>`; HEAD_SHA = the fetched head (for a PR, its `headRefOid`).
-3. If a local branch with the head branch's name exists, differs from HEAD_SHA, and is **not** an ancestor of it (`git merge-base --is-ancestor <local> <HEAD_SHA>` fails: local is ahead, amended, squashed or rebased), ask the user which to review, showing both SHAs and whether local is ahead or diverged. A local branch that is merely behind needs no question. If they pick local, use its SHA as HEAD_SHA and label the target "local only, not pushed". Ask with AskUserQuestion when the host has it, otherwise in plain text.
 
 The coordinator has already frozen KEY, STATE and MODE and written the earlier findings ("Who reviews"). In recheck mode, load those earlier findings into this review's finding list with their IDs; they must each get a status in P4.
 
@@ -116,7 +113,7 @@ Simplicity and architecture lens: ask whether a smaller change reaches the same 
 
 Use steps 3 through 12 of [the mandatory review checklist](references/review-checklist.md) as the single source for dimension checks and regression tracing. Consider every dimension; mark genuinely irrelevant dimensions as not applicable with a reason. Do not invent findings to fill categories.
 
-Apply the [structural lens](references/structural-lens.md) to every changed file as part of step 12. Its findings use the same severity and origin rules as every other finding; prefer a few high-conviction structural comments over cosmetic notes.
+Apply the [structural lens](references/structural-lens.md) to every changed file (step 12).
 
 ## 4. Classify findings (P3)
 
@@ -131,7 +128,7 @@ Assign both severity and origin to each finding:
 
 Security findings default to at least high unless evidence establishes lower impact.
 
-Keep a review gate separate from delivery urgency. When findings already have P0/P1/P2 priorities, preserve them unless new evidence justifies a change. Do not silently translate the protocol's word `high` into P1, or present a normal-priority issue as urgent merely because the gate requires a fix. State the triggering conditions and user impact when assigning or changing priority.
+Keep existing P0/P1/P2 priorities unless evidence changes them; the gate word `high` is not urgency. State the triggering conditions and user impact when assigning or changing priority.
 
 For change reviews, distinguish introduced from pre-existing issues. Use the diff and `git blame -w -M -C -C` on relevant lines, compared with the branch point; use `--ignore-rev` for known bulk formatting commits when useful. Uncommitted changed lines belong to the change. An old defective line made newly reachable by this change is an introduced regression. Trace the path to prove causation rather than relying solely on blame.
 
@@ -166,9 +163,9 @@ Every verified finding gets a root cause before the report is written. Findings 
 2. **Group into families.** Findings with the same cause form one family. A cause with a single finding is still a family of one.
 3. **Sweep for siblings.** For each family, search the whole reviewed scope and its callers (`rg` for the pattern, every writer of the copied data, every entry point to the rule) and check each instance. Report every instance, including ones no reviewer raised, each marked verified or unverified.
 4. **Give fix options.** For each family: the per-site patch and the structural fix (one owner, one sync point, one shared helper or pattern), with trade-offs, and a recommendation. When the choice changes behavior or design, mark it for the user's decision.
-5. **On a re-review of fixes,** say for each earlier family whether the fix closed the cause or only the reported instance, and list the siblings that remain.
 
-Before recommending a family repair, test its proposed rule against neighboring valid behavior and the other findings. Record the invariant, its owning layer, all affected entry points, and the regression cases that would distinguish a root repair from a local patch. A shared helper alone does not establish closure. Consolidate the review before handing it to an implementation task; do not issue serial partial fix requests while sibling investigation is still feasible and unfinished.
+   **4b. Repair hazards.** Before recommending a family repair, test its proposed rule against neighbouring valid behaviour and the other families and findings. Name the broken invariant and its owning layer, and record all affected entry points and the regression cases a local patch would miss: the failing case plus those neighbouring cases, at the lowest useful test layer, with integration checks for the actual boundaries. A shared helper alone does not establish closure. Preserve stable finding and family IDs and dispositions across review rounds. Consolidate the review before handing it to an implementation task; do not issue serial partial fix requests while sibling investigation is still feasible and unfinished.
+5. **On a re-review of fixes,** say for each earlier family whether the fix closed the cause or only the reported instance, and list the siblings that remain.
 
 Findings stay in their severity sections; each one carries its family tag, e.g. `[family: F-1]`.
 
@@ -176,7 +173,7 @@ If Codex or the diff-only agent is unavailable or fails, continue with the other
 
 In recheck mode, re-prove every earlier ledger finding against the current state and give it a status: FIXED, NOT FIXED (recorded as OPEN), PARTLY, N/A, or ACCEPTED (an earlier user decision, kept unless the user reopens it), each with a one-line proof. A NOT FIXED or PARTLY finding stays in its severity section with its original ID.
 
-Run the smallest relevant existing checks when they materially improve confidence. Inspect cached results under `tmp/test-cache/` before rerunning unchanged commands, and cache new test/build output with a state-specific filename. Preserve command exit status. Do not run a full suite by default. Do not mutate source or add tests in the user's checkout during this reporting-only review; state any verification gaps. (PR batch mode writes throwaway proof specs only in an isolated worktree and the ledger's repro folder.) Avoid checks that mutate external systems or production data.
+Run checks per checklist step 11, caching output under `tmp/test-cache/` with a state-specific filename. Avoid checks that mutate external systems or production data.
 
 ## 6. Report and stop (P5 and P6)
 
@@ -184,7 +181,7 @@ Before issuing a final change-review verdict, reconcile mandatory investigation 
 
 Once the scope is established and feasible inspection is complete, a suspicion requiring source changes, new tests, destructive steps, or unavailable systems to resolve is an open question, not unfinished review work. Record its affected path, potential impact, evidence already checked, verification constraint, and what would resolve it; then issue the verdict from confirmed findings. Keep the path marked unverified. Do not downgrade a defect already proven by source or caller tracing merely because execution is unavailable. Do not repeat the same review solely to resolve an unchanged external constraint; reassess when code, evidence, or access changes.
 
-The verification log must also record the sibling sweep for each family: the searches run and the instances checked. It must also record, per lens, what it covered and whether it ran: the Codex command, model, exit status and log path, the diff-only agent's model and effort, and the structural lens checks from its reference file.
+The verification log must also record the sibling sweep for each family: the searches run and the instances checked. It must also record, per lens, what it covered and whether it ran: the Codex command, model, exit status and log path, and the diff-only agent's model and effort (structural checks: `references/structural-lens.md`, "Recording").
 
 For a coordinated review, include the workflow coverage and closure receipt from `references/review-closure.md`. Completion is evidence for the selected scope, not a claim that the repository has no remaining bugs. After authorized repairs, recheck the changed contracts and repair interactions; reopen a closed finding only for new evidence, an unhandled sibling, or a relevant code change.
 
@@ -194,7 +191,7 @@ For a completed change review, calculate the Unified Review Protocol verdict wit
 - Introduced high or medium remaining: `CHANGES REQUIRED`.
 - Otherwise: `PASS`, including the exact convergence line below.
 
-Pre-existing findings never block the change. PASS describes the reviewed scope and available evidence; it does not prove unreviewed paths safe. Park introduced low findings for the user's decision. Do not ask to fix them or start a fix loop within this review phase. An authorized calling implementation task resumes as described above.
+Pre-existing findings never block the change. PASS describes the reviewed scope and available evidence; it does not prove unreviewed paths safe. Park introduced low findings for the user's decision. Do not ask to fix them or start a fix loop within this review phase.
 
 Use the shared rule-44 report template below for final change reviews. Write `none` for empty finding sections. Include the mandatory checklist's coverage ledger, completion status, checks actually run, unavailable checks, assumptions, open questions, and material limits in the verification log. Keep findings concise without dropping evidence. A PASS with open questions means no confirmed gating findings; it does not establish that unverified paths are safe.
 
@@ -249,5 +246,3 @@ Whenever the final change verdict is PASS, include this literal line:
 For whole-codebase or current-file assessments without a change baseline, use the same findings and verification structure, but write `Verdict: N/A (current-state assessment; no change baseline)`. Mark the introduced section not applicable and count findings under pre-existing. Do not emit PASS or LGTM for such assessments. Order findings by severity and report assessed flows and remaining coverage explicitly.
 
 After the report, write the record body to `record.md` for the coordinator, which writes the ledger ("Who reviews" step 6). Every review produces a record body, including current-state assessments and incomplete reviews. In the inline fallback, follow step 6 yourself.
-
-The report is this skill's deliverable. Finish the review phase without modifying the reviewed code, then return control to any authorized calling task.

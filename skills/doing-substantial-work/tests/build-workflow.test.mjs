@@ -211,6 +211,7 @@ test('done is computed from findings, lenses and proof, never from the verdict s
     [{ verdict: 'CHANGES REQUIRED', findings: [low], lenses_run: ALL_LENSES }, {}, 'done'],
     [{ verdict: 'PASS', findings: [FINDING], lenses_run: ALL_LENSES }, {}, 'needs-attention'],
     [{ verdict: 'PASS', findings: [], lenses_run: ['senior', 'diff-only'] }, { tier: 'normal' }, 'needs-attention'],
+    [{ verdict: 'PASS', findings: [], lenses_run: ['senior', 'diff-only'] }, { tier: 'small' }, 'needs-attention'],
     [PASS, { diffOnly: null }, 'needs-attention'],
     [{ verdict: 'INCOMPLETE', findings: [], lenses_run: ALL_LENSES }, {}, 'needs-attention'],
   ]
@@ -261,7 +262,7 @@ test('review tiers: small gets one fix and a recheck, risky gets three rounds, l
   assert.equal(small.result.review.tier, 'small')
   assert.deepEqual(reviewLabels(small.labels), ['diff#1', 'review#1', 'fix#1', 'recheck:c1#fix1', 'diff#2', 'review#2'])
   assert.equal(small.result.review.rounds.length, 2)
-  assert.match(small.calls.find((c) => c.label === 'review#1').prompt, /Run these lenses: senior, diff-only \(skip the structural, simplicity and Codex/)
+  assert.match(small.calls.find((c) => c.label === 'review#1').prompt, /Run these lenses: senior, simplicity, diff-only \(skip the structural and Codex/)
 
   const normal = await run({ repo: '/r', cards: [CARDS[0]] }, (l) => (l === 'diff#1' ? { exit_code: 0, tree: T(1), files: ['a', 'b', 'c', 'd'], net_files: ['a', 'b', 'c', 'd'] } : open(l)))
   assert.equal(normal.result.review.tier, 'normal')

@@ -3,15 +3,17 @@
 
 Usage:
   python3 -I publish_record.py --dir D --runner claude --run-id ID --read-run-id X \
-      --body record.md [--repro DIR] [--full] [--branch-dir B --read-run-id-branch Y]
+      --body record.md [--earlier earlier.md] [--repro DIR] [--full] [--branch-dir B --read-run-id-branch Y]
 
 Holds this runner's OS lock on D (and first on B when a branch record moves to
 the PR folder), checks that nobody wrote since READ_RUN_ID was noted, archives
 and moves as asked, then publishes with a final rename. Never touches another runner's
 files. The kernel drops the locks if this process dies.
 
-Exit: 0 published; 2 invalid body (format, status, severity, header, run id, or a
-verdict that does not match the open introduced findings; nothing written);
+Exit: 0 published; 2 invalid body (format, status, severity, header, run id, a
+verdict that does not match the open introduced findings, or an own finding ID, or a
+same-state sibling's OPEN or PARTLY finding, from --earlier missing or without a status;
+nothing written);
 3 someone wrote meanwhile; 75 another run of this runner holds
 the lock. On 3 or 75 the body is kept as D/<runner>.conflict-<run id>.md.
 """
@@ -101,6 +103,28 @@ def invalid_lines(body, run_id=None):
     return bad
 
 
+def missing_earlier_ids(body, earlier):
+    """Earlier finding IDs that the body lacks as a finding line with a status: every own ID
+    (before earlier.md's other-agents section), and as `#<other>:<id>` every OPEN or PARTLY
+    finding of a sibling block at the body's state. IDs are compared exactly, so renumbering fails."""
+    with open(earlier, encoding="utf-8") as f:
+        own, _, others = f.read().partition("other agents (read-only):")
+    with open(body, encoding="utf-8") as f:
+        text = f.read()
+    wanted = re.findall(r"^#([^#\s]\S*)\s+\[", own, re.M)
+    state = (re.search(r"^state:\s*(\S+)", text, re.M) or [None, None])[1]
+    for block in re.split(r"^(?=sibling: )", others, flags=re.M):
+        m = re.match(r"sibling: (?:.*/)?([a-z0-9_-]+)\.md\s*$", block, re.M)
+        if not m or state is None or (re.search(r"^state:\s*(\S+)", block, re.M) or [None, None])[1] != state:
+            continue
+        for line in block.splitlines():
+            finding = re.match(r"^#([^#\s:]+)\s+\[[^\]]+\]\s", line)
+            if finding and " — " in line and re.match(r"(OPEN|PARTLY)\b", line.rsplit(" — ", 1)[-1].strip()):
+                wanted.append(f"{m.group(1)}:{finding.group(1)}")
+    have = set(re.findall(r"^#([^#\s]\S*)\s+\[[^\]]+\]\s.* — (?:OPEN|PARTLY|FIXED|N/A|ACCEPTED|DROPPED)\b", text, re.M))
+    return [f"earlier finding #{i} has no status line" for i in dict.fromkeys(wanted) if i not in have]
+
+
 def lock(folder, runner):
     os.makedirs(folder, exist_ok=True)
     handle = open(os.path.join(folder, f"{runner}.lock"), "a")
@@ -182,6 +206,7 @@ def main():
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--read-run-id", required=True)
     ap.add_argument("--body", required=True)
+    ap.add_argument("--earlier")
     ap.add_argument("--repro")
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--branch-dir")
@@ -191,6 +216,8 @@ def main():
         sys.stderr.write("runner must be a lowercase slug\n")
         return 2
     bad = invalid_lines(a.body, a.run_id)
+    if a.earlier:
+        bad += missing_earlier_ids(a.body, a.earlier)
     if a.repro and not os.path.isdir(a.repro):
         bad.append(f"--repro {a.repro} is not a directory")
     if bad:

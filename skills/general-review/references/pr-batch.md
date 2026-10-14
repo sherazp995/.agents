@@ -30,7 +30,6 @@ Without a profile, detect what you can (GitHub repo from `origin`, default branc
 - Work dir per target: `<REVIEW_TMP>/<KEY>-<short-sha>`.
 - Generate a unique `TEST_ENV_NUMBER` per target, such as `_agent_<32 UUID hex digits>`. If the profile names a database, make sure the full name fits its length limit (63 bytes for PostgreSQL). Never reuse a database name.
 - Record worktrees and databases this run creates. Cleanup removes **only those exact resources**. Never prune worktrees globally or drop databases by prefix. Pre-existing resources belong to other work, even if they share the target or head SHA.
-- A running session does not see skill updates. If a concurrent older session may clean up globally, use a standalone clone (not a registered worktree) and database names outside its cleanup prefixes, and tell the lead.
 - Use the models available in the host. Disclose any substitute for a required reviewer.
 - Ask the user with AskUserQuestion when the host has it; otherwise ask in plain text and wait.
 
@@ -49,10 +48,10 @@ Without a profile, detect what you can (GitHub repo from `origin`, default branc
 4. **Decide per target:**
    - PR is MERGED or CLOSED: "already merged/closed, not reviewed".
    - Note READ_RUN_ID for the key (no lock yet; `ledger.md`, "Locking").
-   - **Local commits:** apply step 3 of "Resolve the head" in SKILL.md section 1 (a local branch that differs from HEAD_SHA, whether ahead or diverged, means asking which to review).
+   - **Local commits:** apply step 3 of "Resolve the head" in SKILL.md "Who reviews" (a local branch that differs from HEAD_SHA, whether ahead or diverged, means asking which to review).
    - Then, with the final HEAD_SHA: `git merge-base --is-ancestor <HEAD_SHA> <BASE_SHA>` succeeds: "already merged into <base>, not reviewed".
    - Pick review, recheck or "no changes" (`ledger.md`, "Picking the review mode"). For "no changes", list the OPEN items and start no agent.
-   - Create the target's work dir and write `{WORKDIR}/earlier.md` as defined under EARLIER in `ledger.md`. This is the only earlier-findings input the lead gets.
+   - Create the target's work dir and write `{WORKDIR}/earlier.md` with `scripts/earlier.py` (EARLIER in `ledger.md`). This is the only earlier-findings input the lead gets.
    - For each recheck, if `git cat-file -e <PREV_STATE>^{commit}` fails, try `git fetch origin <PREV_STATE>` once. Set FORCE_PUSHED to `yes` when the commit is unavailable or `git merge-base --is-ancestor <PREV_STATE> <HEAD_SHA>` fails, else `no`. If the commit is still unavailable, set PREV_STATE to `n/a (previous head unavailable)`.
    - If any target or base fetch failed, report it and stop for that target; do not review a stale head.
 5. **Write a FOCUS list per target, like a lead engineer would.** Look only at `gh pr view <n> --json title,body,files` (file names, not the diff), or `git diff --stat <BASE_SHA>...<HEAD_SHA>` for a branch. Write 3 to 6 short bullets naming the risks that matter for this change. Use the profile's typical risks as a starting point when they fit. In recheck mode, add the OPEN and PARTLY findings from the earlier record (mapped through the adapter for old records).
@@ -72,6 +71,6 @@ Without a profile, detect what you can (GitHub repo from `origin`, default branc
 10. **Write the records**, one target at a time:
     - If a lead returned no `{WORKDIR}/record.md` (it failed, was stopped, or ran out of context), write nothing for that target and report it "incomplete, not recorded".
     - Step 9 corrections come from the lead: it amends its own `record.md` after your question. You never change a status, severity or line yourself; if you still disagree, add a `coordinator_note: <finding id> — <reason>` line.
-    - Publish it with `scripts/publish_record.py` (`ledger.md`, "Locking"), passing `--repro {WORKDIR}/repro` when it has files and the branch options when a branch record moves to the PR folder.
+    - Publish it with `scripts/publish_record.py` (`ledger.md`, "Locking"), passing `--earlier {WORKDIR}/earlier.md`, `--repro {WORKDIR}/repro` when it has files and the branch options when a branch record moves to the PR folder.
 11. **Relay** each lead's report as it is, plus one line for anything you corrected in step 9, then the "Status of all targets" table from `pr-batch-report.md`. Mention merged PRs whose record still had open items.
-12. **Cleanup and final check:** run the cleanup agent (`ledger.md`, "Cleanup") and relay its short list. Confirm only this run's recorded worktrees and databases were removed and no lock this run took is still held (lock files themselves stay; never delete them). List any conflict files written. End with the final line from `ledger.md`, one per target.
+12. **Cleanup and final check:** run the cleanup script (`ledger.md`, "Cleanup") and relay its short list. Confirm only this run's recorded worktrees and databases were removed and no lock this run took is still held (lock files themselves stay; never delete them). List any conflict files written. End with the final line from `ledger.md`, one per target.

@@ -16,7 +16,7 @@ If the runner fails, or the result has an `error`, record the missing second opi
 
 Everything else in this file (candidates only, re-proof, recording the command and exit status) applies unchanged; record the model as Claude.
 
-When an authorized orchestration tool can dispatch an independent `gpt-6-astra` reviewer directly, that is an alternative to the CLI below, not an additional mandatory duplicate. Give it the same read-only handoff and record its model, scope, and result. For large coordinated reviews it may own a distinct workflow initially, followed by a focused challenge of cross-partition findings and repairs. The lead still reconciles coverage and independently re-proves its findings. A CLI initialization failure does not require another identical attempt when this alternative is available.
+A direct `gpt-6-astra` agent may replace the CLI; same handoff, same re-proof.
 
 ## Command
 
@@ -29,7 +29,7 @@ mkdir -p "$REVIEW_TMP"
 cat > "$REVIEW_TMP/codex-review-<short-tag>.prompt" <<'CODEX_REVIEW_PROMPT'
 <prompt below>
 CODEX_REVIEW_PROMPT
-timeout 1800 codex exec -m gpt-6-astra --sandbox read-only --ephemeral --color never -c 'model_reasoning_effort="high"' -c 'mcp_servers={}' - \
+timeout 1800 codex exec -m gpt-6-astra --sandbox read-only -c approval_policy=never --ignore-user-config --ignore-rules --ephemeral --color never -c 'model_reasoning_effort="high"' -c 'mcp_servers={}' - \
   < "$REVIEW_TMP/codex-review-<short-tag>.prompt" \
   > "$REVIEW_TMP/codex-review-<short-tag>.log" 2>&1
 ```
@@ -46,12 +46,10 @@ If `timeout` is not installed, use `gtimeout`; if neither exists, run without it
 
 **Fallback, both variants:** if the model is rejected, rerun once with `-m gpt-5.6-sol` and say so in the report. In every other failure (Codex missing, an error, a timeout, empty output), or when the fallback model also fails, do not retry: record the command, exit status and log path as a limitation and continue. In PR batch mode the lead then starts one fresh `general-purpose` agent with the same prompt as the senior-engineer reviewer, and the report says so.
 
-Record the exit status of every run.
-
 ## Prompt
 
 ```text
-Review this change like a senior engineer under the Unified Review Protocol (~/.agents/AGENTS.md rule 44). Run every phase and emit the report template from ~/.agents/skills/general-review/SKILL.md section 6, which is rule 44's template plus the root-cause, fix and verify fields asked for below.
+Review this change like a senior engineer under the Unified Review Protocol (~/.agents/AGENTS.md rule 44). Run every phase. Read ~/.agents/skills/general-review/SKILL.md sections 5 and 6. From section 5, apply the evidence, root-cause, sibling-sweep and repair-hazard rules to your own findings; the steps about merging other lenses or starting agents are the lead's, not yours. Follow section 6's completion and verdict rules, but return the list below instead of its report template.
 TARGET: <repository or file roots>; mode <branch/PR | staged-only | combined working tree | current-state>; in-scope paths <paths>; baseline <P0 revision or supplied baseline, or none>; target <P0 head revision, index/working-tree snapshot, or selected current files with recorded hashes>.
 Use the scope recorded in P0 for every diff, source read, caller search, line count, blame and check. Read ~/.agents/skills/general-review/references/review-checklist.md section 2 for the mode-specific readers. For branch/PR reviews use the recorded merge base and head; for staged-only reviews use the recorded baseline and index, excluding unstaged changes; for combined working-tree reviews use the recorded baseline (normally HEAD), staged and unstaged changes, and relevant untracked files. For current-state assessments without a change baseline, inspect the selected files, classify findings as pre-existing, and report Verdict: N/A without PASS or LGTM. If the target changes during review, reconcile the delta before reporting.
 INTENT: <what the change is for, acceptance criteria, and anything explicitly out of scope>.
@@ -60,8 +58,9 @@ For EVERY finding cite file:line in the recorded target state, quote the code, a
 For every finding, name its root cause (the design choice or missing invariant that allows it, not the line), group findings with the same cause into families, and search the whole change for every other instance of each family's pattern, reporting each one as verified or unverified. For each family give the per-site patch and the structural fix with trade-offs.
 For cross-layer changes or repeated review/fix cycles, follow ~/.agents/skills/general-review/references/review-closure.md: report workflow and boundary coverage, the owning invariant for each family, valid neighboring cases the repair must preserve, and exact remaining gaps. Keep existing P0/P1/P2 priorities unless new evidence justifies changing them; protocol gate terminology does not by itself establish urgency. In a coordinated review, report to the lead without spawning another review recursively. You are the second-opinion reviewer: do not run the second-opinion step in codex-handoff.md, and do not start any other model, agent or review.
 Read-only: do not edit files, run the test suite, start servers, or make network writes.
+Return a list of findings. For each: file:line in the target state, quoted code, the proof (code, a command you ran, or a source), trigger and impact, severity, origin, root cause, sibling instances checked, fix, verify. Then list what you covered and what you could not check.
 ```
 
 ## Using the result
 
-Treat every Codex finding as a candidate. Re-prove it yourself before it enters the merged list (SKILL.md section 5), and log each one you discard with a reason. If Codex is missing, errors, or times out, record that in the verification log and continue with the other lenses.
+Treat every Codex finding as a candidate. Re-prove it yourself before it enters the merged list (SKILL.md section 5), and log each one you discard with a reason.

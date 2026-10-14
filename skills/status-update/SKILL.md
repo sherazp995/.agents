@@ -117,8 +117,8 @@ Escaped the user text in the login and signup forms, which fixed an XSS bug.
 
 ## Voice
 
-Rules 45 and 47, copied verbatim from `~/.claude/CLAUDE.md`. They are the source of truth
-for how these lines read. Follow them exactly.
+Rules 45 and 47 from `~/.agents/AGENTS-RULES.md`, restated with this skill's examples. That file is the source of truth
+for how these lines read.
 
 ### 47. Talk like a normal junior developer: short messages, answer first
 Lead with the answer, especially for yes/no and "do we need to do anything here". Then stop. Long replies with conditionals, background and caveats read as unresolved even when the answer is settled, and the user has to hunt for the decision.
@@ -140,7 +140,7 @@ Do not connect or separate parts of a sentence with a hyphen or dash (`-`, `–`
 (Hyphens inside a single compound word, e.g. `chat-style`, `left-align`, are fine. The rule bans the dash used as sentence punctuation, not intra-word hyphens.)
 
 ### Rule 46 does not apply here
-Rule 46 caps bullet-point reports at 10 words per bullet. A status update is exempt, on the
+Rule 46 asks for one short point per bullet. That does not apply to a status update, on the
 user's explicit instruction: one complete sentence per line, never split to hit a word count.
 
 ## Gathering the facts

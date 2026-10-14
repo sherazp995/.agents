@@ -1,6 +1,6 @@
 export const meta = {
   name: 'second-opinion',
-  description: 'Ask Claude for one read-only second opinion on a prompt (used when Codex hosts work-council or general-review)',
+  description: 'Ask Claude for one read-only second opinion on a prompt (used when Codex hosts general-review)',
   phases: [{ title: 'Ask', detail: 'one read-only Claude agent answers the prompt' }],
 }
 

@@ -1,21 +1,21 @@
 ---
 name: video-qa
-description: Record a captioned before and after video that proves a fix or feature works. Replays the same scripted user flow against the base version and the changed version, with a visible cursor, natural pauses, burned-in step captions saying what was done and what happened, title cards and a verdict (FIXED, STILL BROKEN, NOT REPRODUCED, INCOMPLETE). Use when the user asks for a QA video, a demo or proof video of a fix, "record what was failing and now works", or a video to attach to a PR. For screenshot comparisons and a full QA report use branch-visual-qa; the two combine.
+description: Record a captioned before and after video that proves a fix or feature works. Replays the same scripted user flow against the base version and the changed version, with a visible cursor, natural pauses, burned-in step captions saying what was done and what happened, and a verdict (FIXED, STILL BROKEN, NOT REPRODUCED, INCOMPLETE). Use when the user asks for a QA video, a demo or proof video of a fix, "record what was failing and now works", or a video to attach to a PR. For screenshot comparisons and a full QA report use branch-visual-qa; the two combine.
 ---
 
 # Video QA
 
-Produce two MP4s, one showing step by step how a bug was triggered on the base version and one showing the same steps working on the changed version, plus a combined film of both. Each step is captioned, and every check ends with PASS or FAIL in the caption. The video is evidence, so it must show what really happened.
+Produce two MP4s, one showing step by step how a bug was triggered on the base version and one showing the same steps working on the changed version, and with `--full` a combined film of both. Each step is captioned, and every check ends with PASS or FAIL in the caption. The video is evidence, so it must show what really happened.
 
 ## Who does what: the session coordinates, one runner records
 
-The chat session states the claim to prove (bug and fix, or feature) and the versions to compare. One runner subagent (`general-purpose`) does steps 1 to 5: servers, flow discovery with the Playwright MCP, scenario, recording, contact sheet check and server cleanup. Give it this skill's path and the claim. It returns only: verdict, exit code, absolute paths of `<id>-before.mp4`, `<id>-after.mp4` and `<id>.mp4`, both contact sheet paths, the trigger steps, console errors, whether every server it started was stopped, and anything it could not do. The session looks at both contact sheets before reporting. When run with `branch-visual-qa`, the session starts the two runners as two agent calls, one after the other, so they share the single browser slot.
+The chat session states the claim to prove (bug and fix, or feature) and the versions to compare. One runner subagent (`general-purpose`) does steps 1 to 5: servers, flow discovery with the Playwright MCP, scenario, recording, contact sheet check and server cleanup. Give it this skill's path and the claim. It returns only: verdict, exit code, absolute paths of `<id>-before.mp4` and `<id>-after.mp4` and both contact sheets (plus `<id>.mp4` only with `--full`), the trigger steps, console errors, whether every server it started was stopped, and anything it could not do. The session looks at both contact sheets before reporting. When run with `branch-visual-qa`, the session starts the two runners as two agent calls, one after the other, so they share the single browser slot.
 
 ## 1. Run both versions
 
 Follow the "Establish the comparison" and "Make both versions work" sections of [branch-visual-qa](../branch-visual-qa/SKILL.md): base and branch in separate checkouts on separate ports, isolated QA databases with identical fixtures, each server verified to run its own SHA. Record each SHA; `detail` on the video banner is `<ref> <short sha>`. Versions that are not git checkouts (static builds, deployed URLs) get a plain description in `detail`, such as `staging build 2026-10-10`. For a new feature with no "before", record the changed version alone.
 
-Start each server in the background on a port you checked is free (`ss -ltn`), record its PID, and when finished kill only those PIDs and confirm the ports are closed. Leave servers that were running before the run alone. Preserve the user's checkout: no edits, commits or branch changes.
+Start each server in the background on a port you checked is free (`lsof -nP -iTCP:<port> -sTCP:LISTEN` on macOS, `ss -ltn` on Linux), record its PID, and when finished kill only those PIDs and confirm the ports are closed. Leave servers that were running before the run alone. Preserve the user's checkout: no edits, commits or branch changes.
 
 A flow behind staff or IdP sign-in (admin, super admin, impersonation) is not blocked in cohabit-web: start the version with the `server-tunnel` skill, which brings up the portal and IdP, and tear it down afterwards (see `cohabit-local-browser-testing`).
 
@@ -37,6 +37,9 @@ Create the run folder `<repo root>/tmp/video-qa/<YYYYMMDD-HHMMSS>/` (add a numer
 | `versions` | One or two of `{label, detail, baseUrl, role?, storageState?}`. A label containing `BEFORE` or `AFTER` sets `role` (red or green banner); otherwise set `role` to `before` or `after`. Two versions need one of each. `detail` is `<ref> <short sha>` |
 | `storageState` | Path to a Playwright storage state for a signed-in session (keep it out of the repo and report) |
 | `pace` | Omit for human pacing; `"fast"` for quick debugging runs |
+| `captions` | Omit for step captions; `false` for a video without them (the `--captions` flag overrides it) |
+| `full` | `true` also makes the combined film, banner clips and side-by-side (the `--full` flag sets it too) |
+| `trimWaits` | Omit to cut page loads and check waits from the video; `false` keeps real time, for a slowness bug |
 | `steps` | Ordered actions and checks, each with a `caption` |
 
 A `selector` is any Playwright locator string: CSS (`#email`, `[data-testid=save]`), `text=Subscribe`, or `role=button[name="Subscribe"]`. The first match is used.
@@ -53,12 +56,18 @@ Prerequisites: Node 18+, Google Chrome (or Playwright's chromium), `fc-match` (f
 
 ```bash
 cd <this skill's directory>/scripts && [ -d node_modules ] || npm install
-node <this skill's directory>/scripts/record.mjs <run folder>/scenario.json <run folder>
+node <this skill's directory>/scripts/record.mjs <run folder>/scenario.json <run folder> [--captions on|off] [--full]
 ```
 
-First run on a new machine: if Playwright reports a missing ffmpeg, run `node node_modules/playwright-core/cli.js install ffmpeg` in `scripts/`. It uses installed Chrome when `/usr/bin/google-chrome` exists; otherwise run `node node_modules/playwright-core/cli.js install chromium`, or set `VIDEO_QA_CHANNEL`. `VIDEO_QA_HEADED=1` shows the browser while recording.
+`--captions off` records the same flow with no caption strip and shorter holds, for a clean video. The `.srt` files are still written. Use it when the user asks for a video without captions.
 
-The recorder moves a visible cursor to each target, types with an uneven rhythm and pauses briefly before each step, so the flow is easy to follow.
+`--full` adds the combined `<id>.mp4` (title card, BEFORE, AFTER, verdict card, with version banners), `side-by-side.mp4` and the banner clips `before.mp4` and `after.mp4`. Use it only when the user asks for a combined film.
+
+First run on a new machine: if Playwright reports a missing ffmpeg, run `node node_modules/playwright-core/cli.js install ffmpeg` in `scripts/`. On macOS, Homebrew's `ffmpeg` has no `drawtext` or `subtitles`; install `ffmpeg-full` and put `$(brew --prefix ffmpeg-full)/bin` first on `PATH`. It uses installed Chrome when `/usr/bin/google-chrome` or `/Applications/Google Chrome.app` exists; otherwise run `node node_modules/playwright-core/cli.js install chromium`, or set `VIDEO_QA_CHANNEL`. `VIDEO_QA_HEADED=1` shows the browser while recording.
+
+The recorder moves a visible cursor to each target in one quick eased glide, types at a brisk uneven rhythm (faster for long values) and pauses only briefly around each step, so the flow looks like a person who knows the app.
+
+Waiting is cut from the video, keeping a short blink at each end: a `goto` page load, the whole wait of a `wait_for`, the page load or fetch/XHR traffic (a Turbo Drive or SPA visit) that any other action starts, including one sent just after it (an onchange auto-submit, a key press), and a check's polling, which keeps about 0.3s at each end. The cursor glide, the typing, `wait` steps and the holds stay. Caption times shift to match. A failed check's caption keeps the real wait, such as `FAIL: no error shown (waited 5.0s)`; `results.json` records `trimmedMs` per version and `waitedMs`, the real wait, for every check. When the claim is about speed (a slow page, a spinner that never ends), set `"trimWaits": false` so the video shows real time.
 
 ## 5. Read the verdict and check the video
 
@@ -71,22 +80,21 @@ The script prints JSON and writes `results.json`. Verdicts and exit codes:
 - `FAILING` (exit 1): one version only, a check failed.
 - `INCOMPLETE` (exit 2): an action could not run on some version (server down, selector missing), so the video proves nothing. Fix the setup or scenario and record again.
 
-An invalid scenario (unknown action or role, no check, wrong version count) exits 2 before recording.
+An invalid scenario (unknown action or role, no check, wrong version count, `captions`, `trimWaits` or `full` not `true` or `false`, an odd viewport width or height), a `--captions` value other than `on` or `off`, or a value on `--full` exits 2 before recording.
 
-Before reporting, look at the video yourself: the recorder writes `before-sheet.png` and `after-sheet.png`, twelve frames spread across each whole clip. Read both. Confirm the captions match what is on screen, the bug is visible on BEFORE and the fix on AFTER. A wrong selector or a check that passes for the wrong reason makes the video misleading: fix the scenario and record again. Never edit captions or cut footage to change what a check showed.
+Before reporting, look at the video yourself: the recorder writes `before-sheet.png` and `after-sheet.png`, twelve frames spread across each whole clean clip (`<id>-before.mp4`, `<id>-after.mp4`). Read both. Confirm the captions match what is on screen, the bug is visible on BEFORE and the fix on AFTER. A wrong selector or a check that passes for the wrong reason makes the video misleading: fix the scenario and record again. Never edit captions or cut footage to change what a check showed.
 
 ## Outputs
 
-Every video, contact sheet and `*-final.png` shows the step captions in a dark strip below the page, sized for the longest caption, so a caption never covers the page. In the run folder:
+Unless captions are off, every video, contact sheet and `*-final.png` shows the step captions in a dark strip below the page, sized for the longest caption, so a caption never covers the page. In the run folder:
 
 - `<id>-before.mp4` and `<id>-after.mp4`: each version on its own, with its step captions but no version banner, title or verdict card. These are the deliverables to share, one video per version (a single-version run makes only its own, `<id>-<role>.mp4`, or `<id>-<slug>.mp4` without a role).
-- `<id>.mp4`: title card, BEFORE clip, AFTER clip, verdict card, with the version banner. Kept as the combined proof.
-- `side-by-side.mp4`: both clips next to each other (set `"sideBySide": false` to skip).
-- `before.mp4`, `after.mp4`, `*-sheet.png` contact sheets, `*.srt` captions, `*-final.png` last frames.
-- `results.json`: verdict, per step PASS or FAIL, console errors per version. It records that the run was automated.
+- `*-sheet.png` contact sheets of those clips, `*.srt` captions, `*-final.png` last frames.
+- `results.json`: verdict, per step PASS or FAIL, console errors per version. It records that the run was automated. `video` and `sideBySide` are null without `--full`.
+- Only with `--full`: `<id>.mp4` (title card, BEFORE clip, AFTER clip, verdict card, with the version banner), `side-by-side.mp4` (both banner clips next to each other; `"sideBySide": false` skips it), and the banner clips `before.mp4` and `after.mp4`.
 
-Keep videos out of git. Report the verdict, the absolute paths of `<id>-before.mp4` and `<id>-after.mp4` first, then `<id>.mp4`, the steps that trigger the bug, and any console errors. When run inside branch-visual-qa, add the videos to that report's `evidence` list.
+Keep videos out of git. Report the verdict, the absolute paths of `<id>-before.mp4` and `<id>-after.mp4` first (then `<id>.mp4` when made with `--full`), the steps that trigger the bug, and any console errors. When run inside branch-visual-qa, add the videos to that report's `evidence` list.
 
 ## Honesty
 
-The pacing makes the video watchable; it is not a claim that a person tested it. Do not add a named tester or text saying it was recorded manually. If the user wants that, say once that the video was automated and leave it out.
+The pacing and the cut waits make the video watchable; they are not a claim that a person tested it or that the app responded instantly. Do not add a named tester or text saying it was recorded manually. If the user wants that, say once that the video was automated and leave it out.

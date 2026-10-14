@@ -9,9 +9,9 @@ const problems = []
 
 // Skills this one may use. Each must be a real folder in the same skills folder, not a
 // symlink or its own git repository, so the parent repository ships it.
-const ALLOWED_SIBLINGS = ['llm-council', 'general-review', 'writing-specs', 'workflow-runner']
+const ALLOWED_SIBLINGS = ['doing-substantial-work', 'llm-council', 'workflow-runner']
 // Names that would pull in something shipped separately.
-const BANNED = [/fable/i, /ponytail/i, /superpowers:/i, /principal-[a-z]+-engineer/i, /~\/\.claude\/agents/]
+const BANNED = [/fable/i, /superpowers:/i, /principal-[a-z]+-engineer/i, /~\/\.claude\/agents/]
 
 const files = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)])

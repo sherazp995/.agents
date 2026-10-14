@@ -191,7 +191,7 @@ A test that cannot fail is noise. Before calling a test done, break the code it 
 
 A mutation counts when the example fails *because of the behaviour you changed*: an assertion failure, or a runtime error the change itself causes (turning `user&.name` into `user.name` and getting `NoMethodError` on nil is a valid result). Judge by the failure's cause, not the count: a single-example run is supposed to go fully red. The mutation is invalid, so redo it and don't report it, when the output is a `SyntaxError`, a load error, RSpec's "errors occurred outside of examples", or an error unrelated to the behaviour (a dangling `.first` after deleting part of a chain, a stray `end`, a typo'd name). Run `ruby -c <file>` on the mutated file when in doubt.
 
-When a mutation survives, trace whether the line can run at all before writing a test. If no caller can reach it (a flag nothing reads later, a callback whose condition the path never meets), it is dead code. In an authorized task, delete it (rule 35) and correct any PR claim that relied on it; in a review, report it. Don't write a test to prove dead code works.
+When a mutation survives, trace whether the line can run at all before writing a test. If no caller can reach it (a flag nothing reads later, a callback whose condition the path never meets), it is dead code. If your change made it dead, delete it (rule 35) and correct any PR claim that relied on it; if it was already dead, or in a review, report it. Don't write a test to prove dead code works.
 
 **Don't:** ship a spec that passed on the first run and was never seen failing.
 **Do:**
@@ -288,6 +288,9 @@ Name request spec files after one area (`schedule_access_spec.rb`), and keep per
 ### S8. Stubs stay at the boundary
 Stub external services (payment provider, mailers that call out, Sidekiq workers) once in a `before` block. Don't stub the app's own policies, services or models inside a request spec; that turns it into an implementation test (rule 30).
 
+### S9. Move code only to a home that fits
+Before folding a single-use concern into its model, check the model's size with the code counted (Part 3, step 4). A single-model concern is fine when it is a real trait ("has trait" or "acts as" semantics, per 37signals' "Good concerns"): keep it as `Model::Trait` under `app/models/<model>/` (or the folder the project already uses, e.g. `app/models/concerns/<model>/`). If it only exists to dodge `ClassLength`, extract a plain object (service, form or value object) instead. Extract code shared across models into a top-level concern only once it repeats in three or more places (the Rule of Three); two models with similar code keep the duplication (Sandi Metz: "duplication is far cheaper than the wrong abstraction").
+
 ---
 
 ## Part 3: trim checklist
@@ -299,7 +302,7 @@ Review mode still runs mutations (step 7). Do it in a throwaway worktree on the 
 1. List every example with the framework's own runner, not a text search. RSpec: `bundle exec rspec <file> --dry-run --format documentation` (includes `specify`, `example`, shared and generated examples). Minitest: `bin/rails test <file> -v` (or `ruby -Itest <file> -v`), which prints every test it runs, including `describe`/`it` spec style. Use grep only as a supplement.
 2. For each, write the behaviour and the app line or branch it protects, and its layer.
 3. Mark each one: **keep**, **move** (belongs lower, S1), **duplicate** (S3), or **padding** (S4).
-4. Plan any production code the moves need (folding a concern into a model, extracting a service). Check the destination's size against the project's rubocop limits (`Metrics/ClassLength` and friends) *with the moved code counted*; if it would go over, pick another destination before editing anything.
+4. Plan any production code the moves need (folding a concern into a model, extracting a service). Check the destination's size against the project's rubocop limits (`Metrics/ClassLength` and friends) *with the moved code counted*; if it would go over, pick another destination before editing anything (S9).
 5. Move the examples and code; delete duplicates and padding.
 6. Check every remaining denial of a write has both halves (S5).
 7. Mutation check each new or changed example (rule 50): break the line from step 2, see it fail for that reason, restore. Also break each new branch or guard in the app code the change adds, even when no example claims to cover it; a mutation nothing catches is a coverage gap or dead code (rule 50). Mutating untouched examples is only for an audit the user asked for; otherwise run just the narrow tests (global rule 42).
@@ -308,13 +311,6 @@ Review mode still runs mutations (step 7). Do it in a throwaway worktree on the 
 10. Report the before and after counts, e.g. "31 examples to 14; 9 moved to the policy spec, 8 deleted as duplicates".
 
 ---
-
-## Mistakes already made (don't repeat)
-- **Declared a test gap for dead code.** A line that sets a skip flag survived mutation. The code that reads the flag only runs on a path the change never takes, and the flag isn't persisted. The right fix was deleting the line, not adding a test (rule 50).
-- **Reported a broken mutation as a result.** Deleting one link of a query chain left a dangling method call, so every example errored. Check the failure type before reading the result (rule 50).
-- **Recommended folding a single-use concern into its model without checking size.** The model then went over `Metrics/ClassLength`. Check size before moving code (Part 3, step 4). A single-model concern is allowed by the Rails sources (Rails guide `Product::Notifications` in `app/models/product/`, DHH's `Dropboxed`, mixed "into just the Person model"), but only when it is a real trait: 37signals' "Good concerns" says a concern needs "has trait" or "acts as" semantics and should not be used as an arbitrary container "to split a large model into smaller parts". So: if the code is a trait, keep it as `Model::Trait` under `app/models/<model>/` (or the folder the project already uses, e.g. `app/models/concerns/<model>/`); if it only exists to dodge `ClassLength`, extract a plain object (service, form or value object) instead. A top-level concern shared across models follows the user's own rule, the Rule of Three (Don Roberts, in Fowler's *Refactoring*): don't extract shared code into a concern until it is repeated in three or more places. Two models with similar code keep the duplication (Sandi Metz: "duplication is far cheaper than the wrong abstraction").
-- **Reviewed without mutations or checking the PR's claims.** Review mode once skipped mutations, so every example looked like a keep. Mutations then found a dead line, an untested error branch and a lookup whose `.downcase` no example needed, and the PR description claimed a protection that didn't exist (Part 3, steps 7 and 8).
-- **Denial asserted only one half.** A locked request that "ignores a change" must also assert the response status (S5).
 
 ## Sources
 - DHH, Rails issue #18950 (deprecating `assigns` and `assert_template`): https://github.com/rails/rails/issues/18950

@@ -38,7 +38,7 @@ Check whether the approach solves the right problem in the right layer. Identify
 
 Completion evidence: a behavior inventory and relevant architectural boundaries.
 
-For coordinated reviews, give each workflow and cross-layer boundary an owner using `review-closure.md`. Reconcile file coverage with workflow coverage before proceeding; separate frontend and backend passes can both miss the contract between them.
+For coordinated reviews, give each workflow and cross-layer boundary an owner and reconcile file coverage with workflow coverage (`review-closure.md`).
 
 ## 4. Trace regression paths (P2)
 
@@ -133,7 +133,7 @@ Check whether mocks hide the changed integration, fixtures make the trigger unre
 
 Run the smallest applicable existing tests, type checks, linters, or build checks that add confidence. Reuse cached output only when command, relevant source state, dependencies, and environment match; an old passing filename is not enough. Cache full output and preserve failure exit codes. Do not repeat unchanged runs or default to the whole suite.
 
-Do not mutate the reviewed checkout, add tests to it, or perform destructive reproductions in this reporting-only workflow (PR batch mode's throwaway worktrees, removed after the review, are the one exception; see SKILL.md). If mutation evidence is supplied, assess it; otherwise explain why assertions detect the suspected failure and state that mutation testing was not performed. Do not claim a test was seen failing when it was not.
+Do not mutate the reviewed checkout, add tests to it, or perform destructive reproductions in this reporting-only workflow. If mutation evidence is supplied, assess it; otherwise explain why assertions detect the suspected failure and state that mutation testing was not performed. Do not claim a test was seen failing when it was not.
 
 A failing check is not automatically introduced. Compare with baseline evidence where practical or trace the causal change. Distinguish test failures from environment/setup failures. Unavailable tooling is a verification limitation, not an invented code defect.
 
@@ -143,7 +143,7 @@ Completion evidence: commands, results, cache locations, behavioral coverage, an
 
 Check responsibilities, duplication, speculative abstractions, unnecessary dependencies, overly complex branching, unclear names, unused code, misleading comments, and applicable project conventions. Recommend simplicity only when it preserves required behavior. Do not mix unrelated cleanup into findings about the change.
 
-Apply the [structural lens](structural-lens.md) here: measure file sizes at the selected baseline and target (current size only when no change baseline exists), look for new ad-hoc branching, thin wrappers, casts and optionality, logic in the wrong layer, and a code-judo move that deletes complexity. Merge its findings, and the Codex second opinion's, into the same candidate list before re-proving.
+Apply the structural lens ([structural-lens.md](structural-lens.md)).
 
 Assign severity and origin using the parent skill. For each candidate finding, verify all of the following:
 
@@ -156,11 +156,11 @@ Assign severity and origin using the parent skill. For each candidate finding, v
 7. The suggested fix respects intent and known consumers, and its verify step would fail without the fix.
 8. Another finding does not already describe the root cause.
 
-Before a repair handoff, challenge the proposed invariant against valid neighboring states and other repairs. Record the regression cases and sibling entry points that a local patch would miss. Preserve stable candidate IDs and dispositions across review rounds.
+Before a repair handoff, apply the repair-hazard rules in SKILL.md section 5, step 4b.
 
 Discard disproven candidates. Keep unresolved questions separate from confirmed findings. Do not inflate severity because verification is incomplete. Pre-existing issues remain visible without gating the change.
 
-Completion evidence: findings have locations, quotes, triggers, impact, origin, fix, verify, and re-proof.
+Completion evidence: each finding has the fields SKILL.md section 5 requires, its origin, and its re-proof.
 
 ## 13. Reconcile coverage and report (P5 and P6)
 
@@ -181,8 +181,4 @@ Use this compact coverage ledger in the final verification log. Group genuinely 
 
 For a small, low-risk diff, keep the rule-44 report sections but compress the verification log. The file inventory, before/after comparison, caller trace, and coverage ledger may be short prose instead of separate tables. Group not-applicable dimensions into one line with a shared concrete reason, for example: `Persistence, concurrency, deployment: N/A; only static help text changed.` Record applicable checks, actual verification, and all material gaps explicitly. Do not list all 13 steps as separate rows or repeat the same evidence under multiple headings. Small line counts alone do not establish low risk; changes to authorization, persisted data, shared contracts, or concurrent behavior need the relevant detailed tracing.
 
-Apply the completion rules in the parent's section 6. Unfinished feasible inspection or missing foundational review scope requires an interim `Review incomplete` report. After feasible inspection is complete, verification requiring prohibited changes or unavailable systems remains an explicit open question with its risk and resolution requirement; it does not prevent a verdict based on confirmed findings. Keep unavailable checks marked unverified and do not repeat them without changed circumstances. Never convert missing evidence into reassurance.
-
-Use the parent skill's severity counts, origin sections, verdict rules, and report template. Include regression evidence when contracts changed; use a matrix or the compact prose option above, keeping consumers and before/after behavior clear. Report inspected scope, checks actually run, open questions, and residual risks. Do not pad a clean review with speculative findings.
-
-End this review phase after reporting. Do not remediate findings, edit source, or publish anything externally within the skill. Return findings to any already-authorized calling implementation task so it can continue under the parent's handoff rules.
+Report, verdict and completion rules: SKILL.md section 6. Include regression evidence when contracts changed, as a matrix or the compact prose above, and do not pad a clean review with speculative findings.

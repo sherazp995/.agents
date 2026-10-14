@@ -163,14 +163,14 @@ Check content type, size, and filename. Don't trust client MIME types alone.
 ## Testing
 
 ### 30 to 34, 49 to 53. Follow the `writing-specs` skill
-The rules live in the `writing-specs` skill (`~/.agents/skills/writing-specs/SKILL.md`), which keeps their numbers. Load it before writing, changing or reviewing any test. In Claude Code and Codex the `spec-guard` hook delivers it the first time a session edits a test file and reports the breaks a script can detect after every test edit; the completion-check hook reviews the judgment rules at the end of the turn.
+The rules live in the `writing-specs` skill (`~/.agents/skills/writing-specs/SKILL.md`), which keeps their numbers. Load it before writing, changing or reviewing any test. In Claude Code and Codex the `spec-guard` hook delivers it the first time a session edits a test file and reports the breaks a script can detect after every test edit; the judgment rules no script can detect are yours to apply (the completion-check hook only flags new logic with no test).
 
 ## General
 
-### 35. Clean up dead code
-Remove unused files, partials, methods, and variables. If something has no references, delete it.
+### 35. Clean up the dead code your change leaves
+Remove the files, partials, methods, imports and variables your change made unused. Dead code that was already there: mention it in the report and delete it only when the user asks or the task is a cleanup (rule 55).
 
-**Don't:** Leave `# TODO: remove after v2` on unreferenced helpers | **Do:** `grep -r 'method'`; if zero hits outside definition, delete it.
+**Don't:** Leave the old helper behind after replacing its only caller | **Do:** `grep -r 'old_helper'`; if zero hits outside its definition, delete it with the change that orphaned it.
 
 ### 36. Don't leave TODO/FIXME without tickets
 If you must leave a TODO, reference a ticket number. Otherwise fix it now.
@@ -181,6 +181,15 @@ If you must leave a TODO, reference a ticket number. Otherwise fix it now.
 Write code a new team member understands without context. Avoid metaprogramming unless it truly simplifies.
 
 **Don't:** `%i[...].each { |attr| define_method("formatted_#{attr}") { ... } }` | **Do:** Write each method explicitly.
+
+### 55. Change only what the request needs, as simply as possible
+Every changed line traces to the request or the approved plan. Write the minimum code that solves it: no features, options or configurability nobody asked for, no abstraction for a single use, no error handling for cases that cannot happen. Match the surrounding style. Do not reformat, rename or refactor neighbouring code that works. If unrelated code looks wrong, mention it instead of changing it. When the task cannot be done without an adjacent fix (broken setup, a bug that blocks the test), make it and name it in the report.
+
+Reuse before writing: code already in the repo, then the standard library, then a native platform feature (a DB constraint over app code, CSS over JS, a native input over a library), then a dependency already installed. Write new code or add a dependency only after those. Fix a bug at its root cause: grep the callers of the function you touch and fix it once in the shared function all callers route through, not only on the path the ticket names. Simplicity never shortens the reading: understand the whole flow before choosing the smallest change. Never simplify away input validation at trust boundaries, error handling that prevents data loss, security measures, accessibility basics, or anything the user asked for.
+
+**Why:** Unrequested edits hide the real change in the diff, widen what can break, and are the most common way an agent overcomplicates a task.
+
+**Don't:** Fix a typo and also rename three variables and reflow the file | **Do:** Fix the typo; mention the naming in the report if it matters.
 
 ## Forms & Turbo (Rails + Hotwire)
 
@@ -214,8 +223,10 @@ Full integration runs happen once per phase in a dedicated task, not in every in
 ### 43. Run git from inside the repo, never with `git -C <path>`
 `cd` into the repo once, then run git there. (The `git-guard` hook enforces this in Claude Code and Codex: it denies `git -C` with the same command rewritten as `cd <dir> && git ...`, so the agent reruns it without asking the user.)
 
-### 44. Review every code change with the Unified Review Protocol (HARD REQUIREMENT)
-No code change is "done" until reviewed under the protocol below with verdict **PASS**: every introduced blocker resolved, every introduced high and medium fixed. Protocol is identical for self-review, Codex, or dispatched subagents.
+### 44. Review every code change with the Unified Review Protocol
+No code change is "done" until reviewed under the protocol below with verdict **PASS**: every introduced blocker resolved, every introduced high and medium fixed. The review runs through the `general-review` skill, done by an agent that did not write the change; an inline self-review is only general-review's labeled fallback.
+
+Review feedback from a person, Copilot or another agent is a claim to verify against the code before acting. When it is wrong, push back with the evidence; never apply a suggestion only because a reviewer made it.
 
 **Why:** A second, evidence-bound pass catches what you miss. Splitting findings by origin (introduced vs pre-existing) lets you gate regressions *this change* caused without holding it hostage to inherited debt.
 
@@ -255,7 +266,7 @@ Counts (introduced / pre-existing): blocker A/B · high C/D · medium E/F · low
 When zero introduced blocker/high/medium findings, emit: `Verdict: PASS` + `✅ LGTM: No critical issues found.`
 
 ### 54. Keep exactly one unpushed commit per branch
-Before committing, count unpushed commits with `git rev-list --count HEAD --not --remotes`. If one exists, fold the new work into it with `git commit --amend --no-edit` (or `--amend -m` to update the one-line message) without asking; if several exist, do not commit or squash: leave the change uncommitted and tell the user the branch needs squashing first. Never rewrite a commit that is already on a remote. (The `git-guard` hook enforces this for commits and amends in Claude Code and Codex; resets, rebases and force-pushes are on you.)
+Before committing, count unpushed commits with `git rev-list --count HEAD --not --remotes`. If one exists and it holds this same work (git-guard's deny names its subject), fold the new work into it with `git commit --amend --no-edit` (or `--amend -m` to update the one-line message) without asking; if it holds unrelated work, do not amend: leave the change uncommitted and report that the branch already holds it; if several exist, do not commit or squash: leave the change uncommitted and tell the user the branch needs squashing first. Never rewrite a commit that is already on a remote. (The `git-guard` hook enforces this for commits and amends in Claude Code and Codex; resets, rebases and force-pushes are on you.)
 
 ## Communication Style
 
@@ -264,11 +275,11 @@ Use commas, periods, colons, semicolons, or parentheses instead. (Intra-word hyp
 
 **Don't:** "The fix works — I verified it." | **Do:** "The fix works. I verified it."
 
-### 46. Bullet-point reports: 10 words maximum per bullet
-Count strictly. No exceptions. If a point needs more, split into two bullets.
+### 46. Bullet-point reports: one short point per bullet
+Each bullet carries one point the user can take in at a glance; a point that needs more becomes two bullets. The user skims reports, and long bullets read as unresolved (rule 47). A skill that sets its own line format (status-update) overrides this.
 
-**Don't:** "Unified the two evaluation comment modals into one consistent chat-style layout with a title, thread, and composer" (17 words)
-**Do:** "Unified both evaluation comment modals into one layout" (8 words)
+**Don't:** "Unified the two evaluation comment modals into one consistent chat-style layout with a title, thread, and composer"
+**Do:** "Unified both evaluation comment modals into one layout"
 
 ### 47. Talk like a normal junior developer: short messages, answer first
 Lead with the answer (yes/no, "nothing to do"). Long replies read as unresolved even when settled. Detail belongs in PR descriptions or tickets, not chat.

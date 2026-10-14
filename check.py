@@ -1,4 +1,4 @@
-"""Check that this machine's agents use ~/.agents for rules, skills, agents, Ponytail, memory, chats,
+"""Check that this machine's agents use ~/.agents for rules, skills, agents, memory, chats,
 hooks, permissions, MCP servers and the shared config in local/.
 
 Every section runs even when an earlier one fails, and all failures are listed.
@@ -7,7 +7,6 @@ Clients that are not installed (see registry.toml) are skipped. Run
 """
 import argparse
 from datetime import datetime, timezone
-import filecmp
 import json
 import os
 from pathlib import Path
@@ -28,22 +27,10 @@ import tomllib  # noqa: E402  (3.11+, so only after ensure() has found a new eno
 from agents_hub import accounts, memory, registry, relocate, shared_config, wiring  # noqa: E402
 from agents_hub.paths import Paths  # noqa: E402
 
-IGNORED = ['.DS_Store', '.git']
 HOOK_CONFIG = {'claude': 'settings.json', 'codex': 'hooks.json'}
 SCHEDULE_LATE_HOURS = 2      # warn: the machine may just have been asleep
 SCHEDULE_DEAD_HOURS = 24     # fail: the scheduled job is not running
 WARNINGS = []
-
-
-def same_tree(left, right):
-    # Codex copies a local plugin into its cache instead of linking it.
-    diff = filecmp.dircmp(left, right, ignore=IGNORED)
-    if diff.left_only or diff.right_only or diff.funny_files:
-        return False
-    _, mismatch, errors = filecmp.cmpfiles(left, right, diff.common_files, shallow=False)
-    if mismatch or errors:
-        return False
-    return all(same_tree(left / name, right / name) for name in diff.common_dirs)
 
 
 def installed_clients(home, hub):
@@ -59,7 +46,7 @@ def check(home, repo_only=False):
         home = home.resolve()
         hub = home / '.agents'
         sections = (('skills and rules', check_skills_and_rules), ('clients', check_clients),
-                    ('ponytail', check_ponytail), ('hub', check_hub))
+                    ('hub', check_hub))
     passed, failures = [], []
     for name, section in sections:
         try:
@@ -78,10 +65,8 @@ def check_repo(hub):
     """The checks that read only the checkout: selected skills exist and AGENTS.md links survive symlinks."""
     data = json.loads((hub / 'selected-skills.json').read_text())
     shared = hub / 'skills'
-    # App-owned folders: Claude syncs organization skills, Codex rewrites its system skills,
-    # and update-ponytail.sh owns the ponytail* links.
-    authored = {p.name for p in shared.iterdir()
-                if not p.name.startswith('.') and p.name != 'synced' and not p.name.startswith('ponytail')}
+    # App-owned folders: Claude syncs organization skills and Codex rewrites its system skills.
+    authored = {p.name for p in shared.iterdir() if not p.name.startswith('.') and p.name != 'synced'}
     assert set(data['skills']) <= authored, f'Selected skills missing: {sorted(set(data["skills"]) - authored)}'
     if authored - set(data['skills']):
         WARNINGS.append(f'skills not listed in selected-skills.json: {sorted(authored - set(data["skills"]))}')
@@ -219,6 +204,12 @@ def check_agents(hub, name, primary, extras):
             f'{name}: {extra / "agents"} is not shared with {primary}'
 
 
+def assert_no_ponytail(path, names):
+    """Ponytail was removed from the hub; a login that still registers it loads a stale cached copy."""
+    left = [n for n in names if 'ponytail' in n]
+    assert not left, f'{path} still registers the removed Ponytail plugin ({", ".join(left)}); delete those entries'
+
+
 def check_clients(home, hub):
     """Every installed client and profile is wired the way registry.toml says."""
     agents_md = hub / 'AGENTS.md'
@@ -264,51 +255,25 @@ def check_clients(home, hub):
             assert commands == [wanted], \
                 f'Claude SessionStart provisioning is {commands or "missing"}, expected [{wanted!r}]; run install.py'
             check_permissions(hub, name, primary / 'settings.json')
+            settings = json.loads((primary / 'settings.json').read_text()) if (primary / 'settings.json').exists() else {}
+            assert_no_ponytail(primary / 'settings.json', [*settings.get('enabledPlugins', {}),
+                                                           *settings.get('extraKnownMarketplaces', {})])
         if name == 'codex':
-            config_file = primary / 'config.toml'
-            config = tomllib.loads(config_file.read_text()) if config_file.exists() else {}
-            limit = config.get('project_doc_max_bytes')
+            configs = []
+            for login in [primary, *extras]:  # config.toml is separate per login, so each one is read
+                login_file = login / 'config.toml'
+                configs.append((login_file, tomllib.loads(login_file.read_text()) if login_file.exists() else {}))
+            limit = configs[0][1].get('project_doc_max_bytes')
             assert limit is None or int(limit) >= agents_md.stat().st_size, \
                 f'Codex project_doc_max_bytes ({limit}) is smaller than AGENTS.md ({agents_md.stat().st_size} bytes)'
+            for login_file, login_config in configs:
+                assert_no_ponytail(login_file, [*login_config.get('plugins', {}),
+                                                *login_config.get('marketplaces', {})])
             system = primary / 'skills' / '.system'
             if system.exists():
                 # Codex owns its bundled system skills and rewrites this folder on update.
                 assert (system / '.codex-system-skills.marker').is_file(), 'skills/.system is not Codex-managed'
     return f'{len(clients)} installed clients ({", ".join(sorted(clients))})'
-
-
-def check_ponytail(home, hub):
-    plugin = hub / 'plugins/ponytail'
-    assert plugin.is_dir(), 'Ponytail is not installed; run ./update-ponytail.sh'
-    data = json.loads((hub / 'selected-skills.json').read_text())
-    version = json.loads((plugin / '.claude-plugin/plugin.json').read_text())['version']
-    codex_version = json.loads((plugin / '.codex-plugin/plugin.json').read_text())['version']
-    assert codex_version == version, f'Ponytail Claude plugin is {version} but the Codex plugin is {codex_version}'
-    for name in data['ponytail_plugin_paths']:
-        path = home / name
-        if not (home / Path(name).parts[0]).is_dir():
-            continue  # that client is not installed here
-        linked = path.is_symlink() and path.resolve(strict=True) == plugin
-        assert linked or same_tree(path, plugin), f'Separate Ponytail installation: {path}'
-    for skill in sorted((hub / 'skills').glob('ponytail*')):
-        assert skill.resolve(strict=True) == plugin / 'skills' / skill.name, \
-            f'{skill} does not point into {plugin / "skills"}; run ./update-ponytail.sh'
-    clients = installed_clients(home, hub)
-    if 'codex' in clients:
-        primary, extras = registry.profiles(home, clients['codex'])
-        for profile in [primary] + extras:
-            source = tomllib.loads((profile / 'config.toml').read_text()).get('marketplaces', {}).get('ponytail', {})
-            assert source.get('source_type') == 'local' and source.get('source') == str(hub / 'plugins'), \
-                f'{profile} installs Ponytail from {source or "nowhere"}, not {hub / "plugins"}'
-    claude_record = home / '.claude/plugins/installed_plugins.json'
-    if 'claude' in clients and claude_record.exists():
-        for record in json.loads(claude_record.read_text())['plugins'].get('ponytail@ponytail', []):
-            assert Path(record['installPath']).resolve(strict=True) == plugin, \
-                f"Claude loads Ponytail from {record['installPath']}, not {plugin}"
-            assert record['version'] == version, f"Claude records Ponytail {record['version']}, installed is {version}"
-    config = home / '.config/ponytail/config.json'
-    assert config.resolve(strict=True) == hub / 'ponytail.json', f'{config} is not a link to {hub / "ponytail.json"}'
-    return f'one Ponytail {version} installation'
 
 
 def check_schedule(hub):

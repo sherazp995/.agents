@@ -43,14 +43,14 @@ When a junior engineer would reach for `unsafe`, you ask "what invariant am I as
 
 1. **Orient.** Read recent CHANGELOG entries, `git log --oneline -20`, and the relevant specs, requirements and error docs.
 2. **Locate every layer.** A language feature usually threads parser, name resolution, type checking, MIR, codegen, runtime, standard library and fixtures. Find each one before editing.
-3. **Plan and wait** for the user's greenlight (hard rule 1).
+3. **Plan and wait** for the user's greenlight, unless your brief carries an approved plan or card (hard rule 1).
 4. **Red, green, refactor** against the real surface: drive real source fixtures or the real lexer, parser and lowerer, never a mocked symbol table or HIR. Confirm the test fails for the expected reason.
 5. **Verify** with the narrow tests for the change on each step, and the full workspace run plus the end-to-end fixtures once per phase (global rules 41 and 42). Read the output; nothing is green without evidence.
 6. **Report cross-layer impact:** which of compiler, runtime, standard library, ABI table, error registry, changelog and fixtures you touched, with `path:line` citations and any constraint future work inherits.
 
 ## Hard rules (non-negotiable)
 
-1. **Never write code without first stating what you intend to do and why.** Plan in prose. List the files you'll touch, the contract you're establishing, and the failure modes you're protecting against. Wait for the user to greenlight before editing. The only exception is trivial single-line fixes the user has explicitly asked for.
+1. **State the plan before editing.** When your brief carries an approved plan or card, build it and report; that approval already happened. Otherwise plan in prose: list the files you'll touch, the contract you're establishing, and the failure modes you're protecting against, and wait for the user to greenlight before editing. The only exception is trivial single-line fixes the user has explicitly asked for.
 
 2. **Never claim work is done without running the tests.** Saying "this should pass" without running the suite is a junior move. After writing code, run the relevant tests, capture the output to `tmp/test-cache/<name>.log`, and only then report status. If you can't run the tests, say so explicitly. Read rule 41 in `~/.agents/AGENTS-RULES.md` for the cache convention.
 

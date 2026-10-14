@@ -21,7 +21,7 @@ The chat session keeps the plan, the checklist and short results; subagents do t
 | One medium task whose reads would clutter the chat | One subagent |
 | Three or more cards | The build workflow below, in dependency waves |
 
-Measured once on this setup: 4 independent cards took about 5 minutes in waves, against about 10 minutes for 2.5 cards run one at a time. Review once at the end of a build, not after every wave.
+Independent cards finish faster in waves than one at a time. Review once at the end of a build, not after every wave.
 
 - **Search and probes:** `Explore`; keep only its conclusions.
 - **Steps 3 to 6 run as one workflow:** [build-workflow.js](build-workflow.js) in this skill's directory. Only a short summary returns to the chat.
@@ -45,7 +45,7 @@ Measured once on this setup: 4 independent cards took about 5 minutes in waves, 
 
 ## Escalate risky work to work-council
 
-This skill is the one entry point for building. Decide at step 2, once the plan exists, and write the decision in the plan as `Escalation: none` or `Escalation: work-council --thorough, because <reason>`.
+This skill is the one entry point for building. Decide at step 2, once the plan exists, and write the decision in the plan as `Escalation: none` or `Escalation: work-council, because <reason>`.
 
 Escalate when the change:
 
@@ -54,43 +54,29 @@ Escalate when the change:
 - touches payments, billing or money amounts;
 - still has an `[unknown]` that changes the design, or two plausible designs after probing.
 
-To escalate, hand the plan to the `work-council` skill with `--thorough` and follow it from its plan gate; its checks and review replace steps 3 to 6 here. Everything else stays here. If `codex` is not on PATH, thorough mode cannot build a second candidate: do not escalate, carry on here, and report "escalation skipped: Codex not installed". When the user asks for the work council by name, use `work-council` directly.
+To escalate, hand the plan and its final check commands to the `work-council` skill. It runs the plan gate critique and the best-of-two build in place of steps 3 and 4 here, brings the winner into the checkout, then hands back: steps 5 to 8 (proof, review, lessons, commit and report) still run here. If `codex` is not on PATH, work-council cannot build a second candidate: do not escalate, carry on here, and report "escalation skipped: Codex not installed". When the user asks for the work council by name, escalate regardless of the categories above.
 
 ## The workflow
 
 1. **Load context.** Project `CLAUDE.md`/`AGENTS.md`, then `agents-hub memory show` and `agents-hub search <topic>` for earlier attempts.
 2. **Plan before code.** Write it (scratchpad unless the user wants it elsewhere):
-   - intent in one line;
+   - intent in one line: restate what the user asked for, and ask about anything that would change the design;
+   - when more than one approach is plausible, name 2 or 3 with their tradeoffs and recommend one;
    - unknowns that would change the design, each settled by a quick probe and tagged `[measured]`, `[inferred]` or `[unknown]`;
    - cards: about five files each, each with **one command that passes or fails**.
 
    Put every card in the agent's task list (Claude Code: its todo or task tool) so the user sees the checklist, and tick each one only when its command passes. If the agent has no task tool, keep the checklist as `- [ ]` lines in the plan.
 
-   No `general-review` pass on the plan: the user's approval is the gate. Only when the plan names an escalation category (the risky tier) does one cheap plan critic (a sonnet agent, low effort) read it first and list design gaps; fold its points in before showing the plan. If the user set a deadline, skip the critic too. The end review (step 6) still runs.
+   No `general-review` pass on the plan: the user's approval is the gate. Only when the plan names an escalation category (the risky tier) does one cheap plan critic (a sonnet agent, low effort) read it first and list design gaps; fold its points in before showing the plan. The end review (step 6) still runs.
 
    **The user approves the plan.** Show it and wait. After approval, steps 3 to 6 run without check-ins, fixing review findings in the flow, unless something changes the plan.
+
+   When the plan says `Escalation: work-council`, skip the plan critic and this pause: work-council's plan gate critiques the plan and holds the one approval pause (which `--auto` skips). If escalation then does not happen (Codex not installed, or the user declines work-council's clean-checkout request), change the plan to `Escalation: none`, then run the critic and this pause here.
 3. **Card by card.** A card is done when its command passes, not when the code looks right. Tests follow `writing-specs`; run narrow and cache output (rules 41, 42). Parallel cards go to specialists per `AGENTS-DISPATCH.md`.
-4. **When a fix does nothing,** check in order: the test itself, then whether the new code actually ran (restart, stale payload, cache), then the product. Fix the broken invariant, not the one symptom. Two failed tries on one idea: drop it. Context full of dead ends: write a handoff (`agents-hub handoff` or a prompt file) and continue fresh.
-5. **Prove it in the real product.** Run the app, CLI or job on the core path and keep the output (`run`, `branch-visual-qa` for UI). Can't drive it? Make it drivable, or report it as unverified.
-6. **Review with `general-review`** (rule 44, Codex lens included). The workflow's review loop does this; working inline, start the review yourself. Fix every introduced blocker, high and medium, then re-review, at most 3 review rounds; still not PASS, report the open findings. A specialist who helped build it is not the review.
+4. **When a fix does nothing,** reproduce the failure first and read the full error. Check in order: the test itself, then whether the new code actually ran (restart, stale payload, cache), then the product. Trace the failing value back to where it first goes wrong, and compare with a path that works. Test one hypothesis at a time with the smallest change. Fix the broken invariant, not the one symptom. Two failed tries on one idea: drop it. Context full of dead ends: write a handoff (`agents-hub handoff` or a prompt file) and continue fresh.
+5. **Prove it in the real product.** After a work-council build (winner and grafts applied), first run every final check command from the repository root on the checkout and keep the output; fix any failure before the proof, and rerun the affected checks after review fixes in step 6. Run the app, CLI or job on the core path and keep the output (`run`, `branch-visual-qa` for UI). Can't drive it? Make it drivable, or report it as unverified.
+6. **Review with `general-review`** (rule 44) at the tier its "Review tiers" table sets: small runs no Codex or structural lens and 2 rounds; normal and risky add them (Codex when installed) and allow up to 3 rounds. The workflow's review loop does this; working inline, start the review yourself and pass that tier. Fix every introduced blocker, high and medium, then re-review within the tier's rounds; still not PASS, report the open findings. A specialist who helped build it is not the review.
 7. **Record lessons** the moment they appear: `agents-hub memory add --type feedback|project` (Claude: its memory). A correction given twice: offer the `learn` skill.
 8. **Commit, then report.** When the workflow returns `done`, or the inline route passes its step 6 review, the session stages only this work's files, `git add -A -- <files>` (scoped, so deletions are staged too) (the workflow's `review.files`, or on the inline route the files it edited), then commits: `git commit -m "<one line>"` (rule 48). Never an unscoped `git add -A`, `git add .` or `git commit -a`: the checkout can hold other uncommitted work. If git-guard denies it because the branch already has an unpushed commit (rule 54), rerun it with `--amend` as the deny message says, but only when that commit (the deny names its subject) is part of this work; otherwise do not amend and report that the branch already holds unrelated work. Never push unless the user says so.
 
    **Report** answer first (rules 45 to 48). Each claim names its evidence: command and result. List anything unverified or skipped. Never say done on an unverified result, and never end on a promise you could act on now.
-
-## Rationalizations
-
-| Thought | Reality |
-|---|---|
-| "Demo in an hour; a mental self-review is enough" | Run `general-review`. Cut scope, not the review. |
-| "The spec passes; driving the app is impractical" | Then the report says "not verified in the real app". |
-| "A plan would slow us down" | One message with the plan costs a minute. |
-| "The specialist already reviewed it" | Builders don't gate their own work. |
-| "Lessons can wait" | They are gone after the session. One command now. |
-
-## Red flags: stop and go back a step
-
-- Writing code with no card and no pass/fail command.
-- "Self-review: PASS" with no `general-review` run.
-- "Works" with no command output behind it.
-- A third attempt at the same hypothesis.

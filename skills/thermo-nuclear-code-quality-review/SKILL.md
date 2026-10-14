@@ -10,5 +10,4 @@ This is an alias. Read `~/.agents/skills/general-review/SKILL.md` and run it as 
 
 - The standards live in `general-review/references/structural-standards.md` and the severity mapping in `general-review/references/structural-lens.md`. They are the single source; do not keep a copy here.
 - Default target: the current branch's changes against its base branch.
-- Be ambitious: hunt for code-judo moves that delete whole branches or layers, and prefer a few high-conviction structural findings over cosmetic notes.
 - For a full review with every lens, run general-review itself.

@@ -4,7 +4,7 @@ This lens brings the thermo-nuclear code quality review into every general revie
 
 ## Source of the standards
 
-Read [the structural standards](structural-standards.md) in full and apply its core prompt, non-negotiable standards, primary review questions, what to flag aggressively and preferred remedies to the change under review. That file is the single source of the standards; do not copy or reword them here. Severity, report format and verdict come from this file and SKILL.md.
+Read [the structural standards](structural-standards.md) in full and apply its core prompt, standards (with their presumptive problems) and preferred remedies to the change under review. That file is the single source of the standards; do not copy or reword them here. Severity, report format and verdict come from this file and SKILL.md.
 
 ## How to apply inside a general review
 

@@ -1,6 +1,6 @@
 ---
 name: dual-pr-review
-description: Review the current branch with two fresh, context-free sessions at once, one Claude and one Codex, each sent only the plain review request (for cohabit-web, "cohabit pr review of current branch with develop"), then report both verdicts side by side. Use when the user asks for a "dual review", "both reviewers", "fresh Claude and Codex review", "review it without context", or invokes /dual-pr-review [base]. Report only; it never edits, commits or pushes.
+description: Review the current branch with two fresh, context-free sessions at once, one Claude and one Codex, each sent only the plain review request (for cohabit-web, "cohabit pr review of current branch with staging"), then report both verdicts side by side. Use when the user asks for a "dual review", "both reviewers", "fresh Claude and Codex review", "review it without context", or invokes /dual-pr-review [base]. Report only; it never edits, commits or pushes.
 ---
 
 # Dual PR review
@@ -10,9 +10,9 @@ Two independent reviewers who know nothing about the conversation that built the
 ## 1. Pin the target
 
 - Checkout: the repository root of the current branch (`git rev-parse --show-toplevel`). Inside a worktree, use the worktree.
-- Base: the argument, else `develop`.
+- Base: the argument, else `staging` when `origin` contains `cohabitplatforms/cohabit-web`, else `develop`.
 - Record the branch and `HEAD`. If the tree has uncommitted changes, say so: both reviewers will see them.
-- If a review of this branch is already running (a lock in `~/.claude/pr-review-ledger/<repo>/agents/{claude,codex}.lock/run_id`), stop and tell the user instead of starting a second one.
+- cohabit-web only: if a review of this branch is already running (a lock in `~/.claude/pr-review-ledger/cohabit-web/agents/{claude,codex}.lock/run_id`), stop and tell the user instead of starting a second one. general-review holds its ledger lock only while it writes, so other repos have no running-review marker to check.
 - Do not change the checkout while the reviews run: no edits, commits, rebases or pushes until both have finished.
 
 ## 2. Pick the prompt

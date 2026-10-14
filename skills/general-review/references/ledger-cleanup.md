@@ -1,3 +1,5 @@
+`scripts/ledger_cleanup.py` implements this file (`ledger.md`, "Cleanup"). Follow it by hand, or as a haiku agent prompt, only when the script cannot run, and keep the script in step with any change here.
+
 Run owner: {RUNNER}; run ID: {RUN_ID}. Clean this agent's records in the review ledger at {LEDGER_ROOT}. Each target has a folder `{LEDGER_ROOT}/<key>/` holding one set of files per agent. You may touch **only {RUNNER}'s files**: `{RUNNER}.md`, `{RUNNER}.old-*.md`, `repro/{RUNNER}/` and `repro/{RUNNER}.old-*/`. Never touch another agent's files, lock files, conflict files, `~/.claude/pr-review-ledger/` (read-only history), worktrees or databases.
 
 Do not post to GitHub or Slack. The only git commands allowed are the read-only ones below, run as `cd {REPO} && git …` (never `git -C`). Never fetch, checkout or change refs. GitHub repo: {GH_REPO}. If it is `none`, skip every `gh` command and treat its result as "unknown".
@@ -14,7 +16,7 @@ Do not post to GitHub or Slack. The only git commands allowed are the read-only 
    - **`files-*`, `codebase` and any other key:** always keep.
 3. For each finished key:
    - Read `{RUNNER}.md` (or the newest `{RUNNER}.old-*.md`) and collect every finding line whose status is OPEN or PARTLY.
-   - **List-only mode (the default until the user turns it off in this file):** do not delete anything. Report the exact paths that would be deleted.
+   - **List-only mode (the default; delete only when the prompt that started you says the user asked to delete):** do not delete anything. Report the exact paths that would be deleted.
    - Otherwise, delete under this agent's lock, re-checking first that the record was not rewritten since you read it:
      `python3 -I ~/.agents/skills/general-review/scripts/with_lock.py {LEDGER_ROOT}/<key>/{RUNNER}.lock -- bash -c 'grep -qx "run_id: <run_id you read>" {RUNNER}.md || exit 3; rm -rf <this agent's paths>'` (run from the key folder). Exit 75 or 3: skip the key and report it.
    - Leave the lock file in place (deleting it could split the lock between two files).

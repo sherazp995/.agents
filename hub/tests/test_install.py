@@ -1,7 +1,7 @@
 """install.py and check.py against a temporary home and a temporary copy of the hub.
 
 Only tracked templates are read from the checkout; registry, prompts and machine
-state (Ponytail, PATH, real home) never leak in.
+state (PATH, real home) never leak in.
 """
 from datetime import datetime, timedelta, timezone
 import importlib.util
@@ -69,7 +69,7 @@ def make_hub(home, claude_hooks='', codex_hooks=''):
     """A copy of the tracked hub files at home/.agents, with a test registry."""
     hub = home / '.agents'
     hub.mkdir()
-    for name in ('install.py', 'check.py', 'AGENTS.md', 'selected-skills.json', 'ponytail.json'):
+    for name in ('install.py', 'check.py', 'AGENTS.md', 'selected-skills.json'):
         shutil.copy(CHECKOUT / name, hub / name)
     for folder in ('integrations', 'agents'):
         shutil.copytree(CHECKOUT / folder, hub / folder)
@@ -125,7 +125,6 @@ class InstallTests(HubCase):
         second = install(self.hub, self.home)
 
         self.assertEqual((first.returncode, second.returncode), (0, 0), first.stdout)
-        self.assertIn('Ponytail is not installed yet', first.stdout)
         self.assertEqual((self.home / '.claude/CLAUDE.md').resolve(), self.hub / 'AGENTS.md')
         self.assertEqual((self.home / '.claude/agents').resolve(), self.hub / 'agents')
         self.assertEqual((self.home / '.claude/commands/general-review.md').resolve(),
@@ -404,6 +403,34 @@ class PermissionTests(HubCase):
         (self.home / '.claude/settings.json').write_text(json.dumps(settings))
 
         with self.assertRaisesRegex(AssertionError, 'lacks Bash\\(git status:\\*\\)'):
+            self.check.check_clients(self.home, self.hub)
+
+    def test_check_fails_while_any_login_still_registers_ponytail(self):
+        (self.home / '.codex1').mkdir()
+        (self.hub / 'accounts.toml').write_text('[[accounts]]\nclient = "codex"\nalias = "x1"\ndir = "~/.codex1"\n')
+        install(self.hub, self.home, '--running-ok')
+        (self.home / '.codex1/AGENTS.md').symlink_to(self.hub / 'AGENTS.md')  # the test registry links no rules
+        self.check.check_clients(self.home, self.hub)
+
+        extra = self.home / '.codex1/config.toml'
+        clean = extra.read_text() if extra.exists() else ''
+        extra.write_text(clean + '\n[plugins."ponytail@ponytail"]\nenabled = true\n')
+        with self.assertRaisesRegex(AssertionError, 'codex1/config.toml still registers .*\\(ponytail@ponytail\\)'):
+            self.check.check_clients(self.home, self.hub)
+        extra.write_text(clean)
+
+        primary = self.home / '.codex/config.toml'
+        clean = primary.read_text() if primary.exists() else ''
+        primary.write_text(clean + '\n[plugins."ponytail@ponytail"]\nenabled = true\n')
+        with self.assertRaisesRegex(AssertionError, '\\.codex/config.toml still registers .*\\(ponytail@ponytail\\)'):
+            self.check.check_clients(self.home, self.hub)
+        primary.write_text(clean)
+
+        settings = self.settings()
+        settings['enabledPlugins'] = {'ponytail@ponytail': True}
+        settings['extraKnownMarketplaces'] = {'ponytail': {}}
+        (self.home / '.claude/settings.json').write_text(json.dumps(settings))
+        with self.assertRaisesRegex(AssertionError, 'settings.json still registers .*\\(ponytail@ponytail, ponytail\\)'):
             self.check.check_clients(self.home, self.hub)
 
 

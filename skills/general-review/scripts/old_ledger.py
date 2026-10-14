@@ -4,6 +4,31 @@ normalized earlier-findings list for general-review. Read-only: never writes.
 
 Usage: python3 old_ledger.py --slug cohabit-web --key 3754 [--branch fix/x] [--json]
 Exit: 0 found, 3 no old record, 4 some or all old records are locked (partial list printed; do not record).
+
+What it does, so a reader can check it (references/ledger.md, "Old-record adapter"):
+- Looks under the old ledger's root, agents/*/ and runs/*/, and skips a runner that holds
+  the old skill's lock (then exits 4). When a record is an inherited_from: copy of another
+  candidate, keeps the newer of the two (by date:, then run_id time); the other is listed as
+  history, and findings the kept records of the same copy chain lack are listed as …-dropped
+  lines when the deciding copy is open: the copy at the current head if there is one, else
+  the newest copy (once per finding per chain, with every source's repro: path). Findings
+  are matched only within one chain (records joined by inherited_from:), never across
+  unrelated records, and unknown statuses are warned about in every loaded record. A dropped
+  copy at the current head counts toward the recomputed verdict like a current finding;
+  older-head lines do not.
+- An older-head record counts as continued only through explicit lineage: an inherited_from:
+  link in a newest-head record or in one of its .old- archives. Everything else is listed
+  under open findings outside the current record (see the group-line exception in ledger.md).
+- Takes the head as the first 40-hex SHA, picks the newest head (by date:, then run_id
+  time), and merges every record with that head. Older heads are listed as history.
+- Severity: CRITICAL→blocker, HIGH, MEDIUM, LOW kept, NIT→low; a missing tag → low; any tag
+  containing "question", or (question) in the line, marks an open question that never gates.
+  A tag containing "dropped" means DROPPED.
+- Status: the text after the last separator (" — ", " : " or ": ") must start with a status
+  word; the explanation only refines it. NOT FIXED→OPEN, DECLINED→ACCEPTED, OPEN or PARTLY
+  with "accepted" right after "(", ";" or "," → ACCEPTED (so "not yet accepted" stays open),
+  "OPEN (PARTLY…)"→PARTLY, N/A stays N/A. Anything else (for example REOPENED (was FIXED)) →
+  UNKNOWN, with a WARNING. Markdown headings are not findings.
 """
 import argparse
 import glob

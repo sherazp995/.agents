@@ -29,18 +29,17 @@ Keep stable finding and family IDs. Each family must contain:
 - **Owner:** the layer that should enforce it and the current writers/readers that bypass it.
 - **Sibling sweep:** affected entry points, states and consumers, each verified, disproved, or explicitly unverified with a reason.
 - **Repair:** the smallest coherent change that enforces the invariant for verified siblings. Compare a local patch with shared ownership only where they differ meaningfully; do not force a refactor.
-- **Repair hazards:** valid neighboring behavior and other families the proposed fix might break.
-- **Regression evidence:** the failing case plus those neighboring cases, at the lowest useful test layer; use integration checks for the actual boundaries.
+- **Repair hazards and regression evidence:** as SKILL.md section 5, step 4b.
 
 Distinguish root cause from broad labels such as "state management" or "missing tests." Identify the concrete missing rule or ownership mismatch. Do not assume status names imply stronger semantics than the implementation promises, such as delivered when the contract only promises queued. Resolve product ambiguity from available requirements; otherwise record a bounded question without inflating severity.
 
-Finish feasible inspection and consolidate duplicate symptoms before proposing a repair batch. A standalone review stops with that report. For an already-authorized implementation, pass the consolidated families and regression cases to the implementation task. Do not edit during the review phase or infer authorization from the existence of findings.
+Finish feasible inspection and consolidate duplicate symptoms before proposing a repair batch (SKILL.md step 4b). A standalone review stops with that report. Do not edit during the review phase or infer authorization from the existence of findings.
 
 ## Re-review and stop
 
 Keep the same scope and ledger through repairs. Run narrow checks for each changed family, then one integration verification of the repaired workflows and their interactions. Select checks proportional to the change; this is not an instruction to run the entire repository suite. Cache results against the actual tested state.
 
-The repair review inspects the final delta, affected callers, and family regression cases. Add a new finding only with fresh evidence; classify it as an introduced repair regression, a newly verified sibling, or unrelated pre-existing behavior. Do not reopen rejected hypotheses, change priorities without evidence, or restart a whole-branch review after every small fix. A genuinely new regression still requires correction and verification; a stopping rule must not hide known bugs.
+The repair review inspects the final delta, affected callers, and family regression cases, and reopens a closed finding only as SKILL.md section 6 says. Add a new finding only with fresh evidence; classify it as an introduced repair regression, a newly verified sibling, or unrelated pre-existing behavior. Do not reopen rejected hypotheses, change priorities without evidence, or restart a whole-branch review after every small fix. A genuinely new regression still requires correction and verification; a stopping rule must not hide known bugs.
 
 Emit a concise closure receipt:
 
@@ -51,4 +50,4 @@ Emit a concise closure receipt:
 5. Checks and regression cases passed, failed, or unavailable, with cache locations.
 6. Gate verdict, material uncertainties, and pre-existing issues kept separate.
 
-Stop the review when feasible coverage is complete and the evidence-based verdict is issued. Stop an authorized repair phase when the repository gate passes and required verification is complete. Separate unavailable required checks from optional evidence: unavailable required checks cannot be described as completed verification, and their disposition follows the calling task's rules. Do not continue seeking hypothetical defects solely because absolute certainty is impossible. Do not issue PASS while feasible required coverage is unfinished.
+Stop the review when feasible coverage is complete and the evidence-based verdict is issued; completion rules are in SKILL.md section 6. Unavailable required checks cannot be described as completed verification. Do not issue PASS while feasible required coverage is unfinished.

@@ -32,7 +32,7 @@ someone else's merged work in your description.
 
 ## 3. Match the house style
 
-Model the output on the user's recent PRs, e.g. cohabit-web #3729 and #3728
+Model the output on the user's recent PRs in this repository
 (`gh pr list --author @me --state all --limit 10`, then `gh pr view <n> --json body`).
 
 **Title:** `[TICKET] <who> <does what>`, a plain sentence about the user-facing
@@ -40,12 +40,12 @@ outcome. For example: `[CI-302] Broker records the premium split and attaches Co
 
 **Description section** (the template's first heading):
 - The ticket link on its own line first.
-- Then 10 to 15 bullets, 10 words or fewer each.
+- Then as many bullets as the change needs, 10 words or fewer each.
 - Start with the problem in one or two bullets, then what changed.
 - Say what the user sees and what the system does, not how the code does it.
 - Name a column or table only when a reviewer must know it (e.g. a migration).
 
-**Testing:** short, four or five bullets at most, grouped. No per-file lists, no
+**Testing:** short and grouped, one bullet per kind of check. No per-file lists, no
 step-by-step browser narration, no record IDs or sample values.
 - `bundle exec rspec` on the N related spec files: X examples, 0 failures.
 - Mutation tested: removed each new guard once and saw its spec fail.

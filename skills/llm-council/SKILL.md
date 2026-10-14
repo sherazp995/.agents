@@ -29,10 +29,8 @@ Protocol:
 | `engineering` | Code, architecture, data, APIs, tooling, process, anything not UI/UX | Claude `opus` first-principles architect, Claude `sonnet` pragmatic shipping engineer, Claude `haiku` simplicity advocate, Codex red-teamer, Codex conventions steward |
 | `design` | UI/UX: layout, visual hierarchy, flow, navigation, component choice, copy, accessibility | Codex visual hierarchy, Codex microcopy, Codex design system, Claude `opus` interaction and information architecture, Claude `sonnet` accessibility |
 
-Codex members run `gpt-6-astra`. Codex gets the design council's visual seats because GPT-6 Astra
-leads the visual-design leaderboards (Design Arena UI Components, Arena Image-to-WebDev) by
-margins inside their error bars, while Claude leads Arena WebDev (working apps) and keeps the
-functional seats.
+Codex members run `gpt-6-astra`. Codex holds the design council's visual seats and Claude the
+functional ones (interaction, accessibility).
 
 **Choosing the council:**
 
@@ -143,6 +141,6 @@ Start with one line naming the council that ran. Then render two parts, in this 
   or each council's chairman (`chairmanModel`).
 - Model and effort per stage live in `STAGE` in the same file: Claude members answer at effort
   medium, Codex relays run on haiku low, every peer reviewer is sonnet low, and the chairman is
-  opus high. Cost is an estimate (about 11 agents); re-measure once Codex is installed.
+  opus high.
 - With fewer than two answers, the workflow returns the single answer (or a failure note)
   and skips review and synthesis.

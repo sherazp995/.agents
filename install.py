@@ -897,11 +897,6 @@ class Installer:
         self.cli()
         self.scheduler()
         self.backup_exclusions()
-        if (HUB / 'plugins' / 'ponytail').is_dir():
-            self.link(self.home / '.config' / 'ponytail' / 'config.json', HUB / 'ponytail.json')
-        else:
-            # Normal on a new machine: README has the install run first, then update-ponytail.sh.
-            self.notes.append('Ponytail is not installed yet; run ./update-ponytail.sh (needs network and git)')
 
 
 def main():

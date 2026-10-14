@@ -59,7 +59,9 @@ When a `local-` review runs on a branch that also has a `branch-` or PR record (
 1. `cd <REPO>`; list `git diff --name-only HEAD` plus `git ls-files -o --exclude-standard` (for selected files: just those paths).
 2. Drop **untracked** files under `tmp/`, `log/`, `coverage/` and `.nyc_output/`, and anything under `REVIEW_TMP` (gitignored files are already excluded). Tracked files in those folders stay in the manifest.
 3. Sort the paths bytewise (`LC_ALL=C sort -u`).
-4. One line per path: `<path>\t<mode>\t<git hash-object <path>>`, where mode is `120000` for a symlink, `100755` for an executable file, else `100644`; or `<path>\tdeleted` if it no longer exists. Never use `hash-object -w`.
+4. One line per path: `<path>\t<mode>\t<git hash-object <path>>`, where mode is `120000` for a symlink, `100755` for an executable file, else `100644`; or `<path>\tdeleted` if it no longer exists.
+
+`scripts/freeze_scope.py` (SKILL.md, "Who reviews" step 1) writes MANIFEST or INDEX MANIFEST and STATE by these rules; never build them by hand. It stores its snapshot in an object directory under `REVIEW_TMP/<KEY>/objects`, with the repo's objects as an alternate, so the repo's `.git/objects` and index are never written.
 
 **INDEX MANIFEST** (staged targets): `git diff --cached --name-only` sorted bytewise, one line per path: `<path>\t<mode>\t<blob>` with mode and blob from `git ls-files -s <path>`, or `<path>\tdeleted`. It changes when hunks are staged or unstaged, and not when only the working tree changes.
 
@@ -74,13 +76,13 @@ At the end, publish with one command; never hand-write these steps:
 ```bash
 python3 -I ~/.agents/skills/general-review/scripts/publish_record.py \
   --dir D --runner <RUNNER> --run-id <RUN_ID> --read-run-id <READ_RUN_ID> --body <record.md> \
-  [--repro <proof spec dir>] [--full] [--branch-dir <LEDGER_ROOT>/branch-<encoded name> --read-run-id-branch <READ_RUN_ID_BRANCH>]
+  [--earlier <earlier.md>] [--repro <proof spec dir>] [--full] [--branch-dir <LEDGER_ROOT>/branch-<encoded name> --read-run-id-branch <READ_RUN_ID_BRANCH>]
 ```
 
-It holds this agent's OS lock (branch folder first, then `D`), checks that nobody wrote since READ_RUN_ID, archives on `--full`, moves a branch record into `D` as an `.old-` archive (with its proof specs), stages new proof specs and archives the old ones before the record goes live, and publishes with a final rename. Proofs are copied before anything is archived, and archive names get a `-2`, `-3` suffix instead of overwriting, so a failure part way leaves the old record or its archive in place, never nothing. A `--repro` path that is not a folder is rejected before anything is written. Archives are named `<RUNNER>.old-<YYYY-MM-DD>-<short state>-<run id tail>.md`, so they never overwrite each other. The kernel releases the lock if the process dies, so there is no stale-lock handling.
+It locks, checks READ_RUN_ID, archives, and publishes by rename; a failure never leaves no record. Its docstring (`scripts/publish_record.py`) has the details.
 
 - Exit 0: recorded.
-- Exit 2: the verdict is not PASS, CHANGES REQUIRED, BLOCKED, N/A or INCOMPLETE, or does not match the open introduced findings (blocker → BLOCKED; high or medium → CHANGES REQUIRED; else PASS; findings with a `P-` ID, or with `(pre-existing)`, `(question)` or `older head` in the status detail after the last ` — `, do not gate); a severity is not blocker, high, medium or low; the body's `run_id:` differs from `--run-id`; or the body breaks the record format: a line that is not a header, manifest line or `#<id> [severity] … — STATUS` finding; a status outside the list; a missing `run_id:`, `state:`, `kind:` or `verdict:`; or CHANGES REQUIRED/BLOCKED with no finding lines. Nothing was written; the lead fixes record.md ("NOT FIXED" is written OPEN) and you publish again.
+- Exit 2: the verdict is not PASS, CHANGES REQUIRED, BLOCKED, N/A or INCOMPLETE, or does not match the open introduced findings (blocker → BLOCKED; high or medium → CHANGES REQUIRED; else PASS; findings with a `P-` ID, or with `(pre-existing)`, `(question)` or `older head` in the status detail after the last ` — `, do not gate); a severity is not blocker, high, medium or low; the body's `run_id:` differs from `--run-id`; or the body breaks the record format: a line that is not a header, manifest line or `#<id> [severity] … — STATUS` finding; a status outside the list; a missing `run_id:`, `state:`, `kind:` or `verdict:`; or CHANGES REQUIRED/BLOCKED with no finding lines; or, with `--earlier`, an own finding ID from earlier.md, or an OPEN or PARTLY finding of a sibling at the same `state:` (as `#<other>:<id>`), is missing from the body or has no status. Nothing was written; the lead fixes record.md ("NOT FIXED" is written OPEN) and you publish again.
 - Exit 3 (someone wrote meanwhile) or 75 (another run of this agent is writing): the body is kept as `D/<RUNNER>.conflict-<RUN_ID>.md`; report "not recorded as current" and the path.
 - Any other exit: report it; the body is still in the review temp folder.
 
@@ -106,9 +108,22 @@ Decide per target once KEY and STATE are known, from **this agent's own** record
 
 **Sibling records.** Read every other agent's `D/<other>.md` (read-only). Report one line each: "<other> record (<date>, state <short>, <same | different> head): N open, verdict V". When a sibling is at the same STATE, the reviewer also gives each of its OPEN and PARTLY findings this agent's own status; the record keeps those as `#<other>:<id> … — <status> (checked by <RUNNER>)` lines, and the report lists where the two agents disagree.
 
-**EARLIER** (handed to the reviewer as `REVIEW_TMP/<KEY>/earlier.md`, or `{WORKDIR}/earlier.md` in batch): the own source record path(s), `state:`, `base_sha:`, every `repro:` path, `imported_from:`/`source_runner:` when imported, and every own finding line exactly as recorded, open and closed, including status details. For old history it is the adapter script's full output. Then a section `other agents (read-only):` with each sibling record's path, state, verdict and its finding lines. `none` when there is nothing.
+**EARLIER** (handed to the reviewer as `REVIEW_TMP/<KEY>/earlier.md`, or `{WORKDIR}/earlier.md` in batch) is the output of `scripts/earlier.py`; never build it by hand:
 
-When an old-ledger record is newer (`date:`) than this agent's record for the same key, say so in one line; the old skill is still in use during the side-by-side month.
+```bash
+python3 -I ~/.agents/skills/general-review/scripts/earlier.py --dir D --runner <RUNNER> \
+  [--source <record> ...] [--adapter-output <file>] --out <earlier.md>
+python3 -I ~/.agents/skills/general-review/scripts/earlier.py --dir D --runner <RUNNER> \
+  --from-record <previous round's record.md> --prev-earlier <previous round's earlier.md> --out <earlier.md>
+```
+
+Pass `--source` for each earlier record the mode picked other than `D/<RUNNER>.md` (a branch record or the newest `.old-` record), and `--adapter-output` for the old-record adapter's output. The second form is for self-review rounds 2 and 3: the previous round's record is the only own source, so no earlier finding is lost, and only sibling records whose `run_id:` changed since that round are read again. In those rounds READ_RUN_ID is the `run_id:` of `D/<RUNNER>.md` (the previous round's RUN_ID once it published; otherwise keep the earlier value), so publish_record does not treat the session's own earlier round as a competing writer.
+
+The output holds the own source record path(s), `state:`, `base_sha:`, every `repro:` path, `imported_from:`/`source_runner:` when imported, and every own finding line exactly as recorded, open and closed, including status details. For old history it is the adapter script's full output. Then a section `other agents (read-only):` with each sibling record's path, `run_id:`, state, verdict and its finding lines. `none` when there is nothing.
+
+**Other agents' findings** (for the reviewer): if EARLIER has an "other agents" section with records at the same STATE, give each of their OPEN and PARTLY findings your own status and record it as `#<other>:<id> [severity] text — <status> (checked by <your runner>)`. A finding you confirm as still OPEN or PARTLY is a finding of this change and counts toward your verdict like your own; FIXED, N/A, DROPPED and ACCEPTED lines do not. List in the report where you and the other agent disagree.
+
+When an old-ledger record is newer (`date:`) than this agent's record for the same key, say so in one line, because cohabit_pr_review still writes there.
 
 For a PR or branch recheck:
 - Say "force-pushed" when `git merge-base --is-ancestor <PREV_STATE> <HEAD>` fails.
@@ -126,13 +141,9 @@ python3 -I ~/.agents/skills/general-review/scripts/old_ledger.py --slug <REPO_SL
 
 Pass `--branch` for a PR key so a record kept under the branch name is found. Exit 3 means no old record. Exit 4 means some or all old records belong to a runner holding the old skill's lock (the output says `complete: no`, names the lock folder and its age, and still lists what it could read): review if asked, but do not record, so the locked runner's history is not cut off. If no old-skill run is active, show the user the lock path and ask them to remove it; never remove it yourself. The output is the earlier-findings list to use: `imported_from:`, `source_runner:`, `state:`, `base_sha:`, a `recomputed_verdict:`, the old verdicts for reference, and one line per finding as `#O-<runner>-<n> [severity] text — STATUS`, plus `(question)` marks, status details, `repro:` paths, notes and history. An "open findings outside the current record" section lists open lines from older records that no newer record continues, and lines rescued from dropped copies; each gets a status in the recheck. Older-head lines do not count toward the recomputed verdict; rescued lines at the current head do.
 
-What it does, so you can check it:
-- Looks under the old ledger's root, `agents/*/` and `runs/*/`, and skips a runner that holds the old skill's lock (then exits 4). When a record is an `inherited_from:` copy of another candidate, keeps the newer of the two (by `date:`, then `run_id` time); the other is listed as history, and findings the kept records of the same copy chain lack are listed as `…-dropped` lines when the deciding copy is open: the copy at the current head if there is one, else the newest copy (once per finding per chain, with every source's `repro:` path). Findings are matched only within one chain (records joined by `inherited_from:`), never across unrelated records, and unknown statuses are warned about in every loaded record. A dropped copy at the current head counts toward the recomputed verdict like a current finding; older-head lines do not.
-- An older-head record counts as continued only through explicit lineage: an `inherited_from:` link in a newest-head record or in one of its `.old-` archives. Everything else is listed under open findings outside the current record. Exception for noise: when a legacy record's finding numbers all reappear in the current record, its open low and medium lines are folded into one `#O-group-<head>-<n> [highest member severity] … — OPEN` line, followed by one indented `member:` line per folded finding with its full text, severity and status; blocker and high lines are always listed one by one. The number match is only a hint, not proof: the reviewer compares each member with the current record, records any member whose topic differs as its own finding line (with its own status), and then gives the group N/A ("continued as <current ids>") for the remaining members. If no member is continued, every member gets its own line and the group line is N/A ("split out"). `member:` lines are context only and never go into the record.
-- Takes the head as the first 40-hex SHA, picks the newest head (by `date:`, then `run_id` time), and merges **every** record with that head. Older heads are listed as history.
-- Severity: CRITICAL→blocker, HIGH, MEDIUM, LOW kept, NIT→low; a missing tag → low; any tag containing "question", or `(question)` in the line, marks an open question that never gates. A tag containing "dropped" means DROPPED.
-- Status: the text after the last separator (` — `, ` : ` or `: `) must **start** with a status word; the explanation only refines it. NOT FIXED→OPEN, DECLINED→ACCEPTED, OPEN or PARTLY with "accepted" right after `(`, `;` or `,` → ACCEPTED (so "not yet accepted" stays open), `OPEN (PARTLY…)`→PARTLY, N/A stays N/A. Anything else (for example `REOPENED (was FIXED)`) → UNKNOWN, with a WARNING. Markdown headings are not findings.
-- Origin: introduced (the old skill reported only problems the change introduced). The verdict is recomputed with SKILL.md section 6; the old verdict is never mapped.
+What it does is in its docstring (`scripts/old_ledger.py`): where it looks, copy chains, head choice, and the severity and status mappings. Two rules matter to the reviewer:
+- When a legacy record's finding numbers all reappear in the current record, its open low and medium lines are folded into one `#O-group-<head>-<n> [highest member severity] … — OPEN` line, followed by one indented `member:` line per folded finding with its full text, severity and status; blocker and high lines are always listed one by one. The number match is only a hint, not proof: the reviewer compares each member with the current record, records any member whose topic differs as its own finding line (with its own status), and then gives the group N/A ("continued as <current ids>") for the remaining members. If no member is continued, every member gets its own line and the group line is N/A ("split out"). `member:` lines are context only and never go into the record.
+- Origin is introduced (the old skill reported only problems the change introduced), and any `(question)` line is an open question that never gates. The verdict is recomputed with SKILL.md section 6; the old verdict is never mapped.
 
 If the output has any WARNING about unknown statuses, show those lines to the user and ask before trusting the verdict. If the script cannot run, say so and do a fresh review instead of parsing old records by hand.
 
@@ -178,7 +189,14 @@ repro: <D/repro/RUNNER/ or none>
 
 ## Cleanup (at the end)
 
-After this run's records are written and its locks released, start a `general-purpose` agent with `model: haiku` running `references/ledger-cleanup.md`, with `{LEDGER_ROOT}`, `{REPO}`, `{GH_REPO}` (`owner/name` from origin, or `none`), `{RUNNER}` and `{RUN_ID}` filled in. Wait for it and relay its short list. If the host has no agent tool, follow that file yourself.
+After this run's records are written and its locks released, run:
+
+```bash
+python3 -I ~/.agents/skills/general-review/scripts/ledger_cleanup.py --ledger-root <LEDGER_ROOT> --repo <REPO> \
+  --gh-repo <owner/name from origin, or none> --runner <RUNNER> --list-only
+```
+
+It applies the decision table in `references/ledger-cleanup.md`, deletes nothing unless it is run with `--delete` (pass that instead of `--list-only` only once the user has said to delete), and prints a short list; relay it. If the script cannot run, start a `general-purpose` agent with `model: haiku` running `references/ledger-cleanup.md` with `{LEDGER_ROOT}`, `{REPO}`, `{GH_REPO}`, `{RUNNER}` and `{RUN_ID}` filled in (and, only once the user has said to delete, a line saying the user asked to delete), or follow that file yourself when the host has no agent tool.
 
 ## Final line
 

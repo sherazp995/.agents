@@ -1,7 +1,7 @@
 # One shared agent setup
 
 `~/.agents` is the one home for what every coding agent on a machine shares:
-rules, skills, agent definitions, slash commands, Ponytail, memory, chat
+rules, skills, agent definitions, slash commands, memory, chat
 history and hooks. It works on macOS and
 Linux with Claude Code, Codex, Cursor, OpenCode, aider and Continue; agents
 that are not installed are simply skipped. `registry.toml` lists the clients,
@@ -14,7 +14,6 @@ their first logins and how each one is wired; extra logins are in
 git clone <this repo> ~/.agents
 python3 ~/.agents/install.py --dry-run   # see what it would do
 python3 ~/.agents/install.py             # do it; safe to rerun
-./update-ponytail.sh                     # first time only: fetch and patch Ponytail
 python3 ~/.agents/check.py               # verify
 ```
 
@@ -28,7 +27,7 @@ the MCP servers in `mcp/servers.json` into every Claude and Codex login (see
 `agents-hub` in `~/.local/bin`, and schedules `agents-hub scheduled` every 15
 minutes (launchd on macOS, a systemd user timer on Linux, cron otherwise). It
 never overwrites anything it did not write: a file in the way is reported as a
-conflict for you to move aside, and a missing Ponytail is only a note.
+conflict for you to move aside.
 
 ## Rules
 
@@ -42,8 +41,7 @@ Add or edit personal skills in `skills/<name>/SKILL.md`; every agent with a
 skills folder sees them through one symlinked directory. `selected-skills.json`
 lists every authored skill; `check.py` requires them and warns about unlisted
 ones. Folders owned by an app, not by you, stay out of git: `skills/synced`
-(Claude organization skills), `skills/.system` (Codex system skills) and the
-`skills/ponytail*` links that `update-ponytail.sh` manages.
+(Claude organization skills) and `skills/.system` (Codex system skills).
 
 ## Agents and commands
 
@@ -57,15 +55,6 @@ itself be a link to another checkout; on a machine without that checkout it is
 skipped with a note. Codex gets no commands: codex-cli (0.162) no longer loads custom
 prompts from `~/.codex/prompts`, so a workflow both agents need belongs in a
 skill (`skills/`), which Codex loads.
-
-## Ponytail
-
-`update-ponytail.sh [ref]` installs or updates the single shared Ponytail copy
-in `plugins/ponytail` from upstream plus `ponytail-explicit-only.patch`, points
-Claude and Codex at it, and restores the previous copy if a step fails. The
-plugin code itself is not tracked here. Ponytail is **off by default** and runs
-only when you ask for it by name (see `AGENTS-CONFIG.md`); shared defaults live
-in `ponytail.json`.
 
 ## Accounts
 
@@ -144,7 +133,7 @@ stay in Time Machine backups; the rebuildable `chats/` index does not.
 ## Shared config: tracked, machine-local, per login
 
 - **Tracked (in git):** rules, skills, agents, commands, hooks, `mcp/servers.json`,
-  `registry.toml` and `ponytail.json`. Edit them here; every login on every
+  and `registry.toml`. Edit them here; every login on every
   machine gets them.
 - **Machine-local (git-ignored `local/`):** config every login on this machine
   shares but that differs between machines. `install.py` moves each
@@ -176,7 +165,7 @@ stay in Time Machine backups; the rebuildable `chats/` index does not.
 
 ## Verify
 
-`python3 check.py` runs every section (skills and rules, clients, Ponytail, hub)
+`python3 check.py` runs every section (skills and rules, clients, hub)
 and lists all failures and warnings. Run it after installing, after an agent
 update (an app can replace a symlink), and whenever something looks off.
 `python3 check.py --repo-only` checks only the checkout (selected skills and

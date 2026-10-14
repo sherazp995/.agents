@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-// Records one captioned video per version of a scenario, then joins them into
+// Records one captioned video per version of a scenario; with --full, also joins them into
 // a single before/after film with title cards. See ../SKILL.md for the format.
 import { chromium } from 'playwright-core';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
-const STEP_HOLD_MS = 1400;
 const EXPECT_TIMEOUT_MS = 5000;
 const ACTION_TIMEOUT_MS = 10000;
 const NAVIGATION_TIMEOUT_MS = 30000;
@@ -15,14 +14,44 @@ const CAPTION_MARGIN = 24;
 const STRIP_COLOUR = '0x111827';
 const CARD_SECONDS = 3;
 const FPS = 25;
+// Waits (page loads, checks polling for something) are cut from the video, keeping this much of each end.
+const LOAD_EDGE_MS = 150;
+const CHECK_EDGE_MS = 300;
+// How long an action's page load or fetch may take to start, and the network quiet that ends it.
+const SETTLE_MS = 300;
+// The longest an action waits for its fetch/XHR traffic, so a request that never ends (polling, a hung fetch) cannot stall a step.
+const TRAFFIC_WAIT_MS = 2000;
 
-const [scenarioPath, outArg] = process.argv.slice(2);
+const USAGE = 'usage: record.mjs <scenario.json> [output-dir] [--captions on|off] [--full]';
+const argv = process.argv.slice(2);
+const fullAt = argv.findIndex((arg) => /^--full(=|$)/.test(arg));
+const fullFlag = fullAt !== -1 && argv.splice(fullAt, 1)[0];
+if (fullFlag && fullFlag !== '--full') {
+  console.error(USAGE);
+  process.exit(2);
+}
+let captionsFlag;
+const flagAt = argv.findIndex((arg) => /^--captions(=|$)/.test(arg));
+if (flagAt !== -1) {
+  const [flag] = argv.splice(flagAt, 1);
+  captionsFlag = flag.includes('=') ? flag.split('=')[1] : argv.splice(flagAt, 1)[0];
+  if (!['on', 'off'].includes(captionsFlag)) {
+    console.error(USAGE);
+    process.exit(2);
+  }
+}
+const [scenarioPath, outArg] = argv;
 if (!scenarioPath) {
-  console.error('usage: record.mjs <scenario.json> [output-dir]');
+  console.error(USAGE);
   process.exit(2);
 }
 
 const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8'));
+// --captions overrides the scenario's "captions"; without captions there is no caption strip and holds are shorter.
+const CAPTIONS = captionsFlag ? captionsFlag === 'on' : scenario.captions !== false;
+const TRIM = scenario.trimWaits !== false;
+// --full overrides the scenario's "full": it adds the combined film, the banner clips and side-by-side.
+const FULL = Boolean(fullFlag) || scenario.full === true;
 const outDir = resolve(outArg || join(dirname(resolve(scenarioPath)), 'video'));
 const viewport = scenario.viewport || { width: 1280, height: 800 };
 // The banner gets its own strip above the page and the captions their own strip below it,
@@ -37,6 +66,9 @@ const CAPTION_PX = Math.round(20 * (viewport.height + BANNER_HEIGHT) / 288);
 const HUMAN = scenario.pace !== 'fast';
 const jitter = (min, max) => min + Math.random() * (max - min);
 const pause = (page, min, max) => (HUMAN ? page.waitForTimeout(jitter(min, max)) : null);
+// Time to read a step's caption before acting, and to see its result after; a check shows PASS or FAIL, so it holds longer.
+const READ_PAUSE_MS = CAPTIONS ? [250, 500] : [80, 200];
+const HOLD_MS = CAPTIONS ? { action: 700, check: 1500 } : { action: 350, check: 700 };
 
 // Headless recordings have no OS pointer, so draw one that follows the mouse and pulses on click.
 const CURSOR_SCRIPT = `
@@ -54,47 +86,67 @@ const CURSOR_SCRIPT = `
   });`;
 
 let mouse = { x: 640, y: 360 };
-async function moveTo(page, selector) {
+// One quick eased glide (0.2 to 0.45s), fast at the start and settling on the target, like a hand on a mouse.
+async function glide(page, x, y) {
+  const from = mouse;
+  const duration = Math.min(450, Math.max(200, Math.hypot(x - from.x, y - from.y) * 0.6));
+  const steps = Math.max(6, Math.round(duration / 25));
+  for (let i = 1; i <= steps; i += 1) {
+    const eased = 1 - (1 - i / steps) ** 3;
+    await page.mouse.move(from.x + (x - from.x) * eased, from.y + (y - from.y) * eased);
+    await page.waitForTimeout(duration / steps);
+  }
+  mouse = { x, y };
+}
+
+// acted.at records when the action itself took place, after the cursor glide and the typing, so a cut never removes them.
+async function moveTo(page, selector, acted) {
   const target = page.locator(selector).first();
   await target.scrollIntoViewIfNeeded();
   if (!HUMAN) return target;
   const box = await target.boundingBox();
   if (box) {
-    const x = box.x + box.width * jitter(0.35, 0.65);
-    const y = box.y + box.height * jitter(0.35, 0.65);
-    const distance = Math.hypot(x - mouse.x, y - mouse.y);
-    await page.mouse.move(x, y, { steps: Math.max(8, Math.round(distance / 18)) });
-    mouse = { x, y };
-    await pause(page, 150, 400);
+    await glide(page, box.x + box.width * jitter(0.35, 0.65), box.y + box.height * jitter(0.35, 0.65));
+    await pause(page, 60, 150);
   }
+  acted.at = Date.now();
   return target;
 }
 
-async function humanType(page, selector, value, clear) {
-  const target = await moveTo(page, selector);
+async function humanType(page, selector, value, clear, acted) {
+  const target = await moveTo(page, selector, acted);
   await target.click();
   // fill starts empty; type appends, so put the caret after the existing text.
   if (clear) await target.fill('');
   else await target.press('End');
-  if (!HUMAN) return page.keyboard.type(value);
-  for (const ch of value) {
-    await page.keyboard.type(ch);
-    await page.waitForTimeout(ch === ' ' || ch === '@' ? jitter(120, 260) : jitter(45, 140));
+  // Long values type faster, so a pasted-length string does not drag the video.
+  const speed = Math.min(1, 30 / value.length);
+  if (!HUMAN) await page.keyboard.type(value);
+  else {
+    for (const ch of value) {
+      await page.keyboard.type(ch);
+      await page.waitForTimeout(Math.max(12, speed * (ch === ' ' || ch === '@' ? jitter(80, 160) : jitter(30, 80))));
+    }
   }
+  acted.at = Date.now();
 }
 
 const ACTIONS = {
-  goto: (page, s, base) => page.goto(new URL(s.url, base).href, { waitUntil: 'networkidle' }),
-  click: async (page, s) => (await moveTo(page, s.selector)).click(),
-  fill: (page, s) => humanType(page, s.selector, String(s.value ?? ''), true),
-  type: (page, s) => humanType(page, s.selector, String(s.value ?? ''), false),
+  // Waits for the load, then for network quiet up to TRAFFIC_WAIT_MS, so a page that keeps a request open (polling, a long poll) still opens.
+  goto: async (page, s, base) => {
+    await page.goto(new URL(s.url, base).href, { waitUntil: 'load' });
+    await page.waitForLoadState('networkidle', { timeout: TRAFFIC_WAIT_MS }).catch(() => {});
+  },
+  click: async (page, s, base, acted) => (await moveTo(page, s.selector, acted)).click(),
+  fill: (page, s, base, acted) => humanType(page, s.selector, String(s.value ?? ''), true, acted),
+  type: (page, s, base, acted) => humanType(page, s.selector, String(s.value ?? ''), false, acted),
   press: (page, s) => page.keyboard.press(s.key),
-  select: async (page, s) => (await moveTo(page, s.selector)).selectOption(s.value),
-  hover: (page, s) => moveTo(page, s.selector),
-  check: async (page, s) => (await moveTo(page, s.selector)).check(),
+  select: async (page, s, base, acted) => (await moveTo(page, s.selector, acted)).selectOption(s.value),
+  hover: (page, s, base, acted) => moveTo(page, s.selector, acted),
+  check: async (page, s, base, acted) => (await moveTo(page, s.selector, acted)).check(),
   wait: (page, s) => page.waitForTimeout(s.ms ?? 1000),
   wait_for: (page, s) => page.locator(s.selector).first().waitFor(),
-  scroll: (page, s) => moveTo(page, s.selector),
+  scroll: (page, s, base, acted) => moveTo(page, s.selector, acted),
 };
 
 const EXPECTATIONS = {
@@ -154,6 +206,12 @@ function scenarioErrors() {
     if (!ACTIONS[step.action] && !EXPECTATIONS[step.action]) errors.push(`unknown action "${step.action}" in step ${i + 1}`);
   });
   if (!steps.some((step) => EXPECTATIONS[step.action])) errors.push('steps need at least one expect_* check');
+  for (const key of ['captions', 'trimWaits', 'full']) {
+    if (scenario[key] !== undefined && typeof scenario[key] !== 'boolean') errors.push(`${key} must be true or false`);
+  }
+  if ([viewport.width, viewport.height].some((n) => !Number.isInteger(n) || n % 2)) {
+    errors.push('viewport width and height must be even whole numbers (the video encoder needs even sizes)');
+  }
   return errors;
 }
 
@@ -172,6 +230,41 @@ function srtTime(ms) {
   const s = Math.floor(ms / 1000) % 60;
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(Math.floor(ms % 1000), 3)}`;
 }
+
+// Resolves when the page a navigation request opens has loaded, or as soon as it is clear none will:
+// the request failed, became a download, or finished without replacing the page (a 204, for one).
+function pageLoaded(page, request) {
+  return new Promise((resolve) => {
+    let current = request;
+    let committed = false;
+    const listeners = {
+      load: () => done(),
+      download: () => done(),
+      framenavigated: (frame) => { if (frame === page.mainFrame()) committed = true; },
+      request: (next) => { if (next.redirectedFrom() === current) current = next; },
+      requestfailed: (failed) => { if (failed === current) done(); },
+      requestfinished: (finished) => {
+        // A redirect finishes too; wait for the request it leads to.
+        if (finished === current && !committed && !finished.redirectedTo()) done();
+      },
+    };
+    const timer = setTimeout(() => done(), ACTION_TIMEOUT_MS);
+    function done() {
+      clearTimeout(timer);
+      Object.entries(listeners).forEach(([event, fn]) => page.off(event, fn));
+      resolve();
+    }
+    Object.entries(listeners).forEach(([event, fn]) => page.on(event, fn));
+  });
+}
+
+// The middle of a wait is dead footage: mark it to be cut, keeping `edge` ms at each end.
+function markIdle(cuts, from, to, edge) {
+  if (TRIM && to - from > 2 * edge + 100) cuts.push({ start: from + edge, end: to - edge });
+}
+
+// A time on the recording's clock, moved earlier by every cut that comes before it.
+const afterCuts = (cuts, t) => t - cuts.reduce((sum, c) => sum + Math.max(0, Math.min(t, c.end) - c.start), 0);
 
 function captionFor(step, index, total, outcome) {
   const prefix = `Step ${index + 1}/${total}: ${step.caption}`;
@@ -196,43 +289,100 @@ async function recordVersion(browser, version) {
   const consoleErrors = [];
   page.on('console', (msg) => msg.type() === 'error' && consoleErrors.push(msg.text()));
   page.on('pageerror', (err) => consoleErrors.push(err.message));
+  const now = () => Date.now() - t0;
+  // What an action started: a page load (when its request went out, and when the page finished loading),
+  // and fetch/XHR traffic such as a Turbo Drive or SPA visit (when it began, what is pending, when it last changed).
+  let navigation = null;
+  const quietTraffic = () => ({ first: null, pending: new Set(), last: 0 });
+  let traffic = quietTraffic();
+  page.on('request', (request) => {
+    if (['fetch', 'xhr'].includes(request.resourceType())) {
+      traffic.first ??= now();
+      traffic.pending.add(request);
+      traffic.last = now();
+    }
+    if (navigation || !request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
+    navigation = { start: now(), loaded: pageLoaded(page, request) };
+  });
+  const finished = (request) => { if (traffic.pending.delete(request)) traffic.last = now(); };
+  page.on('requestfinished', finished);
+  page.on('requestfailed', finished);
+
+  // Waits for the activity an action started, including a request sent just after it returned
+  // (an onchange auto-submit, a key press), then cuts that wait, keeping the glide and typing before it.
+  async function settle(acted) {
+    const returned = now();
+    const deadline = returned + TRAFFIC_WAIT_MS;
+    while (!navigation && now() < deadline) {
+      const idle = traffic.first === null ? now() - returned >= SETTLE_MS
+        : traffic.pending.size === 0 && now() - traffic.last >= SETTLE_MS;
+      if (idle) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (navigation) await navigation.loaded;
+    const started = Math.min(navigation?.start ?? Infinity, traffic.first ?? Infinity);
+    if (started !== Infinity) markIdle(cuts, Math.max(started, acted), now(), LOAD_EDGE_MS);
+  }
 
   const cues = [];
+  const cuts = [];
   const results = [];
   const steps = scenario.steps;
   let aborted = false;
 
   for (const [i, step] of steps.entries()) {
     const start = Date.now() - t0;
-    // Caption appears first, then a beat to "read" it before acting, like a person would.
-    await pause(page, 500, 1100);
+    // Caption appears first, then a beat to "read" it before acting, like a person would. A blank first page has nothing to read.
+    if (page.url() !== 'about:blank') await pause(page, ...READ_PAUSE_MS);
     const kind = EXPECTATIONS[step.action] ? 'check' : 'action';
     let outcome = null;
     if (aborted) {
       outcome = { ok: false, skipped: true, note: 'skipped, an earlier step could not run' };
     } else if (kind === 'check') {
+      const from = now();
       try {
         await EXPECTATIONS[step.action](page, step);
-        outcome = { ok: true, note: step.pass || 'as expected' };
+        outcome = { ok: true, note: step.pass || 'as expected', waitedMs: now() - from };
       } catch (err) {
-        outcome = { ok: false, note: step.fail || err.message.split('\n')[0] };
+        // The wait is cut from the video, so the caption keeps the real time spent waiting.
+        const waitedMs = now() - from;
+        const note = `${step.fail || err.message.split('\n')[0]} (waited ${(waitedMs / 1000).toFixed(1)}s)`;
+        outcome = { ok: false, note, waitedMs };
       }
+      markIdle(cuts, from, now(), CHECK_EDGE_MS);
     } else {
       // A missing selector should fail in seconds, not record 30s of a frozen page.
       page.setDefaultTimeout(step.timeoutMs ?? (step.action === 'goto' ? NAVIGATION_TIMEOUT_MS : ACTION_TIMEOUT_MS));
+      const from = now();
+      navigation = null;
+      traffic = quietTraffic();
+      const acted = { at: Date.now() };
       try {
-        await ACTIONS[step.action](page, step, version.baseUrl);
+        await ACTIONS[step.action](page, step, version.baseUrl, acted);
+        if (step.action === 'goto' || step.action === 'wait_for') {
+          markIdle(cuts, from, now(), LOAD_EDGE_MS);
+        } else if (step.action !== 'wait') {
+          await settle(acted.at - t0);
+        }
       } catch (err) {
         outcome = { ok: false, note: `could not ${step.action}: ${err.message.split('\n')[0]}` };
         aborted = true;
       }
     }
-    await page.waitForTimeout(step.holdMs ?? (outcome ? STEP_HOLD_MS * 1.5 : STEP_HOLD_MS));
-    cues.push({ start, end: Date.now() - t0, text: captionFor(step, i, steps.length, outcome) });
+    await page.waitForTimeout(step.holdMs ?? (outcome ? HOLD_MS.check : HOLD_MS.action));
+    cues.push({ start, end: now(), text: captionFor(step, i, steps.length, outcome) });
     results.push({ step: i + 1, caption: step.caption, action: step.action, kind, ...(outcome || { ok: true, note: 'done' }) });
   }
 
   // The page alone; the caption strip is added to it with the video.
+  // Headless Chrome sends video frames only when the page repaints, so a static page can leave the
+  // recording empty ("Page did not produce any video frames"). Toggle a 1px overlay to force a repaint.
+  await page.evaluate(() => new Promise((resolve) => {
+    const dot = document.createElement('div');
+    dot.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;background:rgba(0,0,0,0.01);pointer-events:none;z-index:2147483647';
+    document.documentElement.appendChild(dot);
+    requestAnimationFrame(() => requestAnimationFrame(() => { dot.remove(); requestAnimationFrame(resolve); }));
+  })).catch(() => {});
   const pageShot = join(rawDir, `${slug}-final-page.png`);
   await page.screenshot({ path: pageShot, fullPage: false });
   const video = page.video();
@@ -240,10 +390,13 @@ async function recordVersion(browser, version) {
   const webm = join(rawDir, `${slug}.webm`);
   renameSync(await video.path(), webm);
 
-  writeFileSync(join(outDir, `${slug}.srt`), cues
+  const shifted = cues.map((c) => ({ ...c, start: afterCuts(cuts, c.start), end: afterCuts(cuts, c.end) }));
+  writeFileSync(join(outDir, `${slug}.srt`), shifted
     .map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${c.text}\n`).join('\n'));
 
-  return { ...version, slug, webm, cues, results, aborted, consoleErrors, pageShot, screenshot: join(outDir, `${slug}-final.png`) };
+  const trimmedMs = Math.round(cuts.reduce((sum, c) => sum + c.end - c.start, 0));
+  return { ...version, slug, webm, cues: shifted, cuts, trimmedMs, results, aborted, consoleErrors, pageShot,
+    screenshot: join(outDir, `${slug}-final.png`) };
 }
 
 function ffmpeg(args) {
@@ -256,7 +409,7 @@ function textFile(name, text) {
 }
 
 // drawtext reads % as an expansion; expansion=none prints user text exactly as written.
-const drawText = (file, options) => `drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontcolor=white:${options}`;
+const drawText = (file, options) => `drawtext=fontfile='${font}':textfile=${file}:expansion=none:fontcolor=white:${options}`;
 
 // Tall enough for the longest caption once wrapped (at least two lines), so every clip and card share one size.
 function stripHeightFor(texts) {
@@ -276,32 +429,45 @@ function captionStrip(srt) {
   return `color=c=${STRIP_COLOUR}:s=${viewport.width}x${stripHeight}:r=${FPS},subtitles=${srt}:force_style='${style}'`;
 }
 
-// Page filters, then the caption strip stacked below the page.
-const withStrip = (pageFilters, srt, tail) => ['-filter_complex',
-  `[0:v]${pageFilters}[page];${captionStrip(srt)}[strip];[page][strip]vstack=inputs=2:shortest=1${tail}[v]`, '-map', '[v]'];
+// Page filters, then the caption strip stacked below the page; with captions off, the page filters alone.
+const withStrip = (pageFilters, srt, tail) => (CAPTIONS ? ['-filter_complex',
+  `[0:v]${pageFilters}[page];${captionStrip(srt)}[strip];[page][strip]vstack=inputs=2:shortest=1${tail}[v]`, '-map', '[v]']
+  : ['-vf', `${pageFilters}${tail}`]);
 
-// Banner strip above the page naming the version, step captions in the strip below it.
+// Drops the cut waits from the footage and closes the gaps, matching the shifted caption times.
+function cutFilter(cuts) {
+  if (!cuts.length) return '';
+  const spans = cuts.map((c) => `between(t,${(c.start / 1000).toFixed(3)},${(c.end / 1000).toFixed(3)})`).join('+');
+  return `,select='not(${spans})',setpts=N/FRAME_RATE/TB`;
+}
+
+// The clean clip, its contact sheet and last frame; with --full, also the clip with a banner strip
+// above the page naming the version. Step captions sit in the strip below the page.
 function burnCaptions(rec) {
   const banner = textFile(`${rec.slug}-banner.txt`, `${rec.label}${rec.detail ? `  ·  ${rec.detail}` : ''}`);
   const colour = rec.role === 'before' ? '0xB42318' : '0x067647';
   const srt = `${rec.slug}.srt`;
   const tail = ',format=yuv420p,setsar=1';
   const scale = `scale=${viewport.width}:${viewport.height}`;
-  const page = `${scale},fps=${FPS}`;
+  // The screencast sends no frames while the page is still, so repeat the last one and end the clip with the last caption.
+  const page = `${scale},fps=${FPS}${cutFilter(rec.cuts)},tpad=stop_mode=clone:stop_duration=1`;
+  const length = ['-t', String(Math.ceil(((rec.cues.at(-1)?.end ?? 0) / 1000) * FPS) / FPS)];
   const bannerStrip = `pad=${viewport.width}:${viewport.height + BANNER_HEIGHT}:0:${BANNER_HEIGHT}:color=${colour},`
     + drawText(banner, 'fontsize=26:x=24:y=15');
-  const bannered = `${page},${bannerStrip}`;
   const out = `${rec.slug}.mp4`;
-  ffmpeg(['-i', rec.webm, ...withStrip(bannered, srt, tail), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', out]);
-  // The same footage and captions with no version banner or cards, to share on its own.
-  ffmpeg(['-i', rec.webm, ...withStrip(page, srt, tail), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22',
+  if (FULL) {
+    ffmpeg(['-i', rec.webm, ...withStrip(`${page},${bannerStrip}`, srt, tail), '-an', '-c:v', 'libx264', '-preset', 'veryfast',
+      '-crf', '22', ...length, out]);
+  }
+  // The footage and captions with no version banner or cards, to share on its own.
+  ffmpeg(['-i', rec.webm, ...withStrip(page, srt, tail), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', ...length,
     '-movflags', '+faststart', cleanName(rec)]);
   // The last frame keeps the banner and shows the last caption in the strip.
   const last = rec.cues.at(-1);
   const lastSrt = textFile(`${rec.slug}-final.srt`, `1\n${srtTime(0)} --> ${srtTime(3600000)}\n${last ? last.text : ''}\n`);
   ffmpeg(['-loop', '1', '-i', rec.pageShot, ...withStrip(`${scale},${bannerStrip}`, lastSrt, ''), '-frames:v', '1', rec.screenshot]);
-  contactSheet(out, `${rec.slug}-sheet.png`);
-  return out;
+  contactSheet(cleanName(rec), `${rec.slug}-sheet.png`);
+  return FULL ? out : null;
 }
 
 // <id>-before.mp4 and <id>-after.mp4; a version without a role keeps its slug.
@@ -346,9 +512,11 @@ function summaryLine(rec) {
 
 const browser = await chromium.launch({
   // Prefer installed Chrome; VIDEO_QA_CHANNEL overrides (e.g. "chromium" after `playwright install chromium`).
-  channel: process.env.VIDEO_QA_CHANNEL || (existsSync('/usr/bin/google-chrome') ? 'chrome' : 'chromium'),
+  channel: process.env.VIDEO_QA_CHANNEL
+    || (['/usr/bin/google-chrome', '/Applications/Google Chrome.app'].some(existsSync) ? 'chrome' : 'chromium'),
   headless: process.env.VIDEO_QA_HEADED !== '1',
-  slowMo: scenario.slowMo ?? (scenario.pace === 'fast' ? 200 : 60),
+  // Human pacing sets its own timing; a per-call delay on top made every glide and keystroke crawl.
+  slowMo: scenario.slowMo ?? (scenario.pace === 'fast' ? 200 : 0),
 });
 const recordings = [];
 try {
@@ -358,37 +526,36 @@ try {
 } finally {
   await browser.close();
 }
-stripHeight = stripHeightFor(recordings.flatMap((rec) => rec.cues.map((cue) => cue.text)));
+stripHeight = CAPTIONS ? stripHeightFor(recordings.flatMap((rec) => rec.cues.map((cue) => cue.text))) : 0;
 frame.height = viewport.height + BANNER_HEIGHT + stripHeight;
 
-const segments = [card('title', [scenario.title, '', ...(scenario.subtitle ? [scenario.subtitle] : []),
-  ...recordings.map((r) => `${r.label}: ${r.detail || r.baseUrl}`)])];
-for (const rec of recordings) {
-  segments.push(card(`${rec.slug}-card`, [rec.label, rec.detail || rec.baseUrl]));
-  segments.push(burnCaptions(rec));
-}
 const outcome = verdict(recordings);
-segments.push(card('summary', [`Verdict: ${outcome}`, '', ...recordings.map(summaryLine)]));
-
-const list = textFile('segments.txt', segments.map((s) => `file '${s}'`).join('\n'));
 const finalName = `${scenario.id || 'video-qa'}.mp4`;
-ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', finalName]);
+const clips = recordings.map(burnCaptions);
+if (FULL) {
+  const segments = [card('title', [scenario.title, '', ...(scenario.subtitle ? [scenario.subtitle] : []),
+    ...recordings.map((r) => `${r.label}: ${r.detail || r.baseUrl}`)])];
+  recordings.forEach((rec, i) => segments.push(card(`${rec.slug}-card`, [rec.label, rec.detail || rec.baseUrl]), clips[i]));
+  segments.push(card('summary', [`Verdict: ${outcome}`, '', ...recordings.map(summaryLine)]));
+  const list = textFile('segments.txt', segments.map((s) => `file '${s}'`).join('\n'));
+  ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', finalName]);
 
-if (recordings.length === 2 && scenario.sideBySide !== false) {
-  const [a, b] = recordings.map((r) => `${r.slug}.mp4`);
-  ffmpeg(['-i', a, '-i', b, '-filter_complex',
-    '[0:v][1:v]hstack=inputs=2:shortest=0,scale=1920:-2,format=yuv420p[v]', '-map', '[v]',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', 'side-by-side.mp4']);
+  if (recordings.length === 2 && scenario.sideBySide !== false) {
+    ffmpeg(['-i', clips[0], '-i', clips[1], '-filter_complex',
+      '[0:v][1:v]hstack=inputs=2:shortest=0,scale=1920:-2,format=yuv420p[v]', '-map', '[v]',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', 'side-by-side.mp4']);
+  }
 }
 
 const report = {
   title: scenario.title,
   verdict: outcome,
   automated: true,
-  video: join(outDir, finalName),
-  sideBySide: existsSync(join(outDir, 'side-by-side.mp4')) ? join(outDir, 'side-by-side.mp4') : null,
-  versions: recordings.map(({ label, detail, baseUrl, role, slug, results, aborted, consoleErrors, screenshot }) => ({
-    label, detail, baseUrl, role, clip: join(outDir, `${slug}.mp4`),
+  captions: CAPTIONS,
+  video: FULL ? join(outDir, finalName) : null,
+  sideBySide: FULL && existsSync(join(outDir, 'side-by-side.mp4')) ? join(outDir, 'side-by-side.mp4') : null,
+  versions: recordings.map(({ label, detail, baseUrl, role, slug, results, aborted, consoleErrors, screenshot, trimmedMs }) => ({
+    label, detail, baseUrl, role, trimmedMs, clip: FULL ? join(outDir, `${slug}.mp4`) : null,
     cleanClip: join(outDir, cleanName({ role, slug })), captions: join(outDir, `${slug}.srt`),
     sheet: join(outDir, `${slug}-sheet.png`), screenshot, aborted, results, consoleErrors,
   })),

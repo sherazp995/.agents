@@ -65,8 +65,9 @@ const checksBlock = CHECKS.map((c, i) => `${i + 1}. ${c}`).join('\n')
 const workBrief =
   `TASK: ${TASK}\n\nAPPROVED PLAN:\n${PLAN}\n\n` +
   'Rules: implement exactly this plan in the current directory. Follow the repository instruction files' +
-  ' (CLAUDE.md, AGENTS.md) and existing patterns. Keep the change as small as the plan allows.' +
-  ' Add or update focused tests for new behaviour. Do not touch files the plan does not need.' +
+  ' (CLAUDE.md, AGENTS.md) and existing patterns. Add or update focused tests for new behaviour.' +
+  ' Write the minimum code: no unrequested features, options or abstractions, and no edits outside the plan' +
+  ' unless a check cannot pass otherwise; report any such edit in notes.' +
   ` Work is done only when every one of these commands exits 0:\n${checksBlock}`
 
 // The steps every builder runs around the work, so both candidates are measured the same way.
