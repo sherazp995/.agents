@@ -66,7 +66,11 @@ def check_repo(hub):
     data = json.loads((hub / 'selected-skills.json').read_text())
     shared = hub / 'skills'
     # App-owned folders: Claude syncs organization skills and Codex rewrites its system skills.
-    authored = {p.name for p in shared.iterdir() if not p.name.startswith('.') and p.name != 'synced'}
+    # Git-ignored folders are downloaded third-party skills (AGENTS.md names their source), not authored.
+    names = [p.name for p in shared.iterdir() if not p.name.startswith('.') and p.name != 'synced']
+    ignored = subprocess.run(['git', 'check-ignore', '--stdin'], cwd=hub, capture_output=True, text=True,
+                             input='\n'.join(f'skills/{n}' for n in names)).stdout.split()
+    authored = set(names) - {Path(p).name for p in ignored}
     assert set(data['skills']) <= authored, f'Selected skills missing: {sorted(set(data["skills"]) - authored)}'
     if authored - set(data['skills']):
         WARNINGS.append(f'skills not listed in selected-skills.json: {sorted(authored - set(data["skills"]))}')

@@ -14,3 +14,6 @@ accounts.toml
 history/
 # Machine-specific shared config (install.py moves Claude settings and Codex hooks/prompts/rules here).
 local/
+# Third-party skills, downloaded from their source (see AGENTS.md); too large to track.
+skills/brag/
+skills/brag-slim/

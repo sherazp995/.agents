@@ -61,6 +61,8 @@ See [`AGENTS-CONFIG.md`](~/.agents/AGENTS-CONFIG.md) for managing global rules, 
 
 **MCP servers:** two Playwright servers, headless `playwright` (default) and `playwright-extension` (the user's real Chrome). → [`AGENTS-MCP.md`](~/.agents/AGENTS-MCP.md)
 
+**Third-party skills (git-ignored, not in this repo):** `brag` and `brag-slim` make a launch video of a project (`/brag`). If `~/.agents/skills/brag` is missing when asked, clone [latent-spaces/brag](https://github.com/latent-spaces/brag) into a temp folder and copy its `skills/brag` and `skills/brag-slim` into `~/.agents/skills/`.
+
 ---
 
 **How to use:** Don't load all files at once. Use this as your entry point; load the specific reference file you need. All linked files live in `~/.agents/`, whatever folder this file was opened from.
