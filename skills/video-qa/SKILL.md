@@ -9,7 +9,7 @@ Produce two MP4s, one showing step by step how a bug was triggered on the base v
 
 ## Who does what: the session coordinates, one runner records
 
-The chat session states the claim to prove (bug and fix, or feature) and the versions to compare. One runner subagent (`general-purpose`) does steps 1 to 5: servers, flow discovery with the Playwright MCP, scenario, recording, contact sheet check and server cleanup. Give it this skill's path and the claim. It returns only: verdict, exit code, absolute paths of `<id>-before.mp4` and `<id>-after.mp4` and both contact sheets (plus `<id>.mp4` only with `--full`), the trigger steps, console errors, whether every server it started was stopped, and anything it could not do. The session looks at both contact sheets before reporting. When run with `branch-visual-qa`, the session starts the two runners as two agent calls, one after the other, so they share the single browser slot.
+The chat session states the claim to prove (bug and fix, or feature) and the versions to compare. One runner subagent (`general-purpose`) does steps 1 to 5: servers, flow discovery with the Playwright MCP, scenario, recording, contact sheet and full-size frame check, and server cleanup. Give it this skill's path and the claim. It returns only: verdict, exit code, absolute paths of `<id>-before.mp4` and `<id>-after.mp4` and both contact sheets (plus `<id>.mp4` only with `--full`), the trigger steps, console errors, whether every server it started was stopped, and anything it could not do. It also returns one full-size frame taken from each clip. The session looks at both contact sheets and those frames before reporting. When run with `branch-visual-qa`, the session starts the two runners as two agent calls, one after the other, so they share the single browser slot.
 
 ## 1. Run both versions
 
@@ -52,7 +52,7 @@ Write captions as a person narrating: what they do, and the step that triggers t
 
 ## 4. Record
 
-Prerequisites: Node 18+, Google Chrome (or Playwright's chromium), `fc-match` (fontconfig), and system `ffmpeg` and `ffprobe` built with libass (for the `subtitles` filter). Playwright's own ffmpeg install does not provide these.
+Prerequisites: Node 18+, Playwright's Chromium, `fc-match` (fontconfig), and system `ffmpeg` and `ffprobe` built with libass (for the `subtitles` filter). Playwright's own ffmpeg install does not provide these.
 
 ```bash
 cd <this skill's directory>/scripts && [ -d node_modules ] || npm install
@@ -63,7 +63,7 @@ node <this skill's directory>/scripts/record.mjs <run folder>/scenario.json <run
 
 `--full` adds the combined `<id>.mp4` (title card, BEFORE, AFTER, verdict card, with version banners), `side-by-side.mp4` and the banner clips `before.mp4` and `after.mp4`. Use it only when the user asks for a combined film.
 
-First run on a new machine: if Playwright reports a missing ffmpeg, run `node node_modules/playwright-core/cli.js install ffmpeg` in `scripts/`. On macOS, Homebrew's `ffmpeg` has no `drawtext` or `subtitles`; install `ffmpeg-full` and put `$(brew --prefix ffmpeg-full)/bin` first on `PATH`. It uses installed Chrome when `/usr/bin/google-chrome` or `/Applications/Google Chrome.app` exists; otherwise run `node node_modules/playwright-core/cli.js install chromium`, or set `VIDEO_QA_CHANNEL`. `VIDEO_QA_HEADED=1` shows the browser while recording.
+First run on a new machine: if Playwright reports a missing ffmpeg, run `node node_modules/playwright-core/cli.js install ffmpeg` in `scripts/`. On macOS, Homebrew's `ffmpeg` has no `drawtext` or `subtitles`; install `ffmpeg-full` and put `$(brew --prefix ffmpeg-full)/bin` first on `PATH`. It records with Playwright's Chromium: run `node node_modules/playwright-core/cli.js install chromium` in `scripts/` once. `VIDEO_QA_CHANNEL=chrome` uses installed Chrome instead, but its headless mode on macOS drew the page into only part of the video frame. `VIDEO_QA_HEADED=1` shows the browser while recording.
 
 The recorder moves a visible cursor to each target in one quick eased glide, types at a brisk uneven rhythm (faster for long values) and pauses only briefly around each step, so the flow looks like a person who knows the app.
 
@@ -78,11 +78,13 @@ The script prints JSON and writes `results.json`. Verdicts and exit codes:
 - `STILL BROKEN` (exit 1): a check failed on AFTER.
 - `NOT REPRODUCED ON BEFORE` (exit 1): every check passed on BEFORE too.
 - `FAILING` (exit 1): one version only, a check failed.
-- `INCOMPLETE` (exit 2): an action could not run on some version (server down, selector missing), so the video proves nothing. Fix the setup or scenario and record again.
+- `INCOMPLETE` (exit 2): an action could not run on some version (server down, selector missing), or the page did not fill the video frame, so the video proves nothing. Fix the setup or scenario and record again.
+
+The frame check: after the last step the recorder shows magenta markers on the bottom and right edges of the viewport, checks the raw recording shows them there, and ends the clip before them. `frameCheck` in `results.json` holds the result. A page that covers those edges at the end (a modal backdrop) skips the check (`frameCheck.skipped`); look at the full-size frames yourself. A failed check with `VIDEO_QA_CHANNEL=chrome` set means the browser: unset it and record again.
 
 An invalid scenario (unknown action or role, no check, wrong version count, `captions`, `trimWaits` or `full` not `true` or `false`, an odd viewport width or height), a `--captions` value other than `on` or `off`, or a value on `--full` exits 2 before recording.
 
-Before reporting, look at the video yourself: the recorder writes `before-sheet.png` and `after-sheet.png`, twelve frames spread across each whole clean clip (`<id>-before.mp4`, `<id>-after.mp4`). Read both. Confirm the captions match what is on screen, the bug is visible on BEFORE and the fix on AFTER. A wrong selector or a check that passes for the wrong reason makes the video misleading: fix the scenario and record again. Never edit captions or cut footage to change what a check showed.
+Before reporting, look at the video yourself: the recorder writes `before-sheet.png` and `after-sheet.png`, twelve frames spread across each whole clean clip (`<id>-before.mp4`, `<id>-after.mp4`). Read both, then pull one full-size frame from each clean clip (`ffmpeg -y -sseof -1 -i <id>-before.mp4 -frames:v 1 before-frame.png`, the same for after) and read it: at contact sheet size a grey band or a cut-off page is easy to miss. `*-final.png` is a page screenshot, not a video frame, so it cannot show this. Confirm the page fills the frame down to the caption strip, the captions match what is on screen, the bug is visible on BEFORE and the fix on AFTER. A wrong selector or a check that passes for the wrong reason makes the video misleading: fix the scenario and record again. Never edit captions or cut footage to change what a check showed.
 
 ## Outputs
 

@@ -61,9 +61,9 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fontconfig fonts-noto-core
           npm ci --prefix skills/video-qa/scripts
-          (cd skills/video-qa/scripts && node node_modules/playwright-core/cli.js install ffmpeg)
+          (cd skills/video-qa/scripts && node node_modules/playwright-core/cli.js install --with-deps ffmpeg chromium)
 
-      - name: video-qa recorder test (uses the runner's Google Chrome)
+      - name: video-qa recorder test (uses Playwright's Chromium)
         env:
           VIDEO_QA_REQUIRE_DEPS: "1"
         run: node --test 'skills/video-qa/tests/*.test.mjs'

@@ -14,6 +14,8 @@ const CAPTION_MARGIN = 24;
 const STRIP_COLOUR = '0x111827';
 const CARD_SECONDS = 3;
 const FPS = 25;
+// Magenta, rare on real pages, so a frame showing it at the edges really has the page drawn there.
+const EDGE_MARKER = { css: '#ff00ff', size: 8 };
 // Waits (page loads, checks polling for something) are cut from the video, keeping this much of each end.
 const LOAD_EDGE_MS = 150;
 const CHECK_EDGE_MS = 300;
@@ -375,6 +377,28 @@ async function recordVersion(browser, version) {
   }
 
   // The page alone; the caption strip is added to it with the video.
+  // Edge markers along the bottom and right of the viewport prove the page fills the video frame
+  // (frameCheck). They are hit-tested invisible first: a page that covers an edge (a modal backdrop, a
+  // transformed root) skips the check instead of failing it. burnCaptions trims the clip before them.
+  const covered = await page.evaluate(({ css, size }) => new Promise((resolve) => {
+    const edges = [`left:0;bottom:0;width:100vw;height:${size}px`, `top:0;right:0;height:100vh;width:${size}px`].map((box) => {
+      const el = document.createElement('div');
+      el.style.cssText = `position:fixed;${box};background:${css};opacity:0;z-index:2147483647`;
+      return document.documentElement.appendChild(el);
+    });
+    const [bottom, right] = edges;
+    // clientWidth and clientHeight leave out scrollbars, so the probe never lands on one.
+    const { clientWidth: width, clientHeight: height } = document.documentElement;
+    const reached = document.elementFromPoint(width / 2, height - 2) === bottom
+      && document.elementFromPoint(width - 2, height / 2) === right;
+    if (!reached) {
+      edges.forEach((el) => el.remove());
+      resolve(true);
+      return;
+    }
+    edges.forEach((el) => { el.style.opacity = '1'; });
+    setTimeout(() => { edges.forEach((el) => el.remove()); resolve(false); }, 300);
+  }), EDGE_MARKER).catch((err) => err.message.split('\n')[0]);
   // Headless Chrome sends video frames only when the page repaints, so a static page can leave the
   // recording empty ("Page did not produce any video frames"). Toggle a 1px overlay to force a repaint.
   await page.evaluate(() => new Promise((resolve) => {
@@ -396,7 +420,32 @@ async function recordVersion(browser, version) {
 
   const trimmedMs = Math.round(cuts.reduce((sum, c) => sum + c.end - c.start, 0));
   return { ...version, slug, webm, cues: shifted, cuts, trimmedMs, results, aborted, consoleErrors, pageShot,
-    screenshot: join(outDir, `${slug}-final.png`) };
+    frameCheck: covered === true ? { ok: true, skipped: 'the page covers the viewport edges' }
+      : covered ? { ok: false, note: `frame check could not run: ${covered}` } : frameCheck(webm), screenshot: join(outDir, `${slug}-final.png`) };
+}
+
+// Some browsers draw the page into only part of the video frame and fill the rest with grey (installed
+// Chrome's headless mode on macOS did). Finds the first raw frame whose bottom and right edges both show
+// the markers; markerAt is its time in the raw video, where the clip must end.
+function frameCheck(webm) {
+  const inset = EDGE_MARKER.size / 2;
+  // Both edge strips side by side, so one frame's chroma minimum says whether every pixel is magenta.
+  const strips = `scale=${viewport.width}:${viewport.height},split[a][b];[a]crop=iw:2:0:ih-${inset}[bottom];`
+    + `[b]crop=2:ih:iw-${inset}:0,transpose=1[right];[bottom][right]hstack,signalstats,metadata=mode=print:file=-`;
+  let log;
+  try {
+    log = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', webm, '-filter_complex', strips, '-f', 'null', '-'],
+      { maxBuffer: 64 * 1024 * 1024 }).toString();
+  } catch (err) {
+    return { ok: false, note: `frame check could not read the recording: ${err.message.split('\n')[0]}` };
+  }
+  for (const entry of log.split(/(?=^frame:)/m)) {
+    const value = (key) => Number(entry.match(new RegExp(`lavfi\\.signalstats\\.${key}=([\\d.]+)`))?.[1]);
+    if (value('UMIN') > 180 && value('VMIN') > 180) {
+      return { ok: true, markerAt: Number(entry.match(/pts_time:([\d.]+)/)[1]) };
+    }
+  }
+  return { ok: false, note: 'page did not fill the video frame (the edge markers never reached its bottom and right)' };
 }
 
 function ffmpeg(args) {
@@ -450,7 +499,9 @@ function burnCaptions(rec) {
   const tail = ',format=yuv420p,setsar=1';
   const scale = `scale=${viewport.width}:${viewport.height}`;
   // The screencast sends no frames while the page is still, so repeat the last one and end the clip with the last caption.
-  const page = `${scale},fps=${FPS}${cutFilter(rec.cuts)},tpad=stop_mode=clone:stop_duration=1`;
+  // The clip ends before the frame check's edge markers; the clock of the raw video can lead the cue times.
+  const beforeMarkers = rec.frameCheck.markerAt ? `trim=end=${rec.frameCheck.markerAt.toFixed(3)},` : '';
+  const page = `${beforeMarkers}${scale},fps=${FPS}${cutFilter(rec.cuts)},tpad=stop_mode=clone:stop_duration=1`;
   const length = ['-t', String(Math.ceil(((rec.cues.at(-1)?.end ?? 0) / 1000) * FPS) / FPS)];
   const bannerStrip = `pad=${viewport.width}:${viewport.height + BANNER_HEIGHT}:0:${BANNER_HEIGHT}:color=${colour},`
     + drawText(banner, 'fontsize=26:x=24:y=15');
@@ -492,9 +543,10 @@ function card(name, lines) {
 }
 
 // A fix is proven only when a check fails on BEFORE and every step passes on AFTER. An action
-// that could not run (server down, selector missing) proves nothing, so the run is INCOMPLETE.
+// that could not run (server down, selector missing) or a page that did not fill the video proves
+// nothing, so the run is INCOMPLETE.
 function verdict(recs) {
-  if (recs.some((r) => r.aborted)) return 'INCOMPLETE';
+  if (recs.some((r) => r.aborted || !r.frameCheck.ok)) return 'INCOMPLETE';
   const checkFailed = (rec) => rec.results.some((r) => r.kind === 'check' && !r.ok);
   if (recs.length === 1) return checkFailed(recs[0]) ? 'FAILING' : 'WORKING';
   if (checkFailed(recs.find((r) => r.role === 'after'))) return 'STILL BROKEN';
@@ -504,6 +556,7 @@ function verdict(recs) {
 function summaryLine(rec) {
   const stopped = rec.results.find((r) => r.kind === 'action' && !r.ok && !r.skipped);
   if (stopped) return `${rec.label}: stopped at step ${stopped.step}, could not ${stopped.action}`;
+  if (!rec.frameCheck.ok) return `${rec.label}: ${rec.frameCheck.note}`;
   const checks = rec.results.filter((r) => r.kind === 'check');
   const failed = checks.filter((r) => !r.ok);
   if (failed.length === 0) return `${rec.label}: all ${checks.length} checks passed`;
@@ -511,9 +564,9 @@ function summaryLine(rec) {
 }
 
 const browser = await chromium.launch({
-  // Prefer installed Chrome; VIDEO_QA_CHANNEL overrides (e.g. "chromium" after `playwright install chromium`).
-  channel: process.env.VIDEO_QA_CHANNEL
-    || (['/usr/bin/google-chrome', '/Applications/Google Chrome.app'].some(existsSync) ? 'chrome' : 'chromium'),
+  // Playwright's Chromium by default; VIDEO_QA_CHANNEL=chrome uses installed Chrome, whose headless
+  // mode on macOS drew the page into only part of the video frame.
+  channel: process.env.VIDEO_QA_CHANNEL || 'chromium',
   headless: process.env.VIDEO_QA_HEADED !== '1',
   // Human pacing sets its own timing; a per-call delay on top made every glide and keystroke crawl.
   slowMo: scenario.slowMo ?? (scenario.pace === 'fast' ? 200 : 0),
@@ -554,10 +607,10 @@ const report = {
   captions: CAPTIONS,
   video: FULL ? join(outDir, finalName) : null,
   sideBySide: FULL && existsSync(join(outDir, 'side-by-side.mp4')) ? join(outDir, 'side-by-side.mp4') : null,
-  versions: recordings.map(({ label, detail, baseUrl, role, slug, results, aborted, consoleErrors, screenshot, trimmedMs }) => ({
+  versions: recordings.map(({ label, detail, baseUrl, role, slug, results, aborted, frameCheck, consoleErrors, screenshot, trimmedMs }) => ({
     label, detail, baseUrl, role, trimmedMs, clip: FULL ? join(outDir, `${slug}.mp4`) : null,
     cleanClip: join(outDir, cleanName({ role, slug })), captions: join(outDir, `${slug}.srt`),
-    sheet: join(outDir, `${slug}-sheet.png`), screenshot, aborted, results, consoleErrors,
+    sheet: join(outDir, `${slug}-sheet.png`), screenshot, aborted, frameCheck, results, consoleErrors,
   })),
 };
 writeFileSync(join(outDir, 'results.json'), JSON.stringify(report, null, 2));

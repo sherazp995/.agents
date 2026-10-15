@@ -1,4 +1,4 @@
-// End-to-end checks for scripts/record.mjs: real Chrome, real ffmpeg, tiny local pages.
+// End-to-end checks for scripts/record.mjs: real Chromium, real ffmpeg, tiny local pages.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -12,9 +12,11 @@ const recorder = join(scripts, 'record.mjs');
 const onPath = (bin) => {
   try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; }
 };
+const hasModules = existsSync(join(scripts, 'node_modules', 'playwright-core'));
+const chromium = hasModules && (await import(join(scripts, 'node_modules', 'playwright-core', 'index.mjs'))).chromium;
 const missing = [
-  !existsSync(join(scripts, 'node_modules', 'playwright-core')) && 'scripts/node_modules (npm install)',
-  !['/usr/bin/google-chrome', '/Applications/Google Chrome.app'].some(existsSync) && !process.env.VIDEO_QA_CHANNEL && 'Chrome',
+  !hasModules && 'scripts/node_modules (npm install)',
+  hasModules && !process.env.VIDEO_QA_CHANNEL && !existsSync(chromium.executablePath()) && 'Playwright Chromium',
   ...['ffmpeg', 'ffprobe', 'fc-match'].filter((bin) => !onPath(bin)),
 ].filter(Boolean);
 // Homebrew's default ffmpeg has no drawtext or subtitles filter; the recorder needs both (SKILL.md, ffmpeg-full).
@@ -107,6 +109,13 @@ async function listen(handler) {
   return server;
 }
 
+// Frames of a clip whose bottom page rows are the frame check's magenta edge marker.
+const magentaFrames = (file) => {
+  const filter = `crop=iw:2:0:${VIEWPORT.height - 4},signalstats,metadata=mode=print:file=-`;
+  const log = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', file, '-vf', filter, '-f', 'null', '-']).toString();
+  return [...log.matchAll(/UMIN=([\d.]+)[\s\S]*?VMIN=([\d.]+)/g)].filter(([, u, v]) => u > 180 && v > 180).length;
+};
+
 const frameHeight = (file) => Number(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
   '-show_entries', 'stream=height', '-of', 'csv=p=0', file]).toString().trim());
 
@@ -160,6 +169,36 @@ test('a selector that exists only on AFTER gives INCOMPLETE, not FIXED', { skip 
   }
 });
 
+test('a page not drawn to the edges of the video frame gives INCOMPLETE', { skip }, async () => {
+  // A greyscale filter greys the recorder's magenta edge markers, as a browser that leaves part of the frame grey would.
+  const grey = (fixed) => page({ fixed }).replace('<title>t</title>', '<title>t</title><style>html{filter:grayscale(1)}</style>');
+  const run = await withServers([grey(false), page({ fixed: true })],
+    ([before, after]) => record(scenario('Grey frame', before, after)));
+  try {
+    assert.equal(run.code, 2, run.stderr);
+    assert.equal(run.results.verdict, 'INCOMPLETE');
+    assert.match(run.results.versions[0].frameCheck.note, /did not fill the video frame/);
+    assert.equal(run.results.versions[1].frameCheck.ok, true);
+    assert.equal(magentaFrames(join(run.dir, 'flow-after.mp4')), 0);
+  } finally {
+    rmSync(run.dir, { recursive: true, force: true });
+  }
+});
+
+test('a page that covers the viewport edges at the end skips the frame check instead of failing it', { skip }, async () => {
+  const modal = (fixed) => page({ fixed }).replace('</script>', `</script><dialog id="d">Error</dialog>
+    <style>dialog::backdrop{background:rgba(0,0,0,.5)}</style>
+    <script>document.getElementById('go').addEventListener('click', () => document.getElementById('d').showModal());</script>`);
+  const run = await withServers([modal(false), modal(true)], ([before, after]) => record(scenario('Modal', before, after)));
+  try {
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(run.results.verdict, 'FIXED');
+    assert.match(run.results.versions[0].frameCheck.skipped, /covers the viewport edges/);
+  } finally {
+    rmSync(run.dir, { recursive: true, force: true });
+  }
+});
+
 test('--captions off drops the caption strip, and without --full there is no combined film', { skip }, async () => {
   const run = await withServers([page({ fixed: false }), page({ fixed: true })],
     ([before, after]) => record(scenario('No captions', before, after), ['--captions=off']));
@@ -167,6 +206,8 @@ test('--captions off drops the caption strip, and without --full there is no com
     assert.equal(run.code, 0, run.stderr);
     assert.equal(run.results.captions, false);
     assert.equal(frameHeight(join(run.dir, 'flow-before.mp4')), VIEWPORT.height);
+    assert.equal(magentaFrames(join(run.dir, 'flow-before.mp4')), 0);
+    assert.equal(magentaFrames(join(run.dir, 'flow-after.mp4')), 0);
     assert.equal(run.results.video, null);
     assert.ok(!existsSync(join(run.dir, 'flow.mp4')));
     assert.ok(!existsSync(join(run.dir, 'before.mp4')));
