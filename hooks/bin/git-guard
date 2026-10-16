@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Enforce the git rules agents tend to skip (AGENTS-RULES.md 43, 48 and 54) before a shell command runs.
 
+Rule 54 is one unpushed commit per branch, or one per `[feature]` subject tag when the repo's
+`.git-guard.json` says {"commits": "per-feature"}.
+
 Reads the normalized hook event (see ../adapters/run.py). For a rule break it returns
 {"decision": "deny", "reason": ...} that says what to run instead (the `cd` form of a
 `git -C` command, the amend command, a one-line message, or to leave the change uncommitted
@@ -13,6 +16,7 @@ import shlex
 import subprocess
 import sys
 
+FEATURE_TAG = re.compile(r'^\[([^\]]+)\]\s*\S')
 ATTRIBUTION = re.compile(r'Co-Authored-By:\s*Claude|Claude-Session|Generated with \[?Claude Code', re.I)
 SEPARATOR = re.compile(r'^[;&|]+$')
 WRAPPERS = {'command', 'env', 'exec', 'nohup', 'time', 'sudo'}
@@ -219,19 +223,99 @@ def git(directory, *args):
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def commit_messages(args):
-    messages, i = [], 0
+# Short commit options that take no value, so they can lead a cluster such as `-qm` or `-aF`.
+FLAG_CLUSTER = '-[aqnsveoip]*'
+OTHER_SOURCES = ('--file', '--reuse-message', '--reedit-message', '--template', '--squash')
+
+
+def message_sources(args):
+    """Every place `git commit` would take its message from, in order: ('m', text), ('fixup', target)
+    or ('other', option) for a file, an earlier commit, a template or --squash."""
+    sources, i = [], 0
     while i < len(args):
         arg = args[i]
-        if arg in ('-m', '--message') and i + 1 < len(args):
-            messages.append(args[i + 1])
+        value = args[i + 1] if i + 1 < len(args) else None
+        if arg in ('--message', '--fixup') or re.fullmatch(FLAG_CLUSTER + 'm', arg):
+            if value is not None:
+                sources.append(('fixup' if arg == '--fixup' else 'm', value))
             i += 1
-        elif arg.startswith('--message='):
-            messages.append(arg.split('=', 1)[1])
-        elif arg.startswith('-m') and len(arg) > 2:
-            messages.append(arg[2:])
+        elif arg in OTHER_SOURCES or re.fullmatch(FLAG_CLUSTER + '[CcFt]', arg):
+            sources.append(('other', arg))
+            i += 1
+        elif arg.startswith(('--message=', '--fixup=')):
+            sources.append(('fixup' if arg.startswith('--fixup=') else 'm', arg.split('=', 1)[1]))
+        elif glued := re.fullmatch(FLAG_CLUSTER + 'm(.+)', arg, re.S):
+            sources.append(('m', glued[1]))
+        elif (arg.startswith(tuple(f'{option}=' for option in OTHER_SOURCES))
+              or re.fullmatch(FLAG_CLUSTER + '[CcFt].+', arg)):
+            sources.append(('other', arg.split('=', 1)[0]))
         i += 1
-    return messages
+    return sources
+
+
+# Every long option of `git commit` (`git commit --git-completion-helper-all`), for reading abbreviations as git does.
+COMMIT_LONG_OPTIONS = (
+    'quiet verbose file author date message reedit-message reuse-message fixup squash reset-author trailer signoff '
+    'template edit cleanup status gpg-sign all include interactive patch only no-verify dry-run short branch '
+    'ahead-behind porcelain long null amend no-post-rewrite untracked-files pathspec-from-file pathspec-file-nul '
+    'allow-empty allow-empty-message verify post-rewrite no-quiet no-verbose no-file no-author no-date no-message '
+    'no-reedit-message no-reuse-message no-fixup no-squash no-reset-author no-signoff no-template no-edit no-cleanup '
+    'no-status no-gpg-sign no-all no-include no-interactive no-patch no-only no-dry-run no-short no-branch '
+    'no-ahead-behind no-porcelain no-long no-null no-amend no-untracked-files no-pathspec-from-file '
+    'no-pathspec-file-nul no-allow-empty no-allow-empty-message').split()
+VALUE_OPTIONS = ('--message', '--file', '--reuse-message', '--reedit-message', '--template', '--fixup', '--squash',
+                 '--author', '--date', '--trailer', '--cleanup', '--pathspec-from-file')
+
+
+def expand_long_options(args):
+    """The arguments with each unique abbreviation of a long option (`--amen`, `--reuse=HEAD`) spelled out, as git
+    reads it. Option values and everything after `--` stay as given."""
+    expanded, takes_value = [], False
+    for i, arg in enumerate(args):
+        if arg == '--':
+            return expanded + list(args[i:])
+        if not takes_value and arg.startswith('--'):
+            name, sep, value = arg.partition('=')
+            options = [option for option in COMMIT_LONG_OPTIONS if f'--{option}' == name] or [
+                option for option in COMMIT_LONG_OPTIONS if f'--{option}'.startswith(name)]
+            if len(options) == 1:
+                arg = f'--{options[0]}{sep}{value}'
+            takes_value = arg in VALUE_OPTIONS
+        else:
+            takes_value = not takes_value and bool(re.fullmatch(FLAG_CLUSTER + '[mCcFt]', arg))
+        expanded.append(arg)
+    return expanded
+
+
+def commit_messages(args):
+    return [text for kind, text in message_sources(args) if kind == 'm']
+
+
+MODES = ('single', 'per-feature')
+
+
+def commit_mode(directory):
+    """(mode, problem): the repo's `.git-guard.json` "commits" mode ("single" without the file), or
+    (None, what is wrong with that file)."""
+    top = git(directory, 'rev-parse', '--show-toplevel')
+    if top is None:
+        return 'single', None
+    try:
+        with open(os.path.join(top, '.git-guard.json'), encoding='utf-8') as config:
+            settings = json.load(config)
+    except FileNotFoundError:
+        return 'single', None
+    except (OSError, ValueError) as error:
+        return None, f'it cannot be read as JSON: {error}'
+    if not isinstance(settings, dict):
+        return None, 'it is not a JSON object'
+    mode = settings.get('commits', 'single')
+    return (mode, None) if mode in MODES else (None, f'it has "commits": {json.dumps(mode)}')
+
+
+def feature_tag(subject):
+    match = FEATURE_TAG.match(subject or '')
+    return match[1].strip().lower() if match else None
 
 
 class Correction(str):
@@ -250,6 +334,13 @@ def check_commit(directory, args):
     has_head = git(directory, 'rev-parse', '--verify', '-q', 'HEAD') is not None
     unpushed = int(git(directory, 'rev-list', '--count', 'HEAD', '--not', '--remotes') or 0) if has_head else 0
     amend = '--amend' in args
+    mode, bad_setting = commit_mode(directory)
+    if bad_setting:
+        return problems + [Correction(f'rule 54: .git-guard.json must be {{"commits": "single"}} or '
+                                      f'{{"commits": "per-feature"}}, but {bad_setting}. Leave the change uncommitted '
+                                      'and report the bad setting')]
+    if mode == 'per-feature':
+        return problems + check_feature_commit(directory, args, has_head)
     if unpushed > 1:
         problems.append(Correction(f'rule 54: this branch already has {unpushed} unpushed commits. Do not commit or '
                                    'squash; leave the change uncommitted and tell the user the branch needs squashing first'))
@@ -264,6 +355,91 @@ def check_commit(directory, args):
         problems.append(Correction('rule 54: --amend here would rewrite a commit that is already pushed. '
                                    'Rerun it as a new commit, without --amend'))
     return problems
+
+
+def rebase_base(directory, sha, shas):
+    """The base for `git rebase --autosquash` onto `sha`, or None when that rebase would replay a merge or a
+    pushed commit (after a `git pull`, say) and so rewrite history."""
+    has_parent = git(directory, 'rev-parse', '--verify', '-q', f'{sha}~1') is not None
+    span = f'{sha}~1..HEAD' if has_parent else 'HEAD'
+    replayed = set((git(directory, 'rev-list', span) or '').split())
+    if git(directory, 'rev-list', '--min-parents=2', span) or replayed - set(shas):
+        return None
+    return f'{sha[:12]}~1' if has_parent else '--root'
+
+
+def check_feature_commit(directory, args, has_head):
+    """Rule 54 per-feature mode: one unpushed commit per `[feature]` subject tag."""
+    args = expand_long_options(args)
+    messages, amend = commit_messages(args), '--amend' in args
+    log = git(directory, 'log', '--format=%H%x00%s', 'HEAD', '--not', '--remotes') if has_head else ''
+    unpushed = [(line.split('\0', 1) + [''])[:2] for line in (log or '').splitlines()]
+    shas = [sha for sha, _ in unpushed]
+    sources = message_sources(args)
+    others = [option for kind, option in sources if kind == 'other']
+    fixups = [target for kind, target in sources if kind == 'fixup']
+    if others:
+        rerun = ('`git commit --amend --no-edit`, or `git commit --amend -m "[<its feature>] <one line>"`' if amend
+                 else '`git commit -m "[<feature>] <one line>"`')
+        return [Correction(f'rule 54: {others[0]} takes the message from somewhere the feature tag cannot be '
+                           f'checked. Rerun it as {rerun}')]
+    if len(fixups) > 1 or (fixups and amend):
+        return [Correction('rule 54: give one plain `git commit --fixup=<sha>`, without --amend or a second --fixup')]
+    target = fixups[0] if fixups else None
+    if target is not None and re.match(r'(amend|reword):', target):
+        return [Correction(f'rule 54: --fixup={target} rewrites the feature commit\'s message and could change its '
+                           'tag. Rerun it as a plain `git commit --fixup=<sha>`')]
+    if target is not None:
+        named = git(directory, 'rev-parse', '--verify', '-q', '--end-of-options', target)
+        sha = named and git(directory, 'rev-parse', '--verify', '-q', f'{named}^{{commit}}')
+        if sha not in shas:
+            return [Correction(f'rule 54: --fixup={target} is not an unpushed commit on this branch, so it must not be '
+                               'rewritten. Commit it as new work with its own `[feature]` tag instead')]
+        if rebase_base(directory, sha, shas) is None:
+            return [Correction(f'rule 54: a merge or pushed commit sits in the history the --fixup={target} rebase '
+                               'would replay, so it would rewrite history. Leave the change uncommitted and tell the user')]
+        return []
+    if amend:
+        if has_head and (not shas or shas[0] != git(directory, 'rev-parse', 'HEAD')):
+            return [Correction('rule 54: --amend here would rewrite a commit that is already pushed. '
+                               'Rerun it as a new commit with a `[feature]` tag, without --amend')]
+        if not messages and '--no-edit' not in args:
+            return [Correction('rule 54: an amend here must say its message, so its feature tag can be checked. Rerun it '
+                               'as `git commit --amend --no-edit`, or `--amend -m "[<its feature>] <one line>"`')]
+        head_tag = feature_tag(unpushed[0][1]) if unpushed else None
+        if messages and head_tag and feature_tag(messages[0]) != head_tag:
+            return [Correction(f'rule 54: an amend keeps its feature, so the new subject must still start with '
+                               f'"[{head_tag}]". Rerun it with that tag')]
+        new_tag = feature_tag(messages[0]) if messages else None
+        for _, subject in unpushed[1:]:
+            if new_tag and feature_tag(subject) == new_tag:
+                return [Correction(f'rule 54: feature "[{new_tag}]" already has its unpushed commit ("{subject}"), so '
+                                   'this amend would make a second one. Keep HEAD\'s own subject, or use another tag')]
+        return []
+    if not messages:
+        return [Correction('rule 54: this repo commits one change per feature, so give the subject with '
+                           '`-m "[<feature>] <one line>"`')]
+    tag = feature_tag(messages[0])
+    if not tag:
+        return [Correction('rule 54: this repo commits one change per feature, so the subject must start with its '
+                           'feature tag followed by a description. Rerun it as '
+                           '`git commit -m "[<feature>] <one line>"`, reusing the tag of an unpushed commit when this '
+                           'change belongs to that feature')]
+    for index, (sha, subject) in enumerate(unpushed):
+        if feature_tag(subject) != tag:
+            continue
+        if index == 0:
+            return [Correction(f'rule 54: feature "[{tag}]" already has its unpushed commit ("{subject}"), which is '
+                               'HEAD. Fold this change into it with `git commit --amend --no-edit`')]
+        base = rebase_base(directory, sha, shas)
+        if base is None:
+            return [Correction(f'rule 54: feature "[{tag}]" already has its unpushed commit ("{subject}", {sha[:12]}), '
+                               'but a merge or pushed commit sits in the history a rebase onto it would replay. '
+                               'Leave the change uncommitted and tell the user')]
+        return [Correction(f'rule 54: feature "[{tag}]" already has its unpushed commit ("{subject}", {sha[:12]}). '
+                           f'Fold this change into it with `git commit --fixup={sha[:12]}`, then '
+                           f'`git rebase --autosquash --autostash {base}`')]
+    return []
 
 
 def shell_path(path):

@@ -208,6 +208,123 @@ class GitGuardTests(unittest.TestCase):
     def test_an_apostrophe_in_a_heredoc_without_a_commit_is_not_flagged(self):
         self.assertIsNone(self.guard("git status && cat <<EOF\ndon't\nEOF"))
 
+    def per_feature(self, *subjects):
+        (self.repo / '.git-guard.json').write_text('{"commits": "per-feature"}')
+        for subject in subjects:
+            self.git('commit', '-q', '--allow-empty', '-m', subject)
+
+    def sha(self, rev):
+        return subprocess.run(['git', 'rev-parse', '--short=12', rev], cwd=self.repo,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_per_feature_mode_allows_one_unpushed_commit_per_new_tag(self):
+        self.per_feature('[login] Add form', '[search] Add box', '[export] Add csv')
+
+        self.assertIsNone(self.guard("git commit -m '[Billing] Add plan'"))
+        self.assertIn('git commit -m "[<feature>] <one line>"', self.guard("git commit -m 'Untagged'"))
+        self.assertIn('-m "[<feature>]', self.guard('git commit -F msg.txt'))
+        self.assertIsNone(self.guard("git commit -qm '[billing] Add plan'"))
+        self.assertIsNone(self.guard("git commit -qm'[billing] Add plan'"))
+        self.assertIn('must start with its feature tag', self.guard("git commit -am 'Untagged'"))
+
+    def test_per_feature_mode_folds_a_repeated_tag_into_its_commit(self):
+        self.per_feature('[login] Add form', '[search] Add box')
+
+        self.assertIn('git commit --amend --no-edit', self.guard("git commit -m '[search] Tweak'"))
+        login = self.sha('HEAD~1')
+        reason = self.guard("git commit -m '[ Login ] Fix typo'")
+        self.assertIn(f'`git commit --fixup={login}`', reason)
+        self.assertIn('`git rebase --autosquash --autostash --root`', reason)
+        self.assertIsNone(self.guard(f'git commit --fixup={login}'))
+        self.assertIsNone(self.guard("git commit --fixup=':/[login]'"))
+        self.assertIn('plain `git commit --fixup=<sha>`', self.guard(f'git commit --fixup=amend:{login} -m "[x] y"'))
+        self.assertIn('cannot be checked', self.guard(f"git commit --squash={login} -m '[x] y'"))
+        self.assertIn('cannot be checked', self.guard(f"git commit --squ={login} -m '[x] y'"))
+        self.assertIn('one plain `git commit --fixup', self.guard(f'git commit --fixup={login} --fixup=amend:{login}'))
+        self.assertIn('without --amend', self.guard(f'git commit --amend --fixup={login}'))
+
+    def test_per_feature_fixup_advice_rebases_from_the_parent_of_the_feature_commit(self):
+        self.per_feature('[base] Start')
+        self.push_all()
+        self.git('commit', '-q', '--allow-empty', '-m', '[login] Add form')
+        self.git('commit', '-q', '--allow-empty', '-m', '[search] Add box')
+
+        login = self.sha('HEAD~1')
+        self.assertIn(f'`git rebase --autosquash --autostash {login}~1`', self.guard("git commit -m '[login] Fix'"))
+
+    def test_per_feature_mode_never_rewrites_pushed_commits_or_relabels_a_feature(self):
+        self.per_feature('[login] Add form')
+        self.push_all()
+        pushed = self.sha('HEAD')
+        self.git('commit', '-q', '--allow-empty', '-m', '[search] Add box')
+
+        self.assertIn('not an unpushed commit', self.guard(f'git commit --fixup={pushed}'))
+        self.assertIsNone(self.guard("git commit -m '[login] Follow up'"))
+        self.assertIsNone(self.guard("git commit --amend -m '[search] Add search box'"))
+        self.assertIn('"[search]"', self.guard("git commit --amend -m '[login] Add box'"))
+        self.git('commit', '-q', '--allow-empty', '-m', 'Untagged')
+        self.assertIn('make a second one', self.guard("git commit --amend -m '[search] Retag'"))
+        self.assertIsNone(self.guard("git commit --amend -m '[billing] Retag'"))
+        self.git('reset', '-q', '--soft', 'HEAD~1')
+        self.assertIn('--amend --no-edit', self.guard('git commit --amend -F msg.txt'))
+        for command in ('git commit --amend --no-edit -C HEAD~1', 'git commit --amend --no-edit -c HEAD~1',
+                        'git commit --amend --no-edit -F msg.txt', 'git commit --amend --no-edit --reuse-message=HEAD~1',
+                        'git commit --amend --no-edit -aC HEAD~1', 'git commit --amend --no-edit --reuse=HEAD~1',
+                        'git commit --amend --no-edit --fil=msg.txt'):
+            self.assertIn('cannot be checked', self.guard(command), command)
+        self.assertIn('"[search]"', self.guard("git commit --amend --no-edit -qm'[login] Add box'"))
+        self.assertIn('"[search]"', self.guard("git commit --amen -m '[billing] Relabel'"))
+        self.assertIn('git commit -m "[<feature>]', self.guard('git commit --fil=msg.txt'))
+        self.assertNotIn('--amend', self.guard('git commit -F msg.txt'))
+        self.push_all()
+        self.assertIn('already pushed', self.guard('git commit --amend --no-edit'))
+
+    def test_per_feature_mode_never_offers_a_rebase_across_a_merge(self):
+        self.per_feature('[base] Start')
+        self.push_all()
+        self.git('commit', '-q', '--allow-empty', '-m', '[login] Add form')
+        self.git('checkout', '-q', '-b', 'side', 'HEAD~1')
+        self.git('commit', '-q', '--allow-empty', '-m', 'main work')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('checkout', '-q', '-')
+        self.git('merge', '-q', '--no-edit', 'origin/main')
+        self.git('commit', '-q', '--allow-empty', '-m', '[search] Add box')
+
+        reason = self.guard("git commit -m '[login] Fix'")
+        self.assertIn('Leave the change uncommitted', reason)
+        self.assertNotIn('rebase --autosquash', reason)
+        self.assertIn('Leave the change uncommitted', self.guard(f"git commit --fixup={self.sha('HEAD~2')}"))
+
+        self.git('reset', '-q', '--hard', 'HEAD~1')
+        self.git('commit', '-q', '--amend', '--allow-empty', '-m', '[merge] Join main')
+        self.git('commit', '-q', '--allow-empty', '-m', '[search] Add box')
+        self.assertIn('Leave the change uncommitted', self.guard("git commit -m '[merge] Fix'"))
+        self.assertIn('Leave the change uncommitted', self.guard(f"git commit --fixup={self.sha('HEAD~1')}"))
+
+    def test_per_feature_mode_never_offers_a_rebase_across_an_unpushed_merge(self):
+        self.per_feature('[base] Start')
+        self.push_all()
+        self.git('commit', '-q', '--allow-empty', '-m', '[login] Add form')
+        self.git('checkout', '-q', '-b', 'side', 'HEAD~1')
+        self.git('commit', '-q', '--allow-empty', '-m', 'side work')
+        self.git('checkout', '-q', '-')
+        self.git('merge', '-q', '--no-edit', 'side')
+        self.git('commit', '-q', '--allow-empty', '-m', '[search] Add box')
+
+        self.assertIn('Leave the change uncommitted', self.guard("git commit -m '[login] Fix'"))
+        self.assertIn('Leave the change uncommitted', self.guard(f"git commit --fixup={self.sha('HEAD~2')}"))
+
+    def test_without_the_project_flag_feature_tags_do_not_lift_the_single_commit_rule(self):
+        self.commit(1)
+
+        self.assertIn('--amend', self.guard("git commit -m '[search] Add box'"))
+        (self.repo / '.git-guard.json').write_text('{"commits": "per_feature"}')
+        self.assertIn('but it has "commits": "per_feature"', self.guard("git commit -m '[search] Add box'"))
+        for broken, problem in (('{"commits": "per-feature",}', 'cannot be read as JSON'),
+                                ('["per-feature"]', 'not a JSON object')):
+            (self.repo / '.git-guard.json').write_text(broken)
+            self.assertIn(problem, self.guard("git commit -m '[search] Add box'"), broken)
+
     def test_non_git_commands_are_untouched(self):
         self.commit(3)
 

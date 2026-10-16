@@ -18,7 +18,7 @@ Your global rules are split across focused files to save context. Load each when
 
 **Forms & Turbo (Rules 38–40):** default Turbo, one form + buttons, gate analytics. → [`AGENTS-RULES.md#forms--turbo-rails--hotwire`](~/.agents/AGENTS-RULES.md#forms--turbo-rails--hotwire)
 
-**Tooling & Workflow (Rules 41–44, 54):** cache tests, narrow tests, run git in-repo, Unified Review Protocol, one unpushed commit per branch (rules 43, 48 and 54 are enforced by the `git-guard` hook). → [`AGENTS-RULES.md#tooling--workflow`](~/.agents/AGENTS-RULES.md#tooling--workflow)
+**Tooling & Workflow (Rules 41–44, 54):** cache tests, narrow tests, run git in-repo, Unified Review Protocol, one unpushed commit per branch, or per `[feature]` tag with `.git-guard.json` per-feature mode (rules 43, 48 and 54 are enforced by the `git-guard` hook). → [`AGENTS-RULES.md#tooling--workflow`](~/.agents/AGENTS-RULES.md#tooling--workflow)
 
 **Communication (Rules 45–48):** no dashes in prose, short one-point bullets, answer first, one-line commits. → [`AGENTS-RULES.md#communication-style`](~/.agents/AGENTS-RULES.md#communication-style)
 
