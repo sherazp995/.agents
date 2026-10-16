@@ -70,6 +70,14 @@ test('the Codex relay command uses literal paths, not $PWD', async () => {
   assert.ok(relay.prompt.includes(`write each one as '\\''`), 'paths with a single quote must be escaped')
 })
 
+test('the Codex sandbox gets network access only when the project opts in', async () => {
+  const flag = '-c sandbox_workspace_write.network_access=true'
+  const relayPrompt = async (args) => (await run({}, args)).calls.find((c) => c.opts.label === 'builder:codex').prompt
+  assert.ok(!(await relayPrompt(ARGS)).includes(flag))
+  assert.ok(!(await relayPrompt({ ...ARGS, codexNetwork: 'true' })).includes(flag))
+  assert.ok((await relayPrompt({ ...ARGS, codexNetwork: true })).includes(flag))
+})
+
 test('no usable candidate returns no winner with reasons', async () => {
   const { result } = await run({
     'builder:claude': null,

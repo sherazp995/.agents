@@ -12,6 +12,8 @@ export const meta = {
 //   plan:    the approved plan text (cards with their pass/fail commands).
 //   checks:  shell commands that must exit 0 when the work is done.
 //   baseSha: the commit both worktrees must start from (the user's clean HEAD).
+//   codexNetwork: optional; true lets the Codex sandbox open network connections (e.g. to a
+//            local Postgres for specs). The skill sets it from the repo's .work-council.json.
 // A JSON-encoded object string is parsed as the object.
 const parseArgs = (raw) => {
   if (typeof raw === 'string' && raw.trim().startsWith('{')) {
@@ -26,12 +28,15 @@ const CHECKS = Array.isArray(INPUT.checks)
   ? INPUT.checks.filter((c) => typeof c === 'string' && c.trim()).map((c) => c.trim())
   : []
 const BASE_SHA = typeof INPUT.baseSha === 'string' ? INPUT.baseSha.trim() : ''
+const CODEX_NETWORK = INPUT.codexNetwork === true
 
 if (!TASK || !PLAN) return { error: 'missing_task_or_plan' }
 if (!CHECKS.length) return { error: 'missing_checks' }
 if (!/^[0-9a-f]{7,40}$/.test(BASE_SHA)) return { error: 'missing_base_sha' }
 
 const CODEX_MODEL = 'gpt-6-astra'
+// --ignore-user-config drops ~/.codex/config.toml, so network access has to be on the command.
+const CODEX_NETWORK_FLAG = CODEX_NETWORK ? ' -c sandbox_workspace_write.network_access=true' : ''
 
 const CANDIDATE_SCHEMA = {
   type: 'object',
@@ -96,7 +101,7 @@ const codexBuilderPrompt =
   '3. Run this in Bash exactly once, with the Bash timeout set to 600000 ms, after replacing WT_DIR and TMP_DIR inside the quotes with the real paths.' +
   " If a path contains a single quote, write each one as '\\'' so the quoting stays intact:\n" +
   "   W='WT_DIR'; T='TMP_DIR'; " +
-  `codex exec -m ${CODEX_MODEL} --sandbox workspace-write -c approval_policy=never --ignore-user-config --ignore-rules --ephemeral -C "$W" -o "$T/answer.md" - < "$T/prompt.md" > "$T/codex.log" 2>&1; rc=$?; tail -20 "$T/codex.log"; echo "exit=$rc"\n` +
+  `codex exec -m ${CODEX_MODEL} --sandbox workspace-write -c approval_policy=never${CODEX_NETWORK_FLAG} --ignore-user-config --ignore-rules --ephemeral -C "$W" -o "$T/answer.md" - < "$T/prompt.md" > "$T/codex.log" 2>&1; rc=$?; tail -20 "$T/codex.log"; echo "exit=$rc"\n` +
   "4. Run in Bash, with the real path: rm -rf 'TMP_DIR'. Do this even if step 3 failed.\n" +
   '5. If the exit code is not 0, report codexExit, staged false, no checks, and the log tail as notes. Stop.\n' +
   `6. Otherwise: ${wrapUp}\n` +

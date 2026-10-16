@@ -45,6 +45,7 @@ The critique is a list of candidates. Check each against the code; adopt what ho
 
 1. Confirm `git rev-parse HEAD` still prints `BASE`. If HEAD moved since planning, re-check the plan against the new HEAD, record the new `BASE`, and say so.
 2. Run the build workflow, `build-workflow.js` in this skill's folder, as described under **Hosts**, with args `{ "task": "<intent>", "plan": "<plan text>", "checks": ["<cmd>", ...], "baseSha": "<BASE>" }`.
+   If the repository root holds `.work-council.json` with `"codexNetwork": true`, add `"codexNetwork": true` to the args, so the Codex sandbox can reach local services such as Postgres. Read it from the checkout: it is untracked (listed in `.git/info/exclude`), so the builders' worktrees do not have it. Without it the sandbox stays offline.
 3. It returns `{ winner, runnerUp, decidedBy, graft[], judges[], missing[] }`, or `{ error }` for bad input (report it and stop). Note the Run ID (`wf_...`).
    `decidedBy` is `checks` (only one candidate passed every check), `judges` (majority vote), `only-candidate`, `fallback` (no judge majority; X by roster order, not a judged winner), or `none` (no usable candidate).
 

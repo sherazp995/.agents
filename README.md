@@ -163,6 +163,21 @@ stay in Time Machine backups; the rebuildable `chats/` index does not.
   rest of `tui`), and download caches (`plugins/`). MCP servers stay with
   `mcp/servers.json`, written into each login's own config.
 
+## Per-project opt-ins
+
+Some behaviour is off by default and turned on per repository by an untracked
+file at the repo root, listed in `.git/info/exclude` so it is never committed.
+
+- **`.work-council.json`, `{"codexNetwork": true}`:** the work-council Codex
+  builder runs with `-c sandbox_workspace_write.network_access=true`, so it can
+  reach local services such as Postgres and run specs itself. Without the file
+  its sandbox stays offline. A global `~/.codex/config.toml` setting does not
+  work: the builder runs Codex with `--ignore-user-config`. To opt a repo in:
+
+  ```sh
+  cd <repo> && echo '{"codexNetwork": true}' > .work-council.json && echo .work-council.json >> .git/info/exclude
+  ```
+
 ## Verify
 
 `python3 check.py` runs every section (skills and rules, clients, hub)
