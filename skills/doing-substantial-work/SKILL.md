@@ -31,7 +31,7 @@ One lead agent owns the work, in this session, and checks it with commands rathe
 4. **Check.** Run every check command from the plan. A step is done when its command passes, not when the code looks right.
 5. **When stuck.** Reproduce the failure and read the full error. Test one idea at a time. **Two failed tries on the same problem: stop, tell the user what you tried and what you saw, and ask.** Never loop, never start more agents to get unstuck.
 6. **Prove it** when the change is visible: run the page, job or command once on the main path and keep the output. If you cannot drive it, say it is unverified.
-7. **Review once.** Read your own full diff against the plan: scope, dead code, missed callers, tests. Run `general-review` only when the user asks for a review or before a PR is opened.
+7. **Review once.** Read your own full diff against the plan: scope, dead code, missed callers, tests. Run `general-review` only when the user asks for a review or before a PR is opened. With any reviewer, three fix rounds at most: a high or medium still open after the third means rethink the approach with the user (rule 44), not a fourth patch.
 8. **Commit and report.** Stage only this work's files (`git add -- <files>`), one line commit (rule 48), amend when git-guard says so. Never push unless told. Report answer first: what changed, which commands passed, anything unverified or skipped.
 
 ## Heavier tools, by name only

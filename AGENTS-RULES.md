@@ -224,9 +224,11 @@ Full integration runs happen once per phase in a dedicated task, not in every in
 `cd` into the repo once, then run git there. (The `git-guard` hook enforces this in Claude Code and Codex: it denies `git -C` with the same command rewritten as `cd <dir> && git ...`, so the agent reruns it without asking the user.)
 
 ### 44. Review every code change; the full protocol runs on request
-Every code change gets a self-review of its full diff against the plan before it is "done": scope, dead code, missed callers, tests. The full protocol below (the `general-review` skill, an agent that did not write the change, verdict **PASS** with every introduced blocker, high and medium fixed) runs when the user asks for a review or before a PR is opened.
+Every code change gets a self-review of its full diff against the plan before it is "done": scope, dead code, missed callers, tests. The full protocol below (the `general-review` skill, an agent that did not write the change, verdict **PASS** with every introduced blocker, high and medium fixed, or the rethink below after three fix rounds) runs when the user asks for a review or before a PR is opened.
 
 Review feedback from a person, Copilot or another agent is a claim to verify against the code before acting. When it is wrong, push back with the evidence; never apply a suggestion only because a reviewer made it.
+
+**Three fix rounds, then rethink.** A round is: the reviewer reports, you fix, the reviewer rechecks. If a reviewer still reports a high or medium finding after three rounds (new or repeated), stop patching: the approach is likely wrong, not the details. Re-read the request, list what the reviewers keep finding and the cause those findings share, and weigh a simpler or different design, a narrower scope, or keeping the change with the risk named. Tell the user the open findings, the options and your recommendation, and wait. Lows and nits never extend the loop.
 
 **Why:** A second, evidence-bound pass catches what you miss. Splitting findings by origin (introduced vs pre-existing) lets you gate regressions *this change* caused without holding it hostage to inherited debt.
 
