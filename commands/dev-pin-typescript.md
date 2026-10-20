@@ -1,1 +1,0 @@
-../../Documents/winthrop-intelligence/.claude/commands/dev-pin-typescript.md
