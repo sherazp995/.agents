@@ -5,7 +5,7 @@ description: Backend and distributed-systems design checklist. Use when designin
 
 # Backend engineering
 
-Apply the security, testing and general rules in `~/.agents/AGENTS-RULES.md`. The project's own `CLAUDE.md`/`AGENTS.md` wins. For production SLOs, alerting and incident practice also load `devops-sre`.
+Apply the security, testing and general rules in `~/.agents/AGENTS-RULES.md`. The project's own `CLAUDE.md`/`AGENTS.md` wins. For production SLOs, alerting and incident practice also load `devops-sre`. For anything that handles untrusted input, auth, sessions, uploads, server-side fetches, LLM calls, personal data or a new dependency, read the matching section of [references/security-hardening.md](references/security-hardening.md).
 
 ## Start every design with
 

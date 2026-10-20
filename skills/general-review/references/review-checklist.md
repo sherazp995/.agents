@@ -8,6 +8,8 @@ Record the requested outcome, acceptance criteria, and explicitly excluded work.
 
 Use the task, PR description, relevant documentation, old implementation, and tests together. Tests alone are not a complete specification. If they conflict, expose the conflict rather than choosing silently. Ask for missing product intent only when it prevents a valid assessment; proceed with independent inspection meanwhile.
 
+When the repo has `CONSTRAINTS.md`, read it and treat it as part of the invariants. Check the diff for a weakened bar as the `constraint-driven` skill lists it (a threshold moved, a test made easier, a new suppression comment, unfinished work, an undiscussed exception); each one is a finding at medium or above.
+
 Completion evidence: a one-sentence intent, explicit invariants, and material assumptions.
 
 ## 2. Freeze the review scope (P0)
@@ -82,6 +84,8 @@ Trace authentication and authorization separately. Check resource ownership and 
 Inspect trust boundaries for query, shell, template, path, and HTML injection. Check mass assignment, CSRF where applicable, unsafe redirects, server-side URL fetching, file traversal, and unsafe deserialization on reachable paths. For uploads, examine filename handling, actual content validation, size limits, storage, and access controls.
 
 Check credentials, sensitive logs, error responses, cache keys, encryption or blind-index behavior, and cross-user data exposure. Inspect abuse controls only where the exposed operation and its cost justify them. Do not echo secrets into the report; cite the location with redacted evidence.
+
+For SSRF, LLM features, supply chain, sessions, CORS and rate limiting, walk the matching section of `~/.agents/skills/backend-engineering/references/security-hardening.md`.
 
 Completion evidence: relevant trust boundaries, enforcement points, and sensitive data paths checked.
 

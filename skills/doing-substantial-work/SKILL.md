@@ -9,9 +9,9 @@ One lead agent owns the work, in this session, and checks it with commands rathe
 
 ## The steps
 
-1. **Context.** Read the project `CLAUDE.md`/`AGENTS.md` and the rule files it names. Search past chats only when the task looks like something tried before (`agents-hub search <topic>`).
-2. **Plan, then wait.** A short plan, shown to the user:
-   - intent in one line;
+1. **Context.** Read the project `CLAUDE.md`/`AGENTS.md`, the rule files it names, and `CONSTRAINTS.md` when the repo has one (`constraint-driven`). Search past chats only when the task looks like something tried before (`agents-hub search <topic>`). For a bug, load `debugging` and reproduce it before planning the fix.
+2. **Interview, then plan, then wait.** Run `interview-me` first, until the user gives an explicit yes on the six-line intent (or skip it in one line when the request already states all six). Then a short plan, shown to the user:
+   - the confirmed intent (the `interview-me` restate, or one line when it was skipped);
    - the files to change;
    - the check commands that prove it (the narrowest specs, rubocop or eslint on the changed files, a migration up and down);
    - parallel parts, only when the build splits into 2-6 parts that share no file: each part and the files it owns, plus the shared work the lead does itself;
@@ -19,7 +19,7 @@ One lead agent owns the work, in this session, and checks it with commands rathe
 
    After approval, build without check-ins unless something changes the plan.
 
-   **Plan file.** When the build has more than three steps, save the plan after approval to `~/.agents/tmp/plans/<checkout folder>-<branch with / as ->-<task in 2-4 words>.md` (git-ignored, never committed; never reuse another task's file) and show its full path in the plan the user approves, so the path survives a chat summary. It holds the request verbatim, the approved plan as a checklist, the check commands, and a short log. Keep it current: tick a step when its check passes, log each decision the user makes and each failed try with the reason it failed. After the chat is summarized, re-read the file at that path before the next step; it, not the summary, is the plan.
+   **Plan file.** When the build has more than three steps, save the plan after approval to `~/.agents/tmp/plans/<checkout folder>-<branch with / as ->-<task in 2-4 words>.md` (git-ignored, never committed; never reuse another task's file) and show its full path in the plan the user approves, so the path survives a chat summary. It holds the request verbatim, the confirmed intent, the approved plan as a checklist, the check commands, and a short log. Keep it current: tick a step when its check passes, log each decision the user makes and each failed try with the reason it failed. After the chat is summarized, re-read the file at that path before the next step; it, not the summary, is the plan.
 3. **Build.** Edit the files yourself. Use one subagent only when the reads would flood the chat (a wide search goes to `Explore`), or for the approved parallel parts below. Load the stack skill that matches the code (`rails-engineering`, `frontend-engineering`, `backend-engineering`, `rust-engineering`, `devops-sre`). Tests follow `writing-specs`.
 
    **Parallel parts.** Only when the approved plan splits the build into 2-6 parts and no file belongs to two parts. Anything less clear-cut is built by the lead alone.

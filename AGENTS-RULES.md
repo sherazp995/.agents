@@ -191,6 +191,13 @@ Reuse before writing: code already in the repo, then the standard library, then 
 
 **Don't:** Fix a typo and also rename three variables and reflow the file | **Do:** Fix the typo; mention the naming in the report if it matters.
 
+### 56. Check the official docs before using an API you are not sure of
+Before writing code against a library, framework or service API you have not confirmed for the version the project uses, read its official docs (context7 first, then the vendor's site). Read the version from the lockfile (`Gemfile.lock`, `package.json`/lockfile). Name the doc and version in the report when the choice was not obvious. Blog posts and memory are leads, not sources.
+
+**Why:** APIs change between versions, and code from memory is the most common source of deprecated or invented calls.
+
+**Don't:** Write a Rails 8 `normalizes` call from memory of a Rails 6 pattern | **Do:** Check the Rails 8 API docs for `normalizes`, then write it.
+
 ## Forms & Turbo (Rails + Hotwire)
 
 ### 38. Default to Turbo + `form_with` for state-changing actions

@@ -14,7 +14,7 @@ Your global rules are split across focused files to save context. Load each when
 
 **Testing (Rules 30–34, 49–53):** rules in the `writing-specs` skill, which the `spec-guard` hook delivers on the first test edit; the hook also reports the breaks a script can detect. → [`AGENTS-RULES.md#testing`](~/.agents/AGENTS-RULES.md#testing)
 
-**General (Rules 35–37, 55):** delete dead code your change leaves, tickets for TODOs, explicit over clever, minimal surgical changes. → [`AGENTS-RULES.md#general`](~/.agents/AGENTS-RULES.md#general)
+**General (Rules 35–37, 55–56):** delete dead code your change leaves, tickets for TODOs, explicit over clever, minimal surgical changes, official docs before unfamiliar APIs. → [`AGENTS-RULES.md#general`](~/.agents/AGENTS-RULES.md#general)
 
 **Forms & Turbo (Rules 38–40):** default Turbo, one form + buttons, gate analytics. → [`AGENTS-RULES.md#forms--turbo-rails--hotwire`](~/.agents/AGENTS-RULES.md#forms--turbo-rails--hotwire)
 
@@ -25,6 +25,7 @@ Your global rules are split across focused files to save context. Load each when
 ## Workflow
 
 - Project instructions (`CLAUDE.md`, `AGENTS.md`, and rule files they reference) override these global rules. Read them before changing code.
+- Every planning phase starts with the `interview-me` skill: one question at a time, each with a guess, until the user confirms the intent. Skip it only for mechanical asks or when the request already states outcome, user, success, constraint and out of scope.
 - Before substantial code changes, show the plan and get the user's approval. After approval, build, review and fix run without check-ins unless something changes the plan.
 - Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill. It is the single entry point for building features and fixes, and it runs in one lead agent with check commands, splitting the build into 2-6 parallel subagent parts only when the approved plan gives each part its own files. It takes precedence over any plugin skill that also claims build tasks. `work-council`, `llm-council` and the multi-agent build workflow run only when the user asks for them by name.
 
