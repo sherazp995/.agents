@@ -73,6 +73,8 @@ def make_hub(home, claude_hooks='', codex_hooks=''):
         shutil.copy(CHECKOUT / name, hub / name)
     for folder in ('integrations', 'agents'):
         shutil.copytree(CHECKOUT / folder, hub / folder)
+    for name in ('sample-backend', 'sample-rust', 'sample-rails'):  # the hub ships no agents; the wiring still works
+        (hub / 'agents' / f'{name}.md').write_text(f'---\nname: {name}\ndescription: A sample {name} agent.\n---\n\nDo the work.\n')
     # Commands linked to another checkout stay links (dangling here), as on a machine without it.
     shutil.copytree(CHECKOUT / 'commands', hub / 'commands', symlinks=True)
     (hub / 'hub').mkdir()
@@ -129,8 +131,8 @@ class InstallTests(HubCase):
         self.assertEqual((self.home / '.claude/agents').resolve(), self.hub / 'agents')
         self.assertEqual((self.home / '.claude/commands/general-review.md').resolve(),
                          self.hub / 'commands/general-review.md')
-        codex_agent = tomllib.loads((self.home / '.codex/agents/principal-backend-engineer.toml').read_text())
-        self.assertEqual(codex_agent['name'], 'principal-backend-engineer')
+        codex_agent = tomllib.loads((self.home / '.codex/agents/sample-backend.toml').read_text())
+        self.assertEqual(codex_agent['name'], 'sample-backend')
         hooks = self.settings()['hooks']['SessionStart']
         self.assertEqual([h['command'] for g in hooks for h in g['hooks']],
                          [f'{self.hub}/hub/agents-hub memory provision'])
@@ -257,17 +259,17 @@ class OwnershipTests(HubCase):
     def test_codex_agents_replace_only_marked_or_equivalent_files_and_drop_stale_ones(self):
         folder = self.home / '.codex/agents'
         folder.mkdir()
-        source = self.hub / 'agents/principal-rust-engineer.md'
+        source = self.hub / 'agents/sample-rust.md'
         equivalent = self.module.wiring.codex_agent(source).split('\n', 1)[1]  # same content, no marker
-        (folder / 'principal-rust-engineer.toml').write_text(equivalent)
-        (folder / 'principal-rails-engineer.toml').write_text('name = "hand edited"\n')
+        (folder / 'sample-rust.toml').write_text(equivalent)
+        (folder / 'sample-rails.toml').write_text('name = "hand edited"\n')
         (folder / 'retired.toml').write_text(f'# {self.module.MARKER}\nname = "retired"\n')
         (folder / 'personal.toml').write_text('name = "personal"\n')
 
         self.installer.codex_agents(folder)
 
-        self.assertIn(self.module.MARKER, (folder / 'principal-rust-engineer.toml').read_text())
-        self.assertEqual((folder / 'principal-rails-engineer.toml').read_text(), 'name = "hand edited"\n')
+        self.assertIn(self.module.MARKER, (folder / 'sample-rust.toml').read_text())
+        self.assertEqual((folder / 'sample-rails.toml').read_text(), 'name = "hand edited"\n')
         self.assertEqual(len(self.installer.conflicts), 1, self.installer.conflicts)
         self.assertFalse((folder / 'retired.toml').exists())
         self.assertTrue((folder / 'personal.toml').exists())

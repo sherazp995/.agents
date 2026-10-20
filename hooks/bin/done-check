@@ -36,6 +36,8 @@ NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\byet to be)\s+(?:\w+\s+)?$"
 RESULT = re.compile(r'^DONE-CHECK:\s*(?:PASS|OPEN)\b.*$', re.M)
 SHELL_TOOLS = ('Bash',)
 REQUEST_LIMIT = 2000
+INTERRUPTED = '[Request interrupted by user'  # Claude logs an Esc as a user message
+UNTRACKED_LIMIT = 1_000_000
 
 
 def shell_commands(record):
@@ -103,10 +105,13 @@ def commit_dir(command, cwd):
 
 
 def read_turn(transcript_path, cwd):
-    """{'request', 'edited', 'committed', 'work_dir', 'last_message', 'pending'} for the current turn,
-    which starts at the last prompt the user typed, or None without a readable transcript. work_dir is
-    where the turn last committed, else the folder of the file it last edited, else None."""
-    turn = None
+    """{'request', 'prompts', 'edited', 'committed', 'started', 'work_dir', 'last_message', 'pending'}
+    for the current turn, which starts at the last prompt the user typed, or None without a readable
+    transcript. Prompts queued while the turn runs (straight after a tool call, its result or another
+    queued prompt) join prompts and keep the turn's work; an interrupt ends the turn. request is the
+    prompts joined. started is the turn's first prompt time in epoch seconds, or None. work_dir is where
+    the turn last committed, else the folder of the file it last edited, else None."""
+    turn, state = None, None
     launched, finished = {}, set()
     try:
         with open(transcript_path or '', encoding='utf-8', errors='replace') as handle:
@@ -118,9 +123,18 @@ def read_turn(transcript_path, cwd):
                 if not isinstance(record, dict):
                     continue
                 if turns.is_user_prompt(record):
-                    turn = {'request': prompt_text(record), 'edited': False, 'committed': False,
-                            'last_message': '', 'commit_dir': None, 'edit_dir': None}
-                    launched = {}
+                    if prompt_text(record).lstrip().startswith(INTERRUPTED):
+                        state = 'ended'  # the user stopped the turn; the next prompt starts a new one
+                        continue
+                    if turn is not None and state in ('open', 'prompt'):
+                        # Prompts queued while the turn runs steer it: the turn and its work go on.
+                        turn['prompts'].append(prompt_text(record))
+                    else:
+                        turn = {'prompts': [prompt_text(record)], 'edited': False, 'committed': False,
+                                'last_message': '', 'commit_dir': None, 'edit_dir': None,
+                                'started': turns.record_time(record)}
+                        launched = {}
+                    state = 'prompt'
                     continue
                 if turn is None:
                     continue
@@ -133,9 +147,11 @@ def read_turn(transcript_path, cwd):
                     turn['last_message'] = text
                 launched.update(dict.fromkeys(turns.background_launches(record), turns.record_time(record)))
                 finished.update(turns.finished_tasks(record))
+                state = turns.turn_state(record) or state
     except OSError:
         return None
     if turn is not None:
+        turn['request'] = '\n\n'.join(turn['prompts'])
         turn['pending'] = bool(turns.still_running(launched, finished))
         commit, edit = turn.pop('commit_dir'), turn.pop('edit_dir')
         turn['work_dir'] = commit or edit
@@ -143,11 +159,34 @@ def read_turn(transcript_path, cwd):
 
 
 def change_key(root):
-    """HEAD plus a hash of the uncommitted change: the same work gives the same key."""
+    """HEAD plus a hash of the uncommitted change, untracked file contents included: the same work
+    gives the same key."""
     head = (turns.git(root, 'rev-parse', 'HEAD') or '').strip()
     diff = turns.git(root, 'diff', 'HEAD') or ''
-    untracked = '\0'.join(turns.untracked_names(root) or [])
-    return head, hashlib.sha256(f'{head}\0{diff}\0{untracked}'.encode(errors='replace')).hexdigest()
+    digest = hashlib.sha256(f'{head}\0{diff}'.encode(errors='replace'))
+    for name in turns.untracked_names(root) or []:
+        digest.update(f'\0{name}\0'.encode(errors='replace'))
+        digest.update(untracked_content(root, name))
+    return head, digest.hexdigest()
+
+
+def untracked_content(root, name):
+    """An untracked file's bytes, or its size and mtime when it is large or unreadable."""
+    try:
+        if (root / name).is_file() and (root / name).stat().st_size <= UNTRACKED_LIMIT:
+            return (root / name).read_bytes()
+    except OSError:
+        pass
+    return repr(turns.file_stat(root, name)).encode()
+
+
+def made_this_turn(root, started):
+    """True when HEAD was committed (or amended) after the turn started, so a commit git-guard
+    blocked does not count. Without a start time it cannot tell, and counts it."""
+    if started is None:
+        return True
+    committed_at = (turns.git(root, 'log', '-1', '--format=%ct') or '').strip()
+    return committed_at.isdigit() and int(committed_at) >= int(started)
 
 
 def state_file(session_id):
@@ -171,9 +210,12 @@ def save_state(file, data):
 
 
 def check_instructions(turn, root, committed_head):
-    change = f'`git show {committed_head}`' if committed_head else '`git diff HEAD` plus any new untracked files'
-    change += f' in {root}'
-    request = turn['request'].strip()[:REQUEST_LIMIT]
+    change = f'`git diff HEAD` plus any new untracked files in {root}'
+    if committed_head:
+        change = (f'`git show {committed_head}` in {root}, plus `git diff HEAD` and any new untracked files '
+                  'there if anything is still uncommitted')
+    # Each prompt is cut on its own, so a correction queued after a long request still reaches the checker.
+    request = '\n\n'.join(prompt.strip()[:REQUEST_LIMIT] for prompt in turn['prompts'])
     return f'''DONE-CHECK: this task looks finished. Before it counts as done, verify it once with a fresh checker.
 
 Start one fresh subagent (Claude Code: the Agent tool, general-purpose; Codex: a new subagent, or if you have none, redo the check yourself from scratch). Give it only:
@@ -221,7 +263,7 @@ def verdict(event):
 
     if state.get('root') == str(root) and key in state.get('checked', []):
         return None
-    committed = turn['committed'] and bool(head)
+    committed = turn['committed'] and bool(head) and made_this_turn(root, turn['started'])
     claimed = turn['edited'] and claims_done(turn['last_message'])
     if not (committed or claimed):
         return None

@@ -21,6 +21,10 @@ def tool(name, **tool_input):
         {'type': 'tool_use', 'id': 't1', 'name': name, 'input': tool_input}]}}
 
 
+def stamped(record, timestamp):
+    return {**record, 'timestamp': timestamp}
+
+
 def said(text):
     return {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}}
 
@@ -84,6 +88,67 @@ class DoneCheckTest(unittest.TestCase):
         result = self.stop(prompt(), tool('Bash', command='git commit -m "Add export button"'), said('Committed.'))
         head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.repo, capture_output=True, text=True).stdout
         self.assertIn(f'`git show {head.strip()}`', result['reason'])
+
+    def test_a_commit_hands_the_checker_anything_still_uncommitted_too(self):
+        (self.repo / 'a.py').write_text('x = 3\n')
+        self.git('commit', '-qam', 'Add export button')
+        (self.repo / 'a.py').write_text('x = 4\n')
+        result = self.stop(prompt(), tool('Bash', command='git commit -m "Add export button"'), said('Committed.'))
+        self.assertIn('plus `git diff HEAD` and any new untracked files there if anything is still uncommitted',
+                      result['reason'])
+
+    def test_a_commit_git_guard_blocked_does_not_check_the_previous_commit(self):
+        later = '2999-01-01T00:00:00Z'  # the turn started after HEAD was made, so this turn made no commit
+        self.assertIsNone(self.stop(stamped(prompt(), later), tool('Bash', command='git commit -m "x"'),
+                                    said('git-guard blocked the commit.')))
+        earlier = '2000-01-01T00:00:00Z'
+        (self.repo / 'a.py').write_text('x = 3\n')
+        self.git('commit', '-qam', 'Add export button')
+        result = self.stop(stamped(prompt(), earlier), tool('Bash', command='git commit -m "x"'), said('ok'))
+        self.assertEqual(result['decision'], 'deny')
+
+    def test_a_checked_new_file_edited_again_is_checked_again(self):
+        new = self.repo / 'b.py'
+        new.write_text('y = 1\n')
+        self.assertEqual(self.stop(prompt(), tool('Write', file_path=str(new)), said('Done.'))['decision'], 'deny')
+        self.assertIsNone(self.stop(said('DONE-CHECK: PASS')))
+        new.write_text('y = 2\n')
+        result = self.stop(prompt('change y'), tool('Edit', file_path=str(new)), said('Done.'))
+        self.assertEqual(result['decision'], 'deny')
+
+    def test_a_prompt_queued_mid_turn_steers_it_and_keeps_its_work(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        result = self.stop(prompt(), tool('Edit', file_path=str(self.repo / 'a.py')), prompt('also keep the CSV header'),
+                           said('Done.'))
+        for words in ('add the export button', 'also keep the CSV header'):
+            self.assertIn(words, result['reason'])
+
+    def test_several_prompts_queued_in_a_row_all_steer_the_same_turn(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        result = self.stop(prompt(), tool('Edit', file_path=str(self.repo / 'a.py')), prompt('also keep the CSV header'),
+                           prompt('and sort by date'), said('Done.'))
+        for words in ('add the export button', 'also keep the CSV header', 'and sort by date'):
+            self.assertIn(words, result['reason'])
+
+    def test_a_correction_queued_after_a_long_request_reaches_the_checker(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        result = self.stop(prompt('add the export button ' + 'x' * 3000), tool('Edit', file_path=str(self.repo / 'a.py')),
+                           prompt('keep the CSV header'), said('Done.'))
+        self.assertIn('keep the CSV header', result['reason'])
+
+    def test_a_task_notification_after_the_reply_does_not_reopen_the_turn(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        notification = {'type': 'user', 'message': {'role': 'user', 'content': [
+            {'type': 'text', 'text': '<task-notification>agent finished</task-notification>'}]}}
+        self.assertIsNone(self.stop(prompt(), tool('Edit', file_path=str(self.repo / 'a.py')),
+                                    said('I changed a.py; the spec comes next.'), notification,
+                                    prompt('what does a.py do?'), said('It sets x. Done.')))
+
+    def test_a_prompt_after_an_interrupt_starts_a_new_turn(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        self.assertIsNone(self.stop(prompt(), tool('Edit', file_path=str(self.repo / 'a.py')),
+                                    prompt('[Request interrupted by user for tool use]'),
+                                    prompt('what does a.py do?'), said('It sets x. Done.')))
 
     def test_work_in_another_repo_is_checked_there_not_in_the_session_folder(self):
         session = self.dir / 'session'
@@ -159,9 +224,16 @@ class DoneCheckTest(unittest.TestCase):
         (self.repo / 'a.py').write_text('x = 2\n')
         launch = {'type': 'user', 'timestamp': '2999-01-01T00:00:00Z', 'message': {'role': 'user', 'content': [
             {'type': 'tool_result', 'tool_use_id': 't9', 'content': 'Async agent launched successfully.\nagentId: a1'}]}}
-        with unittest.mock.patch.object(hook.turns, 'still_running', return_value={'t9'}):
+        # Running while the hook still remembers the launch.
+        with unittest.mock.patch.object(hook.turns, 'still_running',
+                                        side_effect=lambda launched, finished: {'t9'} if launched else set()):
             self.assertIsNone(self.stop(prompt(), tool('Edit', file_path=str(self.repo / 'a.py')), launch,
                                         said('Done, the reviewer is running.')))
+            # A prompt queued while the agent runs does not forget the launch.
+            self.transcript.unlink()
+            self.assertIsNone(self.stop(prompt(), tool('Edit', file_path=str(self.repo / 'a.py')), launch,
+                                        prompt('and the import button'), tool('Edit', file_path=str(self.repo / 'a.py')),
+                                        said('Done.')))
 
 
 if __name__ == '__main__':

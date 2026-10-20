@@ -351,7 +351,9 @@ def turn_state(record):
         return 'open' if calls else 'ended'
     if kind == 'user' and not record.get('isMeta'):  # Claude: a tool result (prompts are handled first)
         content = (record.get('message') or {}).get('content')
-        return 'open' if isinstance(content, list) else None
+        results = isinstance(content, list) and any(
+            isinstance(block, dict) and block.get('type') == 'tool_result' for block in content)
+        return 'open' if results else None  # a task notification after the reply leaves the turn ended
     if not isinstance(payload, dict):
         return None
     ptype = payload.get('type') or ''

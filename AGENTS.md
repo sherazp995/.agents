@@ -26,24 +26,24 @@ Your global rules are split across focused files to save context. Load each when
 
 - Project instructions (`CLAUDE.md`, `AGENTS.md`, and rule files they reference) override these global rules. Read them before changing code.
 - Before substantial code changes, show the plan and get the user's approval. After approval, build, review and fix run without check-ins unless something changes the plan.
-- Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill. It is the single entry point for building features and fixes, and it runs in one agent with check commands. It takes precedence over any plugin skill that also claims build tasks. `work-council`, `llm-council` and the multi-agent build workflow run only when the user asks for them by name.
+- Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill. It is the single entry point for building features and fixes, and it runs in one lead agent with check commands, splitting the build into 2-6 parallel subagent parts only when the approved plan gives each part its own files. It takes precedence over any plugin skill that also claims build tasks. `work-council`, `llm-council` and the multi-agent build workflow run only when the user asks for them by name.
 
 ## Keep the Chat Session Clean
 
 - The chat session coordinates: plan, decisions, questions to the user, short results.
-- The session builds and runs checks itself. A subagent is for a wide search, or a read that would flood the chat; never to get unstuck.
+- The session builds and runs checks itself. A subagent is for a wide search, a read that would flood the chat, or an approved parallel part of a `doing-substantial-work` build; never to get unstuck.
 - Each subagent returns only a short result: files changed, commands with exit codes, evidence paths, what it could not do.
-- Subagents cannot start subagents. When a step needs several agents, the session runs it as one workflow (Claude Code: the Workflow tool; Codex: the `workflow-runner` skill). A skill that says to run a workflow is the opt-in.
+- Subagents cannot start subagents. When a step needs several agents, the session runs it as one workflow (Claude Code: the Workflow tool; Codex: the `workflow-runner` skill). A skill that says to run a workflow is the opt-in. The exception: the approved parallel parts of a `doing-substantial-work` build start as subagents directly from the session.
 - Steps that start their own agents or workflows stay in the session (`general-review`, `cohabit_pr_review`, `llm-council`, `work-council`).
 - `doing-substantial-work`, `branch-visual-qa` and `video-qa` each say how they split the work.
 
 ## Agent Dispatch
 
-Pick the specialist that matches the work. → [`AGENTS-DISPATCH.md`](~/.agents/AGENTS-DISPATCH.md)
+No per-language agents: the session (or any subagent) loads the skill that matches the work. → [`AGENTS-DISPATCH.md`](~/.agents/AGENTS-DISPATCH.md)
 
-**Quick routing (same agent names in Claude and Codex):**
-- Ruby/Rails → `principal-rails-engineer` | React/TypeScript/CSS → `principal-frontend-engineer`
-- Backend/Postgres/API → `principal-backend-engineer` | Rust systems → `principal-rust-engineer`
+**Stack skills (Claude and Codex):**
+- Ruby/Rails → `rails-engineering` | React/Stimulus/TypeScript/CSS → `frontend-engineering`
+- Backend/Postgres/API/queues → `backend-engineering` | Rust → `rust-engineering` | CI/CD, infra, SLOs → `devops-sre`
 - Claude Code only: code search → `Explore` | planning → `Plan` | Claude Code questions → `claude-code-guide`
 - Claude and Codex together: `llm-council`, `work-council`, or a second opinion from the other model (see AGENTS-DISPATCH.md)
 

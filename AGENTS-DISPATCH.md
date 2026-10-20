@@ -1,21 +1,22 @@
 # Agent Dispatch Policy
 
-Pick the specialist that matches the work. A generic agent is a last resort, not the default. This applies in Claude Code and in Codex: the specialists below are defined once in `~/.agents/agents/` and installed into both, under the same names.
+There are no per-language agents. Expertise lives in skills, which load only when the work needs them, in the session or in any subagent. This applies in Claude Code and in Codex: skills live once in `~/.agents/skills/` and both see them.
 
 **Blocked:** do not use `ruflo-*` subagent types or claude-flow (`npx @claude-flow/cli@latest ...`); memory persists through the shared hub instead (`agents-hub memory`, see AGENTS.md).
 
-## Specialists (Claude and Codex)
+## Stack skills (Claude and Codex)
 
-| Task signal | Agent |
+| Task signal | Skill |
 |---|---|
-| Ruby/Rails code, ActiveRecord, migrations, service objects, ViewComponent, Hotwire/Turbo/Stimulus, RSpec, Rails upgrades | `principal-rails-engineer` |
-| React/Next.js, Stimulus, TypeScript, bundle/render perf, a11y, UI architecture, CSS/Tailwind | `principal-frontend-engineer` |
-| Service decomposition, API contracts, queue/job design, Postgres schema/indexing/sharding, observability, consistency models | `principal-backend-engineer` |
-| Rust systems, compilers, unsafe, FFI, performance-critical Rust, lifetimes/ABI decisions | `principal-rust-engineer` |
+| Ruby/Rails code, ActiveRecord, migrations, service objects, ViewComponent, Hotwire/Turbo/Stimulus wiring, RSpec, gems, Rails upgrades | `rails-engineering` |
+| React/Next.js, Stimulus, TypeScript, CSS/Tailwind, accessibility, bundle and render performance, UI architecture | `frontend-engineering` |
+| Service boundaries, API contracts, jobs and queues, Postgres schema, indexes and query plans, caching, consistency, observability | `backend-engineering` |
+| Rust systems, unsafe, FFI, lifetimes, performance-critical Rust, compiler and runtime work (riven) | `rust-engineering` |
+| CI/CD, infrastructure as code, containers, deploy strategies, secrets, monitoring, SLOs, incidents | `devops-sre` |
+| Writing or trimming tests | `writing-specs` |
+| iOS or Android UI | `mobile-design` |
 
-Other shared agents (`engineering-*`, `testing-api-tester`) cover narrower roles; their descriptions say when.
-
-How to start one: in Claude Code, the Agent tool with that agent's name; in Codex, a sub-agent with that agent's name.
+A change across stacks loads each matching skill. A subagent you start gets the skill names in its brief.
 
 ## Claude Code only
 
@@ -26,7 +27,7 @@ These are built into Claude Code. In Codex, do the same work directly or with a 
 | Locating code, "where is X", grep across repo (3 lookups or fewer: do it yourself) | `Explore` |
 | Designing an implementation plan before touching code | `Plan` |
 | Claude Code, Claude Agent SDK, or Anthropic API questions | `claude-code-guide` |
-| Genuinely cross-cutting research with no specialist owner | `general-purpose` |
+| Genuinely cross-cutting research no skill covers | `general-purpose` |
 
 ## Working across Claude and Codex
 
@@ -37,14 +38,10 @@ These are built into Claude Code. In Codex, do the same work directly or with a 
 
 ## How to Apply
 
-**Detect stack from repo, not memory.** `Gemfile` / `*.rb` → `principal-rails-engineer`. `Cargo.toml` / `*.rs` → `principal-rust-engineer`. `package.json` with React/Next → `principal-frontend-engineer`. Service-shaped repos → `principal-backend-engineer`.
+**Detect stack from repo, not memory.** `Gemfile` / `*.rb` → `rails-engineering`. `Cargo.toml` / `*.rs` → `rust-engineering`. `package.json` with React/Next, or Stimulus controllers → `frontend-engineering`. Service-shaped repos → `backend-engineering`. Pipelines and infrastructure → `devops-sre`.
 
-**Frontend work in a server-rendered repo** still routes to `principal-frontend-engineer` for JS/Stimulus/ViewComponent/CSS specifics. Pair it with the server-side specialist rather than collapsing both into a generic agent.
-
-**Parallel dispatch:** if a task spans backend and frontend, send two specialists in parallel, not one generalist. Give each a disjoint set of files.
+**Parallel work:** a build split into parallel parts follows `doing-substantial-work` step 3; each part is a general-purpose subagent told which stack skill to load.
 
 **Code review:** use the `general-review` skill (rule 44). It always spawns a fresh lead agent to do the review, so the reviewer never wrote or discussed the change; the invoking session only coordinates.
 
-**Don't fall back to a generic agent because the prompt feels small.** Small Rails tweaks still go to `principal-rails-engineer`; it knows the global rules 1 to 16 and 38 to 40 cold.
-
-**If unsure between two specialists,** state the choice in one line and proceed. Don't ask the user to triage routing.
+**If unsure which skill applies,** load both. Don't ask the user to triage routing.
