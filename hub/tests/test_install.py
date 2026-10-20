@@ -941,5 +941,14 @@ class HistoryTests(HubCase):
         self.assertEqual((self.hub / 'memory/scopes/-q/a.md').read_text(), 'fact')
 
 
+class TempHomeTest(unittest.TestCase):
+    def test_a_temp_home_set_through_HOME_never_touches_the_real_scheduler(self):
+        with tempfile.TemporaryDirectory() as home:
+            run = subprocess.run([sys.executable, str(CHECKOUT / 'install.py'), '--dry-run', '--home', home],
+                                 env={**os.environ, 'HOME': home}, capture_output=True, text=True)
+        self.assertNotIn('launchd', run.stdout + run.stderr)
+        self.assertIn('Would change', run.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -20,13 +20,15 @@ Project rules may add project-specific instructions via a project-level `CLAUDE.
 
 The `related-tests` Stop hook runs only the tests for files changed in the finished turn. On Claude, `related-tests-snapshot` (UserPromptSubmit) records the tracked files as a git tree object through a throwaway index (`git add -u`, so untracked files never become git objects) and the untracked, not-ignored files as path, size and mtime (above 20,000 only their count) when the turn starts; a prompt queued mid-turn keeps the pending snapshot, and snapshots older than a day are deleted. At Stop the turn's files are the tracked diff from that tree plus untracked files that are new, changed or gone, so shell edits, new files and deleted files count. Files another writer changes in the same working tree during the turn are tested too. While a background agent or workflow from the turn has not sent a task notification (matched by its agent or task id, any status), Stop waits for a later Stop; a launch older than 45 minutes stops holding the turn. Without a usable snapshot (Codex, first turn after install, a snapshot past the transcript's end) it falls back to the files the transcript shows this session edited since the last prompt; above the untracked cap, untracked files count only when the transcript shows them edited. Failing tests block the stop once with the output tail and mark the snapshot blocked, so the next prompt starts a fresh one. Results are cached by file hashes in `~/.agents/tmp/test-cache/related-tests/`, snapshots in its `snapshots/` folder.
 
+The `done-check` Stop hook (Claude and Codex) guards completion and correctness once a task is finished. A script decides when: the turn ran `git commit`, or it edited files and its last message says the work is done; questions, work in progress and turns with a background task still running end untouched. It then blocks the stop once and has the agent start a fresh checker with the user's request, the change and the check commands; the checker reports COMPLETION (each part of the request done or missing) and CORRECTNESS (checks rerun, diff bugs, claims the diff contradicts, out of scope changes). The agent fixes what it reports and ends with `DONE-CHECK: PASS` or `DONE-CHECK: OPEN: <what>`, which you read in the chat; there is no desktop notification. The same change (HEAD plus working tree) is never checked twice, so it cannot loop. State is in `~/.agents/tmp/done-check/`.
+
 Without a project file it uses conventions: Ruby `app|lib/**/x.rb` to `x_spec.rb` / `x_test.rb`, JS/TS `x.ts` to `x.test.*`, `x.spec.*`, `__tests__/x.*`, Python `a/b.py` to `tests/test_b.py`, `a/test_b.py`. A repo can override both mapping and runner:
 
 ```toml
 # <repo>/.agents/project.toml
 [tests]
 command = "bin/rails test {files}"   # {files}: matched test paths, shell-quoted
-timeout = 300                        # seconds for the whole run
+timeout = 60                         # seconds for the whole run; matches the default
 [tests.map]
 "app/**/*.rb" = ["test/**/{stem}_test.rb"]   # {stem}: changed file name without extension
 ```

@@ -70,8 +70,8 @@ separate = ["~/.claude.json", ".claude.json"]
 memory = "native auto-memory; projects/<key>/memory link into memory/scopes, created by the SessionStart hook"
 hooks = [
   { name = "related-tests-snapshot", event = "UserPromptSubmit", kind = "command", matcher = "", timeout = 60 },
-  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 300 },
-  { name = "completion-check", event = "Stop", kind = "prompt", matcher = "" },
+  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 75 },
+  { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
 ]
@@ -97,8 +97,8 @@ shared_config = [
 ]
 memory = "agents-hub memory show / add (instructions in AGENTS.md)"
 hooks = [
-  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 300 },
-  { name = "completion-check", event = "Stop", kind = "command", matcher = "", timeout = 240 },
+  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 75 },
+  { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
 ]
@@ -155,6 +155,16 @@ claude = [
   "Bash(npx vitest:*)", "Bash(npx jest:*)", "Bash(npm test:*)", "Bash(python3 -m unittest:*)",
   "Bash(python3 -m pytest:*)", "Bash(node --test:*)", "Bash(node --check:*)",
   "Bash(agents-hub search:*)", "Bash(agents-hub memory show:*)", "Bash(agents-hub recent:*)",
+  "Bash(agents-hub memory add:*)", "Bash(agents-hub read:*)",
+  "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)", "Bash(rg:*)",
+  "Bash(pwd)", "Bash(which:*)", "Bash(diff:*)",
+  "Bash(git worktree list:*)", "Bash(git worktree add:*)", "Bash(git switch:*)",
+  "Bash(git stash list:*)", "Bash(git branch:*)", "Bash(git remote -v)",
+  "Bash(gh pr status:*)", "Bash(gh issue view:*)",
+  "Bash(bin/rails generate:*)", "Bash(bin/rails g:*)", "Bash(bin/rails db:migrate)",
+  "Bash(bin/rails db:migrate:status)", "Bash(bin/rails db:rollback)", "Bash(bin/rails routes:*)",
+  "Bash(bin/rails test:*)", "Bash(bin/rspec:*)", "Bash(bundle install:*)",
+  "Bash(yarn install:*)", "Bash(yarn build:*)", "Bash(yarn test:*)", "Bash(yarn lint:*)",
 ]
 
 # Explicit scope sharing. Without an alias, a path only ever uses its own scope.

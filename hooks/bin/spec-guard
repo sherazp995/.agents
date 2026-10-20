@@ -9,7 +9,7 @@ edit touches a test file it:
     script can detect for certain,
     and reports breaks back to the agent (answer: {"decision": "deny", "reason": ...}).
 Judgment rules (minimal coverage, one scenario per example, layer choice, watching each test
-fail) stay with the skill and the completion-check Stop hook.
+fail) stay with the skill.
 """
 from collections import Counter
 import json

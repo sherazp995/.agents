@@ -27,6 +27,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
 import shlex
 import shutil
 import subprocess
@@ -908,7 +909,10 @@ def main():
                         help='Install into another home (testing); skips scheduler and backup settings')
     args = parser.parse_args()
     home = args.home.expanduser().resolve()
-    installer = Installer(home, args.dry_run, host=home == Path.home().resolve(), running_ok=args.running_ok)
+    # The account's real home, not $HOME: a test run with HOME pointed at a temp folder must not
+    # load its launchd job, systemd timer or crontab into this user's real scheduler.
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    installer = Installer(home, args.dry_run, host=home == real_home, running_ok=args.running_ok)
     installer.run()
     verb = 'Would change' if args.dry_run else 'Changed'
     print(f'{verb}: {len(installer.changes)}' + ''.join(f'\n  - {c}' for c in installer.changes))

@@ -26,12 +26,12 @@ Your global rules are split across focused files to save context. Load each when
 
 - Project instructions (`CLAUDE.md`, `AGENTS.md`, and rule files they reference) override these global rules. Read them before changing code.
 - Before substantial code changes, show the plan and get the user's approval. After approval, build, review and fix run without check-ins unless something changes the plan.
-- Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill. It is the single entry point for building features and fixes, and it decides when risky work escalates to `work-council` (plan critique and best-of-two build). It takes precedence over any plugin skill that also claims build tasks. Asking for `work-council` by name forces that escalation.
+- Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill. It is the single entry point for building features and fixes, and it runs in one agent with check commands. It takes precedence over any plugin skill that also claims build tasks. `work-council`, `llm-council` and the multi-agent build workflow run only when the user asks for them by name.
 
 ## Keep the Chat Session Clean
 
 - The chat session coordinates: plan, decisions, questions to the user, short results.
-- Subagents do the heavy lifting: code search, building, test runs, browser QA, video recording.
+- The session builds and runs checks itself. A subagent is for a wide search, or a read that would flood the chat; never to get unstuck.
 - Each subagent returns only a short result: files changed, commands with exit codes, evidence paths, what it could not do.
 - Subagents cannot start subagents. When a step needs several agents, the session runs it as one workflow (Claude Code: the Workflow tool; Codex: the `workflow-runner` skill). A skill that says to run a workflow is the opt-in.
 - Steps that start their own agents or workflows stay in the session (`general-review`, `cohabit_pr_review`, `llm-council`, `work-council`).

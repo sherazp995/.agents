@@ -37,7 +37,7 @@ snapshot blocked. No changes, no related tests, a timeout or a hook already send
 Mapping: a repo file `.agents/project.toml` wins when it has a [tests] table:
     [tests]
     command = "bin/rails test {files}"    # {files}: the matched test paths, shell-quoted
-    timeout = 300                         # seconds for the whole run
+    timeout = 60                          # seconds for the whole run
     [tests.map]
     "app/**/*.rb" = ["test/**/{stem}_test.rb"]   # {stem}: changed file name without extension
 Otherwise conventions apply (a changed test file maps to itself):
@@ -67,7 +67,7 @@ import tomllib
 
 HUB = Path(__file__).resolve().parents[2]
 CACHE = Path(os.environ.get('RELATED_TESTS_CACHE') or HUB / 'tmp' / 'test-cache' / 'related-tests')  # git-ignored
-DEFAULT_TIMEOUT = 270  # below the registry timeout so the hook answers before the host kills it
+DEFAULT_TIMEOUT = 60  # below the registry timeout so the hook answers before the host kills it
 TAIL_LINES = 60
 
 TEST_NAME = re.compile(r'(_spec|_test)\.rb$|^test_.*\.py$|_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$')
@@ -84,6 +84,7 @@ SNAPSHOT_MAX_AGE = 24 * 3600  # seconds
 # Records that can neither edit, start or end a turn, launch or finish a background task are skipped unparsed.
 TRANSCRIPT_WORDS = ('tool_use', 'File: ', 'Move to: ', '"user', '"assistant', '_call', 'agent_message',
                     'task_complete', 'turn_aborted', 'task-notification', ' launched')
+CODEX_INJECTED = ('# AGENTS.md instructions', '<environment_context>', '<user_instructions>', '<hook_prompt')
 LOCKFILES = ('Gemfile.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock',
              'poetry.lock', 'uv.lock', 'Pipfile.lock', 'requirements.txt', 'Cargo.lock', 'go.sum')
 
@@ -277,6 +278,12 @@ def is_user_prompt(record):
     payload = record.get('payload')
     if record.get('type') == 'event_msg' and isinstance(payload, dict):  # Codex
         return payload.get('type') == 'user_message'
+    if record.get('type') == 'response_item' and isinstance(payload, dict):  # Codex app
+        if payload.get('type') != 'message' or payload.get('role') != 'user':
+            return False
+        # Codex also logs injected context and hook continuations as user messages; they start no turn.
+        text = ' '.join(part.get('text') or '' for part in payload.get('content') or [] if isinstance(part, dict))
+        return not text.lstrip().startswith(CODEX_INJECTED)
     if record.get('type') != 'user' or record.get('isMeta'):  # Claude
         return False
     texts = message_texts(record)

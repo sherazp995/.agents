@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Stop hook: when a task is finished, have a fresh checker confirm it is complete and correct, once.
+
+A turn counts as finished when it committed (a `git commit` shell command and a new HEAD), or when it
+edited files and its last message says the work is done. Any other turn ends untouched: questions,
+exploration, work in progress, and turns with a background agent or workflow still running.
+
+On a finished turn the hook blocks the Stop once and tells the agent to start a fresh checker with no
+context. The checker reports COMPLETION (every part of the user's request done) and CORRECTNESS (the
+check commands pass, the diff does what was claimed, nothing out of scope). The agent fixes what it
+reports and ends with `DONE-CHECK: PASS` or `DONE-CHECK: OPEN: <what is open>`, which the user reads
+in the chat. At that next Stop the hook lets the turn end. The same change (HEAD plus working tree) is
+never checked twice, so the check cannot loop.
+
+State lives in tmp/done-check/ of this hub (git-ignored).
+"""
+import hashlib
+from importlib.machinery import SourceFileLoader
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+HUB = Path(__file__).resolve().parents[2]
+STATE = HUB / 'tmp' / 'done-check'
+# Reused for its transcript readers, which understand both Claude and Codex records.
+turns = SourceFileLoader('related_tests', str(Path(__file__).with_name('related-tests'))).load_module()
+
+COMMIT = re.compile(r'\bgit\s+(?:-c\s+\S+\s+)*commit\b')
+CD = re.compile(r'(?:^|&&|;|\|\|)\s*cd\s+("[^"]*"|\'[^\']*\'|[^\s;&|]+)')
+DONE_CLAIM = re.compile(r'\b(?:done|complete[ds]?|finished|implemented|fixed|all (?:checks|tests|specs) pass(?:ed)?'
+                        r'|ready for (?:review|you))\b', re.I)
+NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\byet to be)\s+(?:\w+\s+)?$"
+                     r"|\b(?:once|when|after|until|if|before)\b[^.!?\n]*$", re.I)  # or a future clause
+RESULT = re.compile(r'^DONE-CHECK:\s*(?:PASS|OPEN)\b.*$', re.M)
+SHELL_TOOLS = ('Bash',)
+REQUEST_LIMIT = 2000
+
+
+def shell_commands(record):
+    """(command, workdir) for each shell command one transcript record ran: Claude Bash calls (no
+    workdir) and Codex exec calls, whose command may be an argv list and may name its own workdir."""
+    content = (record.get('message') or {}).get('content')
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name') in SHELL_TOOLS:
+            yield str((block.get('input') or {}).get('command') or ''), None
+    payload = record.get('payload')
+    if isinstance(payload, dict) and payload.get('type') == 'function_call':
+        try:
+            arguments = json.loads(payload.get('arguments') or '{}')
+        except (TypeError, ValueError):
+            arguments = {}
+        arguments = arguments if isinstance(arguments, dict) else {}
+        command = arguments.get('cmd', arguments.get('command', ''))
+        yield ' '.join(turns.strings(command)), arguments.get('workdir')
+
+
+def claims_done(message):
+    """True when the message says the work is done, ignoring negations ("not done yet") and the
+    DONE-CHECK result line itself."""
+    message = RESULT.sub('', message or '')
+    return any(not NEGATED.search(message[max(0, m.start() - 30):m.start()])
+               and not message[m.end():m.end() + 1] == '?' for m in DONE_CLAIM.finditer(message))
+
+
+def assistant_text(record):
+    """The text an assistant record says to the user, or None."""
+    if record.get('type') == 'assistant':
+        content = (record.get('message') or {}).get('content')
+        texts = [b.get('text') or '' for b in content if isinstance(b, dict) and b.get('type') == 'text'] \
+            if isinstance(content, list) else []
+        return '\n'.join(texts) or None
+    payload = record.get('payload')
+    if isinstance(payload, dict):
+        if record.get('type') == 'event_msg' and payload.get('type') == 'agent_message':
+            return payload.get('message')
+        if record.get('type') == 'response_item' and payload.get('type') == 'message' \
+                and payload.get('role') == 'assistant':
+            return '\n'.join(part.get('text') or '' for part in payload.get('content') or []
+                             if isinstance(part, dict))
+    return None
+
+
+def prompt_text(record):
+    payload = record.get('payload')
+    if isinstance(payload, dict):
+        if payload.get('type') == 'message':
+            return '\n'.join(part.get('text') or '' for part in payload.get('content') or []
+                             if isinstance(part, dict))
+        return payload.get('message') or ''
+    return '\n'.join(turns.message_texts(record) or [])
+
+
+def commit_dir(command, cwd):
+    """The folder a shell command commits in: the last `cd` before its `git commit`, else cwd.
+    None when the command does not commit."""
+    commit = COMMIT.search(command)
+    if not commit:
+        return None
+    cds = [match.group(1).strip('\'"') for match in CD.finditer(command) if match.start() < commit.start()]
+    return Path(cwd) / Path(cds[-1]).expanduser() if cds else Path(cwd)
+
+
+def read_turn(transcript_path, cwd):
+    """{'request', 'edited', 'committed', 'work_dir', 'last_message', 'pending'} for the current turn,
+    which starts at the last prompt the user typed, or None without a readable transcript. work_dir is
+    where the turn last committed, else the folder of the file it last edited, else None."""
+    turn = None
+    launched, finished = {}, set()
+    try:
+        with open(transcript_path or '', encoding='utf-8', errors='replace') as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if turns.is_user_prompt(record):
+                    turn = {'request': prompt_text(record), 'edited': False, 'committed': False,
+                            'last_message': '', 'commit_dir': None, 'edit_dir': None}
+                    launched = {}
+                    continue
+                if turn is None:
+                    continue
+                for path in filter(None, turns.record_edits(record)):
+                    turn['edited'], turn['edit_dir'] = True, (Path(cwd) / Path(path).expanduser()).parent
+                for folder in filter(None, (commit_dir(c, workdir or cwd) for c, workdir in shell_commands(record))):
+                    turn['committed'], turn['commit_dir'] = True, folder
+                text = assistant_text(record)
+                if text:
+                    turn['last_message'] = text
+                launched.update(dict.fromkeys(turns.background_launches(record), turns.record_time(record)))
+                finished.update(turns.finished_tasks(record))
+    except OSError:
+        return None
+    if turn is not None:
+        turn['pending'] = bool(turns.still_running(launched, finished))
+        commit, edit = turn.pop('commit_dir'), turn.pop('edit_dir')
+        turn['work_dir'] = commit or edit
+    return turn
+
+
+def change_key(root):
+    """HEAD plus a hash of the uncommitted change: the same work gives the same key."""
+    head = (turns.git(root, 'rev-parse', 'HEAD') or '').strip()
+    diff = turns.git(root, 'diff', 'HEAD') or ''
+    untracked = '\0'.join(turns.untracked_names(root) or [])
+    return head, hashlib.sha256(f'{head}\0{diff}\0{untracked}'.encode(errors='replace')).hexdigest()
+
+
+def state_file(session_id):
+    key = hashlib.sha256(session_id.encode()).hexdigest()[:32]
+    return STATE / f'{key}.json'
+
+
+def load_state(file):
+    try:
+        data = json.loads(file.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(file, data):
+    file.parent.mkdir(parents=True, exist_ok=True)
+    partial = file.with_suffix(f'.{os.getpid()}.tmp')
+    partial.write_text(json.dumps(data))
+    partial.replace(file)
+
+
+def check_instructions(turn, root, committed_head):
+    change = f'`git show {committed_head}`' if committed_head else '`git diff HEAD` plus any new untracked files'
+    change += f' in {root}'
+    request = turn['request'].strip()[:REQUEST_LIMIT]
+    return f'''DONE-CHECK: this task looks finished. Before it counts as done, verify it once with a fresh checker.
+
+Start one fresh subagent (Claude Code: the Agent tool, general-purpose; Codex: a new subagent, or if you have none, redo the check yourself from scratch). Give it only:
+1. The user's request, verbatim, plus any plan the user approved earlier in this conversation. The latest prompt was:
+<<<
+{request}
+>>>
+2. The change: {change}.
+3. The check commands from the plan (specs, linters, migrations), if any.
+
+The checker is read-only and reports:
+- COMPLETION: each part of the request as DONE or MISSING, with file:line evidence.
+- CORRECTNESS: each check command rerun with its exit code; bugs or wrong files in the full diff; any claim the diff contradicts; changes no request or plan covers.
+
+Then fix every MISSING item and every real correctness finding, rerun the affected checks, and keep the commit rules (amend when git-guard says so). Do not ask the user anything; this check runs once.
+End your final message with exactly one line:
+DONE-CHECK: PASS
+or
+DONE-CHECK: OPEN: <what is still open, one line>'''
+
+
+def verdict(event):
+    cwd = event.get('cwd') or os.getcwd()
+    if not event.get('session_id'):
+        return None
+    turn = read_turn(event.get('transcript_path'), cwd)
+    if turn is None or turn['pending']:
+        return None
+    file = state_file(event['session_id'])
+    state = load_state(file)
+    request = hashlib.sha256(turn['request'].encode(errors='replace')).hexdigest()
+    # The checker round ends with a DONE-CHECK line; matching the request as well covers a round whose
+    # continuation an agent logs as a new prompt (Codex) or that ended without the line.
+    pending = state.get('pending') and (state.get('request') == request or RESULT.search(turn['last_message']))
+    # The repo the work happened in, which is not always the session's folder.
+    root = Path(state['root']) if pending else (turn['work_dir'] and turns.repo_root(turn['work_dir'])) or turns.repo_root(cwd)
+    if not root:
+        return None
+    head, key = change_key(root)
+
+    if pending:
+        # The checker round this hook asked for has ended: let the turn end.
+        save_state(file, {'root': str(root), 'checked': [state['pending'], key]})
+        return None
+
+    if state.get('root') == str(root) and key in state.get('checked', []):
+        return None
+    committed = turn['committed'] and bool(head)
+    claimed = turn['edited'] and claims_done(turn['last_message'])
+    if not (committed or claimed):
+        return None
+    # A pending check from an earlier prompt was abandoned (the user interrupted): it is simply replaced.
+    checked = state.get('checked', [])[-5:] if state.get('root') == str(root) else []
+    save_state(file, {'pending': key, 'request': request, 'committed': bool(committed), 'root': str(root),
+                      'checked': checked})
+    return {'decision': 'deny', 'reason': check_instructions(turn, root, head if committed else None)}
+
+
+if __name__ == '__main__':
+    result = verdict(json.loads(sys.stdin.read() or '{}'))
+    if result:
+        print(json.dumps(result))

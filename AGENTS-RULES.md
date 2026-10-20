@@ -163,7 +163,7 @@ Check content type, size, and filename. Don't trust client MIME types alone.
 ## Testing
 
 ### 30 to 34, 49 to 53. Follow the `writing-specs` skill
-The rules live in the `writing-specs` skill (`~/.agents/skills/writing-specs/SKILL.md`), which keeps their numbers. Load it before writing, changing or reviewing any test. In Claude Code and Codex the `spec-guard` hook delivers it the first time a session edits a test file and reports the breaks a script can detect after every test edit; the judgment rules no script can detect are yours to apply (the completion-check hook only flags new logic with no test).
+The rules live in the `writing-specs` skill (`~/.agents/skills/writing-specs/SKILL.md`), which keeps their numbers. Load it before writing, changing or reviewing any test. In Claude Code and Codex the `spec-guard` hook delivers it the first time a session edits a test file and reports the breaks a script can detect after every test edit; the judgment rules no script can detect are yours to apply.
 
 ## General
 
@@ -223,8 +223,8 @@ Full integration runs happen once per phase in a dedicated task, not in every in
 ### 43. Run git from inside the repo, never with `git -C <path>`
 `cd` into the repo once, then run git there. (The `git-guard` hook enforces this in Claude Code and Codex: it denies `git -C` with the same command rewritten as `cd <dir> && git ...`, so the agent reruns it without asking the user.)
 
-### 44. Review every code change with the Unified Review Protocol
-No code change is "done" until reviewed under the protocol below with verdict **PASS**: every introduced blocker resolved, every introduced high and medium fixed. The review runs through the `general-review` skill, done by an agent that did not write the change; an inline self-review is only general-review's labeled fallback.
+### 44. Review every code change; the full protocol runs on request
+Every code change gets a self-review of its full diff against the plan before it is "done": scope, dead code, missed callers, tests. The full protocol below (the `general-review` skill, an agent that did not write the change, verdict **PASS** with every introduced blocker, high and medium fixed) runs when the user asks for a review or before a PR is opened.
 
 Review feedback from a person, Copilot or another agent is a claim to verify against the code before acting. When it is wrong, push back with the evidence; never apply a suggestion only because a reviewer made it.
 
