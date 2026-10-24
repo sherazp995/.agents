@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 
 const CLAUDE = process.env.WORKFLOW_RUNNER_CLAUDE || 'claude'
 const AGENT_TIMEOUT_MS = Number(process.env.WORKFLOW_RUNNER_TIMEOUT_MS || 30 * 60 * 1000)
+const TERMINATION_GRACE_MS = 1000
 const MAX_CONCURRENT = Math.max(1, Math.min(16, cpus().length - 2))
 const MAX_AGENTS = 1000
 
@@ -80,19 +81,78 @@ const makeLimiter = (limit) => {
   }
 }
 
-const runClaude = (prompt, cliArgs, cwd) => new Promise((done) => {
-  const child = spawn(CLAUDE, cliArgs, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+// Each child leads its own process group, so cancellation reaches its descendants.
+const activeChildren = new Set()
+let interruptedBy = null
+const forwardSignal = (signal) => {
+  interruptedBy = signal
+  process.exitCode = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 }[signal]
+  for (const stop of activeChildren) stop(signal)
+}
+const onInterrupt = () => forwardSignal('SIGINT')
+const onTerminate = () => forwardSignal('SIGTERM')
+const onHangup = () => forwardSignal('SIGHUP')
+
+const runClaude = (prompt, cliArgs, cwd, timeoutMs, graceMs) => new Promise((done) => {
+  const child = spawn(CLAUDE, cliArgs, { cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   let stdout = ''
   let stderr = ''
-  const timer = setTimeout(() => child.kill('SIGTERM'), AGENT_TIMEOUT_MS)
+  let stoppedBy = null
+  let settled = false
+  let killTimer
+  let inputError = null
+  const signalGroup = (signal) => {
+    if (!child.pid) return
+    try { process.kill(-child.pid, signal) } catch (error) {
+      if (error.code !== 'ESRCH') stderr += `\nCould not send ${signal}: ${error.message}`
+    }
+  }
+  const finish = (code, signal = null) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    clearTimeout(killTimer)
+    if (stoppedBy) signalGroup('SIGKILL')
+    child.stdin.destroy()
+    child.stdout.destroy()
+    child.stderr.destroy()
+    activeChildren.delete(stop)
+    if (activeChildren.size === 0) {
+      process.removeListener('SIGINT', onInterrupt)
+      process.removeListener('SIGTERM', onTerminate)
+      process.removeListener('SIGHUP', onHangup)
+    }
+    done({ code, signal, stdout, stderr, stoppedBy, inputError })
+  }
+  const stop = (reason) => {
+    if (stoppedBy || settled) return
+    stoppedBy = reason
+    signalGroup(reason === 'timeout' ? 'SIGTERM' : reason)
+    killTimer = setTimeout(() => {
+      signalGroup('SIGKILL')
+      // A descendant can retain inherited pipes even after the child exits.
+      finish(null, 'SIGKILL')
+    }, graceMs)
+  }
+  if (activeChildren.size === 0) {
+    process.on('SIGINT', onInterrupt)
+    process.on('SIGTERM', onTerminate)
+    process.on('SIGHUP', onHangup)
+  }
+  activeChildren.add(stop)
+  const timer = setTimeout(() => stop('timeout'), timeoutMs)
   child.stdout.on('data', (chunk) => { stdout += chunk })
   child.stderr.on('data', (chunk) => { stderr += chunk })
-  child.on('error', (error) => { clearTimeout(timer); done({ code: -1, stdout, stderr: String(error) }) })
-  child.on('close', (code) => { clearTimeout(timer); done({ code, stdout, stderr }) })
+  child.stdin.on('error', (error) => { inputError = error.message })
+  child.on('error', (error) => { stderr += String(error); finish(-1) })
+  child.on('close', finish)
   child.stdin.end(prompt)
 })
 
-export const createRuntime = ({ repoRoot, runId, log = (m) => process.stderr.write(`${m}\n`) }) => {
+export const createRuntime = ({ repoRoot, runId, log = (m) => process.stderr.write(`${m}\n`), timeoutMs = AGENT_TIMEOUT_MS, graceMs = TERMINATION_GRACE_MS }) => {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(graceMs) || graceMs <= 0) {
+    throw new Error('agent timeout and termination grace must be positive finite milliseconds')
+  }
   const limit = makeLimiter(MAX_CONCURRENT)
   let agentCount = 0
   let worktreeCount = 0
@@ -121,21 +181,23 @@ export const createRuntime = ({ repoRoot, runId, log = (m) => process.stderr.wri
   }
 
   const agent = (prompt, opts = {}) => limit(async () => {
+    if (interruptedBy) return null
     agentCount += 1
     if (agentCount > MAX_AGENTS) throw new Error(`more than ${MAX_AGENTS} agents in one run`)
     const label = opts.label ?? `agent-${agentCount}`
     const wt = opts.isolation === 'worktree' ? addWorktree() : null
     const cliArgs = ['-p', '--output-format', 'json', '--permission-mode', permissionMode(opts)]
+    if (opts.agentType && !['Plan', 'general-purpose'].includes(opts.agentType)) cliArgs.push('--agent', opts.agentType)
     if (opts.model) cliArgs.push('--model', opts.model)
     if (opts.effort) cliArgs.push('--effort', opts.effort)
     if (opts.schema) cliArgs.push('--json-schema', JSON.stringify(opts.schema))
     log(`[${opts.phase ?? currentPhase}] ${label}: started`)
     try {
-      const { code, stdout, stderr } = await runClaude(prompt, cliArgs, wt?.path ?? repoRoot)
+      const { code, signal, stdout, stderr, stoppedBy, inputError } = await runClaude(prompt, cliArgs, wt?.path ?? repoRoot, timeoutMs, graceMs)
       let reply = null
       try { reply = JSON.parse(stdout) } catch { reply = null }
-      if (code !== 0 || !reply || reply.is_error) {
-        log(`[${opts.phase ?? currentPhase}] ${label}: failed (exit ${code}) ${(reply?.result ?? stderr).slice(0, 300)}`)
+      if (stoppedBy || inputError || code !== 0 || !reply || reply.is_error) {
+        log(`[${opts.phase ?? currentPhase}] ${label}: failed (${stoppedBy === 'timeout' ? `timed out after ${timeoutMs}ms` : stoppedBy ? `interrupted by ${stoppedBy}` : signal ? `signal ${signal}` : `exit ${code}`}) ${String(inputError ?? reply?.result ?? stderr).slice(0, 300)}`)
         return null
       }
       log(`[${opts.phase ?? currentPhase}] ${label}: done`)

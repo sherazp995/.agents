@@ -55,6 +55,15 @@ Apply the core prompt plus these standards. Ask each one of every meaningful cha
    - If related updates can leave state half-applied, push for a more atomic structure.
    - Do not over-index on micro-optimizations, but do flag avoidable orchestration complexity that makes the implementation more brittle.
 
+9. **Do not add code debt.**
+   - Code debt here means non-generic code that a repo has to keep in sync by hand. Flag a change that adds any of:
+     - a name table or registry keyed on names declared somewhere else (method, type, symbol or route names), or a new entry in such a list;
+     - a special case keyed on a type, method or symbol name string (`if name == "call"`, `match name.as_str()` over domain names) where a typed marker, a declaration or the data itself could carry the decision;
+     - the same rule implemented again in a parallel stage, backend, binary or service instead of one shared place;
+     - a string protocol two stages must match by hand (a synthesized name one stage emits and another parses or compares).
+   - Find the repo's own debt record before judging, the same way in every repo: read the project instruction files (`CLAUDE.md`, `AGENTS.md`, and the files they link) for removed or forbidden patterns, then search the tree for a code-debt audit, a TODO or decisions file and ADRs (`rg -il "code.debt|tech.debt|non-generic|hardcod" docs *.md`), and skim recent commit subjects for removals (`git log --oneline -30`). Record in the verification log which files you used, or that the repo has none. A change that brings back a pattern the repo catalogued or removed in its recent history, or grows a list the repo marks as debt, is a regression even when it works.
+   - **Presumptive:** the PR adds a name-keyed table or special case, duplicates a rule another stage already owns, or reintroduces a debt pattern the repo has catalogued or removed.
+
 ## Preferred remedies
 
 When you identify a code-quality problem, prefer suggestions like:
@@ -66,6 +75,7 @@ When you identify a code-quality problem, prefer suggestions like:
 - Replace condition chains with a typed model or explicit dispatcher, and make type boundaries more explicit so the control flow gets simpler.
 - Separate orchestration from business logic.
 - Reuse the existing canonical helper instead of introducing a near-duplicate.
+- Replace a name table or name-keyed special case with one generic mechanism: derive the decision from the declaration, a typed marker or the data, and route every stage through one shared rule.
 - Parallelize independent work when that also simplifies the orchestration, and restructure related updates into a more atomic flow when partial state would be harder to reason about.
 
 ## Priorities

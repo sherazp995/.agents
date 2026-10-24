@@ -1,5 +1,5 @@
 // Tests run-workflow.mjs against a fake `claude`. Run: node --test tests/run-workflow.test.mjs
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +19,7 @@ const { allowedScript, createRuntime, loadScript } = await import(runner)
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 
-const setup = (t) => {
+const setup = (t, options = {}) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'wf-runner-')))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   git(dir, 'init', '-q', '-b', 'main')
@@ -30,7 +30,7 @@ const setup = (t) => {
   process.env.FAKE_CLAUDE_LOG = logFile
   t.after(() => rmSync(logFile, { force: true }))
   const logs = []
-  const rt = createRuntime({ repoRoot: dir, runId: 'wf_test1234-001', log: (m) => logs.push(m) })
+  const rt = createRuntime({ repoRoot: dir, runId: 'wf_test1234-001', log: (m) => logs.push(m), ...options })
   const calls = () => (existsSync(logFile) ? readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [])
   return { dir, rt, calls, logs }
 }
@@ -44,14 +44,16 @@ test('a Plan agent runs read-only and returns the structured output', async (t) 
   assert.equal(flag(call, '--permission-mode'), 'plan')
   assert.equal(flag(call, '--model'), 'opus')
   assert.ok(call.args.includes('--json-schema'))
+  assert.equal(call.args.includes('--agent'), false)
 })
 
 test('a default agent runs in auto mode and returns its text', async (t) => {
   const { rt, calls } = setup(t)
-  assert.equal(await rt.agent('relay', { model: 'haiku', effort: 'low' }), 'text from haiku')
+  assert.equal(await rt.agent('relay', { agentType: 'general-purpose', model: 'haiku', effort: 'low' }), 'text from haiku')
   const [call] = calls()
   assert.equal(flag(call, '--permission-mode'), 'auto')
   assert.equal(flag(call, '--effort'), 'low')
+  assert.equal(call.args.includes('--agent'), false)
 })
 
 test('a failed or erroring agent returns null', async (t) => {
@@ -151,3 +153,45 @@ test('second-opinion rejects a missing prompt without starting an agent', (t) =>
   assert.deepEqual(JSON.parse(stdout).result, { error: 'missing_prompt' })
   assert.equal(calls().length, 0)
 })
+
+// These cover role selection, forced termination, inherited pipes, and cancellation separately.
+test('specialist agents use the installed Claude agent definition', async (t) => {
+  const { rt, calls } = setup(t)
+  await rt.agent('review', { agentType: 'principal-rails-engineer' })
+  assert.equal(flag(calls()[0], '--agent'), 'principal-rails-engineer')
+})
+
+for (const prompt of ['IGNORE_TERM', 'DESCENDANT']) {
+  test(`timeout bounds ${prompt} and rejects premature success`, { timeout: 4000 }, async (t) => {
+    const { rt, logs } = setup(t, { timeoutMs: 300, graceMs: 100 })
+    assert.equal(await rt.agent(prompt), null)
+    assert.ok(logs.some((line) => line.includes('timed out after 300ms')))
+    assert.equal(logs.some((line) => line.endsWith(': done')), false)
+  })
+}
+
+test('early stdin closure returns null without an unhandled pipe error', async (t) => {
+  const { rt } = setup(t)
+  process.env.FAKE_CLOSE_STDIN = '1'
+  try { assert.equal(await rt.agent('x'.repeat(2 * 1024 * 1024)), null) }
+  finally { delete process.env.FAKE_CLOSE_STDIN }
+})
+
+for (const [signal, status] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
+test(`parent ${signal} forwards cancellation and exits unsuccessfully`, { timeout: 5000 }, async (t) => {
+  const { dir, calls } = setup(t)
+  const child = spawn(process.execPath, [runner, secondOpinionScript, '--args', JSON.stringify({ prompt: 'IGNORE_TERM' })], {
+    cwd: dir, stdio: ['ignore', 'pipe', 'pipe']
+  })
+  t.after(() => child.kill('SIGKILL'))
+  let stderr = ''
+  child.stderr.on('data', (data) => { stderr += data })
+  child.stdout.resume()
+  const closed = new Promise((resolve) => child.on('close', (code) => resolve(code)))
+  while (calls().length === 0) await new Promise((resolve) => setTimeout(resolve, 20))
+  child.kill(signal)
+  assert.equal(await closed, status)
+  assert.match(stderr, new RegExp(`interrupted by ${signal}`))
+})
+
+}

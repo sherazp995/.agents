@@ -39,7 +39,7 @@ Shell variables may not survive between commands, so write the literal `BASE` sh
 
 Run the engineering council on the plan: script `llm-council/council-workflow.js` in this skill's parent folder, run as described under **Hosts**, with args `{ "council": "engineering", "question": "Critique this plan for <task>. What is wrong, missing, risky, or more complex than needed? Plan:\n<plan text>" }`.
 
-The critique is a list of candidates. Check each against the code; adopt what holds, and note what you rejected and why. Then show the user the plan (intent, cards, checks, and what the critique changed) and wait for approval, unless `--auto` (or "don't wait for me"). This is the only plan approval on the escalated path: `doing-substantial-work` skips its own critic and pause for an escalated plan.
+The critique is a list of candidates. Check each against the code; adopt what holds, and note what you rejected and why. If the adopted changes alter the steps (not just wording), send the revised plan through `rethink`'s approval-only start (`{START}` = `approval-only`, lead.md pass 4) so both models approve the plan the user will see. Then show the user the plan (intent, cards, checks, and what the critique changed) and wait for approval, unless `--auto` (or "don't wait for me"). This is the only plan approval on the escalated path: `doing-substantial-work` skips its own critic and pause for an escalated plan.
 
 ## 3. Build best of two
 

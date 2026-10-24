@@ -17,6 +17,7 @@ Then evaluate:
 - Coupling and dependency direction.
 - Consistency with how the codebase exposes similar methods.
 - Backward compatibility of changed signatures for every other caller (grep them).
+- Code debt: a new name table or registry, a special case keyed on a type, method or symbol name string, a rule implemented again in a parallel stage or backend, or a pattern the repo's own debt record (audit, TODO, decisions file, project instructions) lists as removed or forbidden. Standard 9 in `~/.agents/skills/general-review/references/structural-standards.md`.
 
 For each issue, describe the idiomatic implementation in this codebase and point to an existing file as the pattern. Do not comment on line-level readability or correctness bugs. Report only issues this change introduces or builds on.
 

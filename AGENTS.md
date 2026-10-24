@@ -26,13 +26,14 @@ Your global rules are split across focused files to save context. Load each when
 
 - Project instructions (`CLAUDE.md`, `AGENTS.md`, and rule files they reference) override these global rules. Read them before changing code.
 - Every planning phase starts with the `interview-me` skill: one question at a time, each with a guess, until the user confirms the intent. Skip it only for mechanical asks or when the request already states outcome, user, success, constraint and out of scope.
+- Every plan (except one-line or mechanical changes) is then made with the `rethink` skill: a lead subagent builds one evidence packet, Claude and Codex draft blind in parallel, the lead merges one final plan, and both models must approve that exact plan (tier `fast` by default; `deep` adds cross-review rounds for risky plans; `small` uses one draft). The user sees its status; only a plan approved by both may be called approved (an unapproved or stale plan may still go to the user to waive). Its planners are leaf CLI processes started through `rethink/run-planner.sh`, the one allowed exception to "subagents cannot start subagents".
 - Before substantial code changes, show the plan and get the user's approval. After approval, build, review and fix run without check-ins unless something changes the plan.
 - Substantial work (more than one file, new behaviour, refactors, a bug that survived a fix): follow the `doing-substantial-work` skill. It is the single entry point for building features and fixes, and it runs in one lead agent with check commands, splitting the build into 2-6 parallel subagent parts only when the approved plan gives each part its own files. It takes precedence over any plugin skill that also claims build tasks. `work-council`, `llm-council` and the multi-agent build workflow run only when the user asks for them by name.
 
 ## Keep the Chat Session Clean
 
 - The chat session coordinates: plan, decisions, questions to the user, short results.
-- The session builds and runs checks itself. A subagent is for a wide search, a read that would flood the chat, or an approved parallel part of a `doing-substantial-work` build; never to get unstuck.
+- The session builds and runs checks itself. A subagent is for a wide search, a read that would flood the chat, an approved parallel part of a `doing-substantial-work` build, a step-check diff-only lens, or a `rethink` lead; never to get unstuck.
 - Each subagent returns only a short result: files changed, commands with exit codes, evidence paths, what it could not do.
 - Subagents cannot start subagents. When a step needs several agents, the session runs it as one workflow (Claude Code: the Workflow tool; Codex: the `workflow-runner` skill). A skill that says to run a workflow is the opt-in. The exception: the approved parallel parts of a `doing-substantial-work` build start as subagents directly from the session.
 - Steps that start their own agents or workflows stay in the session (`general-review`, `cohabit_pr_review`, `llm-council`, `work-council`).

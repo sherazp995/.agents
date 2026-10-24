@@ -18,7 +18,7 @@ Read [the structural standards](structural-standards.md) in full and apply its c
 
 | Structural situation | Severity when introduced |
 | --- | --- |
-| A presumptive structural problem from the standards: pushes a file past 1000 lines, adds ad-hoc branching that tangles an existing flow, scatters feature checks across shared code, adds an unnecessary wrapper or cast-heavy contract, duplicates a canonical helper, or puts logic in the wrong layer | high |
+| A presumptive structural problem from the standards: pushes a file past 1000 lines, adds ad-hoc branching that tangles an existing flow, scatters feature checks across shared code, adds an unnecessary wrapper or cast-heavy contract, duplicates a canonical helper, puts logic in the wrong layer, or adds code debt (a name-keyed table or special case, a rule duplicated across stages, a debt pattern the repo catalogued or removed) | high |
 | Missed code-judo simplification with a clear, behavior-preserving path | medium |
 | Thin wrapper, needless optionality or cast, legibility harm with concrete cost | medium |
 | Naming or cosmetic polish | low |
@@ -27,4 +27,4 @@ A structural problem that also causes a correctness or security failure takes th
 
 ## Recording
 
-In the verification log, list the structural checks run: files whose line counts were compared (with numbers), changed flows checked for new branching, wrappers and casts inspected, and any code-judo alternative considered and rejected (with the reason).
+In the verification log, list the structural checks run: files whose line counts were compared (with numbers), changed flows checked for new branching, wrappers and casts inspected, the code-debt check (new name tables, name-keyed cases, duplicated rules, and which debt record was consulted), and any code-judo alternative considered and rejected (with the reason).

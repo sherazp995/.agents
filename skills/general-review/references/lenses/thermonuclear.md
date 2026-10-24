@@ -15,6 +15,7 @@ Look past naming and formatting. Hunt for deep structural problems in the change
 - **Prune wrappers** that add no meaning.
 - **Reuse over re-implement:** find near-duplicates of existing helpers and cite them.
 - **Dead code:** code the change makes unused, or code it adds that nothing calls.
+- **Code debt:** a name-keyed table or special case, a rule duplicated across stages or backends, a hand-matched string protocol, or a debt pattern the repo catalogued or removed (structural standard 9).
 - **File size:** a changed file that crosses 1000 lines (cite before and after counts).
 
 Report only issues this change introduces or should have fixed. Severity and the 1000-line rule follow `~/.agents/skills/general-review/references/structural-lens.md`, the same standard single reviews use.

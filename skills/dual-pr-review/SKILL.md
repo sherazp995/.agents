@@ -10,7 +10,7 @@ Two independent reviewers who know nothing about the conversation that built the
 ## 1. Pin the target
 
 - Checkout: the repository root of the current branch (`git rev-parse --show-toplevel`). Inside a worktree, use the worktree.
-- Base: the argument, else `staging` when `origin` contains `cohabitplatforms/cohabit-web`, else `develop`.
+- Base: the explicit argument first, then the target PR base or current project instructions and memory, then `develop`. Resolve it once and send the same base to both reviewers; do not let an old example override current project guidance.
 - Record the branch and `HEAD`. If the tree has uncommitted changes, say so: both reviewers will see them.
 - cohabit-web only: if a review of this branch is already running (a lock in `~/.claude/pr-review-ledger/cohabit-web/agents/{claude,codex}.lock/run_id`), stop and tell the user instead of starting a second one. general-review holds its ledger lock only while it writes, so other repos have no running-review marker to check.
 - Do not change the checkout while the reviews run: no edits, commits, rebases or pushes until both have finished.
@@ -24,13 +24,21 @@ Send both sessions the same short request and nothing else. No intent, no plan, 
 
 ## 3. Launch
 
-Make a run folder outside the repository, `${TMPDIR:-/tmp}/dual-pr-review/<YYYYMMDD-HHMMSS>`, then run in the background (Claude Code: Bash with `run_in_background: true`; it notifies on exit):
+Make a unique run folder outside the repository, `${TMPDIR:-/tmp}/dual-pr-review/<YYYYMMDD-HHMMSS>`. Run the launcher using the host-specific lifecycle below:
 
 ```bash
 bash ~/.agents/skills/dual-pr-review/scripts/launch.sh <checkout> <run folder> "<prompt>"
 ```
 
-It starts `claude -p` (auto permission mode) and `codex exec` (gpt-6-astra, `--approve-for-me`, network on, stdin closed) in the checkout at the same time and waits for both. Tell the user both have started, with the run folder, and end the turn; do not poll.
+It starts `claude -p` (auto permission mode) and `codex exec` (gpt-6-astra, `--approve-for-me`, network on, stdin closed) in the checkout at the same time and waits for both.
+
+- **Claude Code:** use Bash with `run_in_background: true`. Tell the user the run folder and yield for its task notification; collect the results when it arrives. Do not poll.
+- **Codex:** run the launcher as the foreground command of `exec_command`, with a short `yield_time_ms`. Do not detach it with `nohup`, `disown`, or a trailing shell `&`. The launcher already runs its two children concurrently. Retain the returned `session_id` and collect it with `write_stdin`, using waits of at most 60 seconds and concise progress updates. If the outer `functions.exec` yields a cell ID, first finish that call with `functions.wait`; a cell ID is not a process session ID. Use the host's required escalation when CLI credentials or the target worktree are outside the sandbox. Keep the turn active through collection and the final report; a terminal session alone does not promise a notification or a future assistant turn.
+- **Other hosts:** use their managed task mechanism only when it provides completion delivery. Otherwise stay attached and collect the process result before returning.
+
+A launcher PID or empty report file proves only an attempted launch. Report running status from a live tracked session; report completion only from each reviewer's exit status and nonempty final report with a verdict. The launcher's exit code is not a substitute for both `*.exit` files. On interruption or resumed work, inspect the existing run and its children before restarting. A missing session without terminal artifacts, a missing exit status, or a missing verdict is incomplete, never PASS. Do not launch duplicate reviews or remove another run's locks.
+
+If the user also requests a separate review, track it separately and collect it too. Do not replace either requested review with the other. A status question is an update, not cancellation of the remaining work.
 
 ## 4. Collect
 

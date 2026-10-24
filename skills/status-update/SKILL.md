@@ -2,7 +2,8 @@
 name: status-update
 description: >-
   Write a status update on PRs and tasks in the house format: one "Opened PR:"/"Updated PR:"/
-  "Finalized and merged PR:"/"WIP branch:"/task heading per item (draft PRs marked), followed by past-tense lines saying what was done. Use whenever the
+  "Finalized and merged PR:"/"Reviewed and Approved PR:"/"Reviewed PR:"/"WIP branch:"/task heading per item (draft PRs marked),
+  including PRs by others that the user reviewed or approved on GitHub, followed by past-tense lines saying what was done. Use whenever the
   user asks for a status update, a standup update, "what did I do", "write up the PRs",
   "summarise this work for the team", or invokes /status-update. Also use before posting
   progress to Slack, a ticket, or a colleague. If the current project has its own
@@ -28,6 +29,12 @@ Updated draft PR: <pr title> [pr link]
 Finalized and merged PR: <pr title> [pr link]
 <past tense line>
 
+Reviewed and Approved PR: <pr title> [pr link]
+<past tense line>
+
+Reviewed PR: <pr title> [pr link]
+<past tense line>
+
 WIP branch: <branch name> [branch link]
 <past tense line>
 <another past tense line>
@@ -44,6 +51,11 @@ Headings:
 - Add `draft` before `PR` when the PR is a draft: `Opened draft PR:`, `Updated draft PR:`.
 - `Finalized and merged PR:` for a PR merged in this period. This replaces Opened or
   Updated, even if it was also opened or changed in the same period.
+- `Reviewed and Approved PR:` for someone else's PR that the user approved on GitHub in this period.
+- `Reviewed PR:` for someone else's PR that the user reviewed on GitHub in this period
+  (comments or changes requested) without approving it. If the user both reviewed and
+  approved it in the period, use `Reviewed and Approved PR:` only.
+- The user's own PRs never get Approved or Reviewed headings, even if a teammate approved them.
 - `WIP branch: <branch name> [branch link]` for a pushed branch with work in this period but no PR yet.
   The link is the branch on GitHub: `https://github.com/<owner>/<repo>/tree/<branch>`.
   Skip branches that were never pushed.
@@ -74,7 +86,16 @@ Experts created by staff in the backend are now linked to the Cohabit company au
 Finalized and merged PR: Fix production errors on the broker new business JSON URL and /users/edit
 Error pages now show as normal web pages instead of crashing.
 The resend confirmation page now loads.
+
+Reviewed and Approved PR: Broker renewals list sorts by expiry date [pr link]
+Checked that the soonest expiry shows first on the renewals list.
+
+Reviewed PR: Strata dashboard shows the company logo [pr link]
+Asked for a fallback when the company has no logo.
 ```
+
+For Approved and Reviewed blocks, the body lines say what the review checked or asked for,
+not what the author built. One line is usually enough.
 
 Body lines:
 
@@ -154,6 +175,15 @@ Never guess a title, a link, or a state. Read them.
 - `gh pr diff <n> --repo <owner/repo>` for what actually changed.
 - `gh pr checks <n> --repo <owner/repo>` when CI state matters.
 - `git log --oneline --author=<user> <since>..HEAD` for work that never became a PR.
+- Reviewed and approved PRs come from GitHub, not local git. List candidates with
+  `gh search prs --reviewed-by=@me --updated='>=<start date>' --json number,title,url,repository,author --limit 100`
+  and drop the ones the user authored. `@me` is the active `gh` account, so switch to the
+  project's account first (`gh auth status`). Then, for each, read the user's own reviews:
+  `gh api repos/<owner/repo>/pulls/<n>/reviews --jq '.[] | select(.user.login=="<login>") | {state, submitted_at}'`.
+  Keep the PR only if one of those reviews was submitted in the period. Any `APPROVED`
+  review in the period gives `Reviewed and Approved PR:`; `COMMENTED` or `CHANGES_REQUESTED` only gives
+  `Reviewed PR:`. Read the review bodies and comments (`gh pr view <n> --repo <owner/repo> --comments`)
+  to write the body lines.
 
 If `gh` fails with "Could not resolve to a Repository", the wrong account is active. Check
 `gh auth status` and `gh auth switch --user <login>`.

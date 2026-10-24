@@ -7,6 +7,10 @@ Three levels:
 - **Lead agent** (a fresh `general-purpose` agent, not a fork, running `pr-batch-lead.md`): starts the reviewers, runs the tests, proves every finding, and returns a record body. Only the main session writes the ledger.
 - **Reviewers** (started by each lead): Codex `gpt-6-astra` as the senior engineer, plus fresh agents for `lenses/simplicity.md`, `lenses/architecture.md`, `lenses/thermonuclear.md` and `lenses/diff-only.md`, with the model and effort from SKILL.md "Review lenses".
 
+## Host delegation
+
+In Codex, or when leads cannot spawn agents, read [coordinator-owned review delegation](../../workflow-runner/references/coordinator-reviews.md) before step 6. Use its prepare/test/finalize phases and top-level sibling agents instead of nested lead launches. Preserve every required lens, including the blind diff-only pass, and the other-model senior opinion. Claude hosts with permitted nested delegation keep the existing path.
+
 ## Fixed rules
 
 - Never post to GitHub or Slack, never send DMs, never commit or push. Results go to the terminal only.

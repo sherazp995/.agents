@@ -15,6 +15,10 @@ Three levels, like a senior lead with a team:
 - **Lead agent** (a fresh `general-purpose` agent, not a fork, running `agent-prompt.md`): starts the reviewers, runs the tests, proves every finding with a test, writes the ledger.
 - **Reviewers** (started by each lead): Codex gpt-6-astra (senior engineer), and fresh agents for `lens-simplicity.md`, `lens-architecture.md` and `lens-thermonuclear.md`.
 
+## Host delegation
+
+Before launching agents in Codex, read [coordinator-owned review delegation](../workflow-runner/references/coordinator-reviews.md). Apply its prepare/test/finalize phases instead of asking a subagent to start reviewers in steps 6 to 8. The coordinator launches every sibling, including the cleanup agent, with available native tools. Preserve the Claude Agent path when nested delegation is permitted. The host's available tools and prohibition on nested agents take precedence over the generic three-level description above.
+
 ## Fixed rules
 - Never post to GitHub or Slack, never send DMs, never commit or push. Results go to the terminal only.
 - Do not review a PR that is merged or closed.

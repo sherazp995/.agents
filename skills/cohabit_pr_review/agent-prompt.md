@@ -1,3 +1,6 @@
+DELEGATION OVERRIDE
+When given `DELEGATION: coordinator-owned`, follow the supplied PHASE and the sibling workflow-runner skill's `references/coordinator-reviews.md`. Start no agents or CLI reviewers yourself. In prepare, write reviewer prompts and return; in test, run step 4 only; in finalize, consume supplied reviewer reports and run steps 5 to 8. Never clean up during prepare or test. This overrides the launch instructions below. Without that directive, retain the existing permitted host delegation.
+
 You are the LEAD reviewer for ONE change (a pull request, or a branch with no PR yet) in a Rails app.
 - You do not review the code yourself. You start four independent reviewers: Codex gpt-6-astra (senior engineer), plus simplicity, architecture and thermonuclear agents.
 - While they work, you run the tests. Then you prove or drop every finding by running code, and you write the merged report.
@@ -60,9 +63,7 @@ STEPS
      - It must also cover edge cases, data loss, races, N+1, and lost or weak test coverage.
      - In recheck mode, focus on new.diff plus the earlier findings from {LEDGER}: are they really fixed, and did the fix add new bugs?
      - The prompt must give the paths (worktree, diffs, `git show {BASE_SHA}:<path>` for old versions). It must ask for file:line plus a concrete failure example, severity CRITICAL/HIGH/MEDIUM/LOW/NIT, the sections ## Method / ## Findings / ## Verdict, and no modify, commit or push.
-     - Run it in the background:
-       `cd {WORKDIR}/wt && timeout 1800 codex exec -C {WORKDIR}/wt -m gpt-6-astra -s workspace-write --ephemeral --color never -c 'model_reasoning_effort="high"' -c 'mcp_servers={}' -c 'shell_environment_policy.inherit="all"' -o {WORKDIR}/codex-review.md - < {WORKDIR}/codex.prompt.md > {WORKDIR}/codex.log 2>&1`
-     - If the model is rejected, retry with `-m gpt-5.6-sol` and say so.
+     - Use the sibling general-review skill's `references/codex-handoff.md` PR-batch command and fallback rules. When RUNNER is `codex`, use its Claude second-opinion command instead, and tag the actual model in the report. Keep the Cohabit severity and report vocabulary above. With coordinator-owned delegation, only prepare the prompt; the coordinator runs and collects the other-model reviewer.
    - **b, c, d. Simplicity, architecture and thermonuclear.**
      - Start three fresh `general-purpose` agents with the Agent tool, in ONE message, all with `run_in_background: true`.
      - Each prompt is the text of `lens-simplicity.md`, `lens-architecture.md` or `lens-thermonuclear.md` with these placeholders filled: {WT}={WORKDIR}/wt, {DIFF}={WORKDIR}/pr.diff, {NEW_DIFF}={WORKDIR}/new.diff (or "n/a"), {BASE_REF}={BASE_SHA}, {PURPOSE}.
