@@ -204,15 +204,68 @@ class DoneCheckTest(unittest.TestCase):
             codex_message('user', 'what is the timeout?'),
             codex_message('assistant', '60 seconds.')))
 
-    def test_a_round_ends_the_turn_whatever_its_result_and_the_same_change_is_never_rechecked(self):
-        for ending in ('Checker found nothing.\nDONE-CHECK: PASS', 'DONE-CHECK: OPEN: the CSV header spec fails',
-                       'Fixed it.'):
+    def state(self):
+        return json.loads(next((self.dir / 'state').glob('*.json')).read_text())
+
+    def test_a_pass_ends_the_turn_and_the_same_change_is_never_rechecked(self):
+        self.assertEqual(self.edit_and_claim()['decision'], 'deny')
+        (self.repo / 'a.py').write_text('x = 5\n')  # the checker's fix
+        self.assertIsNone(self.stop(said('Fixed the spec.\nDONE-CHECK: PASS  ')))
+        self.assertEqual(self.state()['passed'], [hook.change_key(self.repo.resolve())[1]])
+        self.assertIsNone(self.stop(prompt('anything else?'), said('Done.')))
+
+    def test_open_malformed_or_missing_results_end_the_turn_without_counting_as_passed(self):
+        for ending in ('DONE-CHECK: OPEN: the CSV header spec fails', 'DONE-CHECK: PASSED', 'Fixed it.'):
             with self.subTest(ending=ending):
                 self.transcript.unlink(missing_ok=True)
                 shutil.rmtree(self.dir / 'state', ignore_errors=True)
                 self.assertEqual(self.edit_and_claim()['decision'], 'deny')
                 self.assertIsNone(self.stop(said(ending)))
-                self.assertIsNone(self.stop(said('Done.')))
+                self.assertIsNone(self.stop(said('Done.')))  # repeated Stops in that turn never loop
+                self.assertEqual(self.state()['passed'], [])
+                self.assertEqual(self.state()['open'], hook.change_key(self.repo.resolve())[1])
+
+    def test_unchanged_work_left_open_is_checked_again_when_a_later_turn_says_it_is_done(self):
+        for later in ('is it finished now?', 'add the export button'):  # a new prompt, or the same text again
+            with self.subTest(later=later):
+                self.transcript.unlink(missing_ok=True)
+                shutil.rmtree(self.dir / 'state', ignore_errors=True)
+                self.edit_and_claim()
+                self.stop(said('DONE-CHECK: OPEN: the CSV header spec fails'))
+                result = self.stop(prompt(later), said('Done: the spec passes now.'))
+                self.assertEqual(result['decision'], 'deny')
+
+    def test_a_question_after_open_work_ends_untouched(self):
+        self.edit_and_claim()
+        self.stop(said('DONE-CHECK: OPEN: the CSV header spec fails'))
+        self.assertIsNone(self.stop(prompt('what does a.py do?'), said('It sets x.')))
+
+    def test_a_retry_of_open_committed_work_reviews_that_commit_in_its_repo(self):
+        session = self.dir / 'session'
+        session.mkdir()
+        subprocess.run(['git', 'init', '-q'], cwd=session, check=True)
+        (self.repo / 'a.py').write_text('x = 3\n')
+        self.git('commit', '-qam', 'Add export button')
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.repo, capture_output=True, text=True).stdout
+        with self.transcript.open('a') as handle:
+            handle.writelines(json.dumps(r) + '\n' for r in (
+                prompt(), tool('Bash', command=f'cd {self.repo} && git commit -m "Add export button"'), said('ok'),
+                said('DONE-CHECK: OPEN: the spec fails')))
+        event = {'cwd': str(session), 'session_id': 's1', 'transcript_path': str(self.transcript)}
+        self.assertIsNotNone(hook.verdict(event))  # the commit's check
+        self.assertIsNone(hook.verdict(event))  # its OPEN result
+        with self.transcript.open('a') as handle:
+            handle.writelines(json.dumps(r) + '\n' for r in (prompt('retry'), said('Done, it passes now.')))
+        result = hook.verdict(event)
+        self.assertIn(f'`git show {head.strip()}` in {self.repo.resolve()}', result['reason'])
+
+    def test_a_legacy_checked_list_does_not_suppress_a_new_check(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        key = hook.change_key(self.repo.resolve())[1]
+        (self.dir / 'state').mkdir()
+        hook.state_file('s1').write_text(json.dumps({'root': str(self.repo.resolve()), 'checked': [key]}))
+        result = self.stop(prompt(), tool('Edit', file_path=str(self.repo / 'a.py')), said('Done.'))
+        self.assertEqual(result['decision'], 'deny')
 
     def test_a_check_abandoned_by_a_new_prompt_is_replaced(self):
         self.edit_and_claim()

@@ -1,6 +1,6 @@
 ---
 name: doing-substantial-work
-description: The default way to build any feature or fix that changes more than one file, adds behaviour, refactors, or chases a bug that survived a fix. One lead agent (with 2-6 parallel parts when the files split cleanly), a plan always made with rethink (both models approve it, with a general-review pre-check), general-review rules applied while building, checks that pass or fail, one review, one commit. Councils, best of two and the multi-agent build workflow run only when the user asks for them by name. Not for one-line fixes, questions, or read-only exploration.
+description: The default way to build any feature or fix that changes more than one file, adds behaviour, refactors, or chases a bug that survived a fix. One lead agent (with 2-6 parallel parts when the files split cleanly), a plan by one author that the user approves (rethink, with both models, only for the risk list or on request), general-review rules applied while building, checks that pass or fail, one end check, one commit. Councils, best of two and the multi-agent build workflow run only when the user asks for them by name. Not for one-line fixes, questions, or read-only exploration.
 ---
 
 # Doing substantial work
@@ -10,23 +10,23 @@ One lead agent owns the work, in this session, and checks it with commands rathe
 ## The steps
 
 1. **Context.** Read the project `CLAUDE.md`/`AGENTS.md`, the rule files it names, and `CONSTRAINTS.md` when the repo has one (`constraint-driven`). Search past chats only when the task looks like something tried before (`agents-hub search <topic>`). For a bug, load `debugging` and reproduce it before planning the fix.
-2. **Interview, then plan, then wait.** Run `interview-me` first, until the user gives an explicit yes on the six-line intent (or skip it in one line when the request already states all six). Then make the plan with `rethink` (Claude and Codex draft blind, the lead merges one final plan, and both models must approve it; show its status), and show it to the user. It covers:
+2. **Interview, then plan, then wait.** Run `interview-me` first (its short form by default: the six-line restate and an explicit yes; skip it in one line when the request already states all six). Then write the plan yourself, or with `rethink` when it hits the risk list or the user asks (see below), and show it to the user. It covers:
    - the confirmed intent (the `interview-me` restate, or one line when it was skipped);
    - the files to change;
    - the check commands that prove it (the narrowest specs, rubocop or eslint on the changed files, a migration up and down);
    - parallel parts, only when the build splits into 2-6 parts that share no file: each part and the files it owns, plus the shared work the lead does itself;
-   - risk: if it touches a schema, auth, permissions or payments, say so in one line and offer `work-council`. Do not start it unless the user says yes.
+   - risk: if it hits the `deep` risk list in `rethink`'s "Tiers", say so in one line, plan it with `rethink`, and offer `work-council`. Do not start `work-council` unless the user says yes.
 
    After approval, build without check-ins unless something changes the plan.
 
-   **Always `rethink`.** Every plan in this skill is made with `rethink`; there is no single-author plan here. Run it as that skill says (the session coordinates, a lead subagent runs Claude and Codex), with the tier `rethink` defines: `fast` by default, `deep` for its risk list (schema, auth, payments, permissions, cross-layer contract or ABI changes, open design), `small` only when it meets that skill's `small` rule. Copy into the plan file: the result status, the `## Review pre-check` section, and the decisions the user settled. If the status is not `approved by both` (or is stale), show it and the open findings plainly; the user may waive and build, but never call that plan approved by both models. If the user's decisions change the steps, send the plan back for approval rounds as `rethink` says.
+   **When to use `rethink`.** A routine plan is written by you (one author) and approved by the user. Use `rethink` only when the plan hits the `deep` risk list in its "Tiers" (it then runs `deep`), or when the user asks for it ("rethink", "think it through", Claude and Codex plans). Run it as that skill says (the session coordinates, a lead subagent runs Claude and Codex). Copy into the plan file: the result status, the `## Review pre-check` section, and the decisions the user settled. If the status is not `approved by both` (or is stale), show it and the open findings plainly; the user may waive and build, but never call that plan approved by both models. If the user's decisions change the steps, send the plan back for approval rounds as `rethink` says.
 
    **Plan file.** Every build has one. Save the plan after approval to `~/.agents/tmp/plans/<checkout folder>-<branch with / as ->-<task in 2-4 words>.md` (git-ignored, never committed; never reuse another task's file) and show its full path in the plan the user approves, so the path survives a chat summary. It holds the request verbatim, the confirmed intent, the approved plan as a checklist, the check commands, and a short log. Keep it current: tick a step when its check passes, log each decision the user makes and each failed try with the reason it failed. After the chat is summarized, re-read the file at that path before the next step; it, not the summary, is the plan.
 3. **Build.** Before writing code, load general-review's rules alongside the stack skill: `~/.agents/skills/general-review/references/review-checklist.md`, `references/structural-standards.md`, and SKILL.md sections "2. Understand the approach" and "Root causes and sibling sweep". Build to the plan's `## Review pre-check`.
 
    **Step baseline.** Before a step edits anything, copy the files it will touch (those that exist) to `<scratch>/step-<N>-before/`, keeping their paths. The step diff is then `git diff --no-index <scratch>/step-<N>-before/<path> <path>` per touched file, with `/dev/null` on the missing side for a new or deleted file. It covers staged, unstaged and untracked work and leaves out earlier steps' edits. Save it to `<scratch>/step-<N>.diff`.
 
-   **Step check (after each plan step, before the next):**
+   **Step check (after each plan step, before the next):** for a routine plan, run the step's check command and log its result; that is the whole step check. For a plan made with `rethink`, also run every item below.
    - Re-run the step's sibling sweep searches (`rg`, or Grep with the same pattern); every instance is covered or recorded as out of scope with a reason.
    - Every contract the step changes is updated on both sides (callers, declarations, docs that state it).
    - The step's regression tests exist and pass (the failing case plus its neighbours). A step with no behaviour to test (docs, pure rename) records `N/A: <reason>` and its syntax or doc check instead.
@@ -47,7 +47,7 @@ One lead agent owns the work, in this session, and checks it with commands rathe
 4. **Check.** Run every check command from the plan. A step is done when its command passes, not when the code looks right.
 5. **When stuck.** Reproduce the failure and read the full error. Test one idea at a time. **Two failed tries on the same problem: stop, tell the user what you tried and what you saw, and ask.** Never loop, never start more agents to get unstuck.
 6. **Prove it** when the change is visible: run the page, job or command once on the main path and keep the output. If you cannot drive it, say it is unverified.
-7. **Review once.** Read your own full diff against the plan and its `## Review pre-check`: scope, dead code, missed callers and siblings, both sides of each contract, tests. Run `general-review` only when the user asks for a review or before a PR is opened. With any reviewer, three fix rounds at most: a high or medium still open after the third means rethink the approach with the user (rule 44), not a fourth patch.
+7. **End check.** `done-check` is the one end check: when the turn commits or says it is done, the hook has a fresh checker confirm completion and correctness. Where the hook is not installed, run its checker prompt (`~/.agents/hooks/bin/done-check`, `check_instructions`) once by hand. Run `general-review` only when the user asks for a review or before a PR is opened, with rule 44's round limit.
 8. **Commit and report.** Stage only this work's files (`git add -- <files>`), one line commit (rule 48), amend when git-guard says so. Never push unless told. Report answer first: what changed, which commands passed, anything unverified or skipped.
 
 ## Heavier tools, by name only
@@ -56,5 +56,5 @@ Run these only when the user names them (or names the outcome, like "best of two
 
 - `work-council`: plan critique and a Claude vs Codex build.
 - `llm-council`: several independent opinions on a hard question.
-- [build-workflow.js](build-workflow.js): multi-card build in waves with independent rechecks, for large plans the user wants run as a workflow.
+- [build-workflow.js](build-workflow.js) (stale: it predates `rethink` and the current steps, and is not maintained): multi-card build in waves with independent rechecks, for large plans the user wants run as a workflow.
 - `dual-pr-review`, `cohabit_pr_review`, `branch-visual-qa`, `video-qa`.

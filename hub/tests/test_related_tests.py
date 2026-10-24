@@ -8,9 +8,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -385,6 +387,67 @@ class TranscriptFallbackTests(HookCase):
         self.write('Gemfile.lock', 'changed dependency\n')
         self.run_hook(transcript_path=session)
         self.assertEqual(log.read_text(), 'ran\nran\nran\n')  # a new HEAD and a lockfile change each reran
+
+
+    def test_a_timeout_kills_the_whole_run_and_reports_unverified_without_caching(self):
+        pid_file, log = Path(self.tmp.name) / 'sleeper.pid', Path(self.tmp.name) / 'runs.log'
+        self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\ntimeout = 1\n'
+                                           '[tests.map]\n"src/*.txt" = ["checks/slow.sh"]\n')
+        self.write('src/note.txt', 'changed\n')
+        self.write('checks/slow.sh', f'echo ran >> {log}\nsleep 30 &\necho $! > {pid_file}\nwait\n')
+        session = self.transcript(self.edit('src/note.txt'))
+
+        verdict = self.run_hook(transcript_path=session)
+
+        self.assertEqual(verdict['decision'], 'deny')
+        self.assertTrue(verdict['reason'].startswith('UNVERIFIED: related tests timed out after 1 s'))
+        self.assertIn('sh checks/slow.sh', verdict['reason'])
+        pid = int(pid_file.read_text())
+        for _ in range(50):  # the orphaned sleeper is reaped by init shortly after the kill
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail(f'the timed-out run left pid {pid} running')
+        self.assertEqual(list(self.cache.glob('*.json')), [])
+        self.assertIsNone(self.run_hook(transcript_path=session, stop_hook_active=True))
+        self.run_hook(transcript_path=session)
+        self.assertEqual(log.read_text(), 'ran\nran\n')  # the timeout was not cached
+
+    def test_a_timeout_returns_even_when_a_daemon_left_the_group_and_holds_the_output(self):
+        pid_file = Path(self.tmp.name) / 'daemon.pid'
+        daemon = f'import os, time; os.setsid(); open({str(pid_file)!r}, "w").write(str(os.getpid())); time.sleep(20)'
+        self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\ntimeout = 1\n'
+                                           '[tests.map]\n"src/*.txt" = ["checks/server.sh"]\n')
+        self.write('src/note.txt', 'changed\n')
+        self.write('checks/server.sh', f'{shlex.quote(sys.executable)} -c {shlex.quote(daemon)} &\nsleep 30\n')
+        self.addCleanup(lambda: pid_file.exists() and os.kill(int(pid_file.read_text()), 9))
+        started = time.monotonic()
+
+        verdict = self.run_hook(transcript_path=self.transcript(self.edit('src/note.txt')))
+
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertTrue(verdict['reason'].startswith('UNVERIFIED: related tests timed out'))
+
+    def test_a_cached_result_is_rerun_when_other_dirty_work_changes(self):
+        log = Path(self.tmp.name) / 'runs.log'
+        self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\n'
+                                           '[tests.map]\n"src/*.txt" = ["checks/note.sh"]\n')
+        self.write('src/note.txt', 'changed\n')
+        self.write('checks/note.sh', f'echo ran >> {log}\nexit 1\n')
+        self.write('helper.txt', 'untracked helper\n')
+        session = self.transcript(self.edit('src/note.txt'))
+
+        self.run_hook(transcript_path=session)
+        self.run_hook(transcript_path=session)
+        self.assertEqual(log.read_text(), 'ran\n')  # the unchanged state was cached
+        self.write('helper.txt', 'untracked helper, edited in an earlier turn\n')
+        self.run_hook(transcript_path=session)
+        self.write('lib/b.py', 'B = 3\n')  # tracked and dirty, not edited this turn
+        self.run_hook(transcript_path=session)
+        self.assertEqual(log.read_text(), 'ran\nran\nran\n')
 
 
 class ConventionTests(unittest.TestCase):

@@ -17,7 +17,7 @@ Three levels, like a senior lead with a team:
 
 ## Host delegation
 
-Before launching agents in Codex, read [coordinator-owned review delegation](../workflow-runner/references/coordinator-reviews.md). Apply its prepare/test/finalize phases instead of asking a subagent to start reviewers in steps 6 to 8. The coordinator launches every sibling, including the cleanup agent, with available native tools. Preserve the Claude Agent path when nested delegation is permitted. The host's available tools and prohibition on nested agents take precedence over the generic three-level description above.
+The delegation rule and its exceptions live in ~/.agents/AGENTS.md "Keep the Chat Session Clean" (exception 4 covers this skill). Before launching agents in Codex, read [coordinator-owned review delegation](../workflow-runner/references/coordinator-reviews.md). Apply its prepare/test/finalize phases instead of asking a subagent to start reviewers in steps 6 to 8. The coordinator launches every sibling, including the cleanup agent, with available native tools. Preserve the Claude Agent path when nested delegation is permitted. The host's available tools and prohibition on nested agents take precedence over the generic three-level description above.
 
 ## Fixed rules
 - Never post to GitHub or Slack, never send DMs, never commit or push. Results go to the terminal only.

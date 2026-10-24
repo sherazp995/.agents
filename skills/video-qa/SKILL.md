@@ -17,7 +17,7 @@ Follow the "Establish the comparison" and "Make both versions work" sections of 
 
 Start each server in the background on a port you checked is free (`lsof -nP -iTCP:<port> -sTCP:LISTEN` on macOS, `ss -ltn` on Linux), record its PID, and when finished kill only those PIDs and confirm the ports are closed. Leave servers that were running before the run alone. Preserve the user's checkout: no edits, commits or branch changes.
 
-A flow behind staff or IdP sign-in (admin, super admin, impersonation) is not blocked in cohabit-web: start the version with the `server-tunnel` skill, which brings up the portal and IdP, and tear it down afterwards (see `cohabit-local-browser-testing`).
+A flow behind staff or IdP sign-in (admin, super admin, impersonation) is not blocked in cohabit-web: start the version with cohabit-web's server-tunnel project skill (`.claude/skills/server-tunnel/` in that repo), which brings up the portal and IdP, and tear it down afterwards (see `cohabit-local-browser-testing`).
 
 ## 2. Find the flow with the Playwright MCP
 

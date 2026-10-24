@@ -45,7 +45,7 @@ Show separate browser and code-review outcomes, then a combined conclusion. A co
 
 Use separate local checkouts or snapshots and ports. Preserve the original working tree. Resolve missing dependencies, assets, local host routing and pending migrations within authorized local scope.
 
-A path behind staff or IdP sign-in (admin, super admin, impersonation) is not blocked in cohabit-web: start the version with the `server-tunnel` skill, which brings up the portal and IdP, and tear it down afterwards (see `cohabit-local-browser-testing`).
+A path behind staff or IdP sign-in (admin, super admin, impersonation) is not blocked in cohabit-web: start the version with cohabit-web's server-tunnel project skill (`.claude/skills/server-tunnel/` in that repo), which brings up the portal and IdP, and tear it down afterwards (see `cohabit-local-browser-testing`).
 
 Use isolated databases with identical deterministic fixture IDs when tests mutate data or schemas differ. A base running against the new schema can conceal the original bug. Avoid modifying shared records to manufacture a before state. Do not run real outbound mail, payments or background integrations during fixtures. Keep setup and reset scripts restricted to the QA databases and owned fixture records.
 

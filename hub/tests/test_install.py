@@ -69,7 +69,7 @@ def make_hub(home, claude_hooks='', codex_hooks=''):
     """A copy of the tracked hub files at home/.agents, with a test registry."""
     hub = home / '.agents'
     hub.mkdir()
-    for name in ('install.py', 'check.py', 'AGENTS.md', 'selected-skills.json'):
+    for name in ('install.py', 'check.py', 'AGENTS.md', 'selected-skills.json', '.gitignore'):
         shutil.copy(CHECKOUT / name, hub / name)
     for folder in ('integrations', 'agents'):
         shutil.copytree(CHECKOUT / folder, hub / folder)
@@ -83,6 +83,9 @@ def make_hub(home, claude_hooks='', codex_hooks=''):
                     ignore=shutil.ignore_patterns('__pycache__'))
     for skill in json.loads((hub / 'selected-skills.json').read_text())['skills']:
         (hub / 'skills' / skill).mkdir(parents=True)
+        (hub / 'skills' / skill / 'SKILL.md').write_text(f'---\nname: {skill}\n---\n')
+    # A repo, so check.py's git-ignore lookups (downloaded third-party skills) work as in the checkout.
+    subprocess.run(['git', 'init', '-q'], cwd=hub, check=True)
     (hub / 'registry.toml').write_text(REGISTRY.format(claude_hooks=claude_hooks, codex_hooks=codex_hooks))
     return hub
 
@@ -782,7 +785,7 @@ class CheckTests(HubCase):
 
         passed = run()
         skill = json.loads((self.hub / 'selected-skills.json').read_text())['skills'][0]
-        (self.hub / 'skills' / skill).rmdir()
+        shutil.rmtree(self.hub / 'skills' / skill)
         failed = run()
 
         self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)

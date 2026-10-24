@@ -9,8 +9,10 @@ On a finished turn the hook blocks the Stop once and tells the agent to start a 
 context. The checker reports COMPLETION (every part of the user's request done) and CORRECTNESS (the
 check commands pass, the diff does what was claimed, nothing out of scope). The agent fixes what it
 reports and ends with `DONE-CHECK: PASS` or `DONE-CHECK: OPEN: <what is open>`, which the user reads
-in the chat. At that next Stop the hook lets the turn end. The same change (HEAD plus working tree) is
-never checked twice, so the check cannot loop.
+in the chat. At that next Stop the hook lets the turn end. Only a last line that is exactly
+`DONE-CHECK: PASS` records the change (HEAD plus working tree) as passed, and a passed change is never
+checked again. OPEN, a malformed line or no line records it as open: that turn ends, and a later turn
+that says the same unchanged work is done gets a fresh check, so the check never loops within a turn.
 
 State lives in tmp/done-check/ of this hub (git-ignored).
 """
@@ -34,10 +36,10 @@ DONE_CLAIM = re.compile(r'\b(?:done|complete[ds]?|finished|implemented|fixed|all
 NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\byet to be)\s+(?:\w+\s+)?$"
                      r"|\b(?:once|when|after|until|if|before)\b[^.!?\n]*$", re.I)  # or a future clause
 RESULT = re.compile(r'^DONE-CHECK:\s*(?:PASS|OPEN)\b.*$', re.M)
+PASSED = re.compile(r'DONE-CHECK: PASS[ \t]*')
 SHELL_TOOLS = ('Bash',)
 REQUEST_LIMIT = 2000
 INTERRUPTED = '[Request interrupted by user'  # Claude logs an Esc as a user message
-UNTRACKED_LIMIT = 1_000_000
 
 
 def shell_commands(record):
@@ -105,17 +107,18 @@ def commit_dir(command, cwd):
 
 
 def read_turn(transcript_path, cwd):
-    """{'request', 'prompts', 'edited', 'committed', 'started', 'work_dir', 'last_message', 'pending'}
+    """{'request', 'prompts', 'edited', 'committed', 'started', 'line', 'work_dir', 'last_message', 'pending'}
     for the current turn, which starts at the last prompt the user typed, or None without a readable
     transcript. Prompts queued while the turn runs (straight after a tool call, its result or another
     queued prompt) join prompts and keep the turn's work; an interrupt ends the turn. request is the
-    prompts joined. started is the turn's first prompt time in epoch seconds, or None. work_dir is where
+    prompts joined. started is the turn's first prompt time in epoch seconds, or None. line is the
+    transcript line of that first prompt, which tells two turns apart even with the same text. work_dir is where
     the turn last committed, else the folder of the file it last edited, else None."""
     turn, state = None, None
     launched, finished = {}, set()
     try:
         with open(transcript_path or '', encoding='utf-8', errors='replace') as handle:
-            for line in handle:
+            for number, line in enumerate(handle):
                 try:
                     record = json.loads(line)
                 except ValueError:
@@ -132,7 +135,7 @@ def read_turn(transcript_path, cwd):
                     else:
                         turn = {'prompts': [prompt_text(record)], 'edited': False, 'committed': False,
                                 'last_message': '', 'commit_dir': None, 'edit_dir': None,
-                                'started': turns.record_time(record)}
+                                'started': turns.record_time(record), 'line': number}
                         launched = {}
                     state = 'prompt'
                     continue
@@ -166,18 +169,8 @@ def change_key(root):
     digest = hashlib.sha256(f'{head}\0{diff}'.encode(errors='replace'))
     for name in turns.untracked_names(root) or []:
         digest.update(f'\0{name}\0'.encode(errors='replace'))
-        digest.update(untracked_content(root, name))
+        digest.update(turns.untracked_content(root, name))
     return head, digest.hexdigest()
-
-
-def untracked_content(root, name):
-    """An untracked file's bytes, or its size and mtime when it is large or unreadable."""
-    try:
-        if (root / name).is_file() and (root / name).stat().st_size <= UNTRACKED_LIMIT:
-            return (root / name).read_bytes()
-    except OSError:
-        pass
-    return repr(turns.file_stat(root, name)).encode()
 
 
 def made_this_turn(root, started):
@@ -219,7 +212,7 @@ def check_instructions(turn, root, committed_head):
     return f'''DONE-CHECK: this task looks finished. Before it counts as done, verify it once with a fresh checker.
 
 Start one fresh subagent (Claude Code: the Agent tool, general-purpose; Codex: a new subagent, or if you have none, redo the check yourself from scratch). Give it only:
-1. The user's request, verbatim, plus any plan the user approved earlier in this conversation. The latest prompt was:
+1. The user's request, verbatim (each prompt cut at {REQUEST_LIMIT} characters), plus any plan the user approved earlier in this conversation. The latest prompt was:
 <<<
 {request}
 >>>
@@ -230,7 +223,7 @@ The checker is read-only and reports:
 - COMPLETION: each part of the request as DONE or MISSING, with file:line evidence.
 - CORRECTNESS: each check command rerun with its exit code; bugs or wrong files in the full diff; any claim the diff contradicts; changes no request or plan covers.
 
-Then fix every MISSING item and every real correctness finding, rerun the affected checks, and keep the commit rules (amend when git-guard says so). Do not ask the user anything; this check runs once.
+Then fix every MISSING item and every real correctness finding, rerun the affected checks, and keep the commit rules (amend when git-guard says so). If a fix needs the user's decision, do not guess: end with OPEN and name it.
 End your final message with exactly one line:
 DONE-CHECK: PASS
 or
@@ -250,28 +243,40 @@ def verdict(event):
     # The checker round ends with a DONE-CHECK line; matching the request as well covers a round whose
     # continuation an agent logs as a new prompt (Codex) or that ended without the line.
     pending = state.get('pending') and (state.get('request') == request or RESULT.search(turn['last_message']))
-    # The repo the work happened in, which is not always the session's folder.
-    root = Path(state['root']) if pending else (turn['work_dir'] and turns.repo_root(turn['work_dir'])) or turns.repo_root(cwd)
+    # The repo the work happened in, which is not always the session's folder. A retry after OPEN that
+    # edits nothing has no work folder of its own, so it reviews the repo that was left open.
+    root = Path(state['root']) if pending else (turn['work_dir'] and turns.repo_root(turn['work_dir'])) \
+        or (state.get('open') and Path(state['root'])) or turns.repo_root(cwd)
     if not root:
         return None
     head, key = change_key(root)
+    passed = state.get('passed', [])[-5:] if state.get('root') == str(root) else []
 
     if pending:
-        # The checker round this hook asked for has ended: let the turn end.
-        save_state(file, {'root': str(root), 'checked': [state['pending'], key]})
+        # The checker round this hook asked for has ended: let the turn end, and count it only on PASS.
+        lines = (turn['last_message'] or '').strip().splitlines()
+        if lines and PASSED.fullmatch(lines[-1]):
+            save_state(file, {'root': str(root), 'passed': passed + [key]})
+        else:
+            save_state(file, {'root': str(root), 'passed': passed, 'open': key, 'open_turn': turn['line'],
+                              'open_head': state.get('head'), 'request': request})
         return None
 
-    if state.get('root') == str(root) and key in state.get('checked', []):
+    if state.get('root') == str(root) and key in passed:
         return None
     committed = turn['committed'] and bool(head) and made_this_turn(root, turn['started'])
-    claimed = turn['edited'] and claims_done(turn['last_message'])
-    if not (committed or claimed):
+    committed_head = head if committed else None
+    if state.get('open') == key and state.get('root') == str(root):
+        # Left open and unchanged: that turn ends, and a later turn that says it is done is checked again.
+        if turn['line'] == state.get('open_turn') or not claims_done(turn['last_message']):
+            return None
+        committed_head = committed_head or state.get('open_head')
+    elif not (committed or turn['edited'] and claims_done(turn['last_message'])):
         return None
     # A pending check from an earlier prompt was abandoned (the user interrupted): it is simply replaced.
-    checked = state.get('checked', [])[-5:] if state.get('root') == str(root) else []
-    save_state(file, {'pending': key, 'request': request, 'committed': bool(committed), 'root': str(root),
-                      'checked': checked})
-    return {'decision': 'deny', 'reason': check_instructions(turn, root, head if committed else None)}
+    save_state(file, {'pending': key, 'request': request, 'head': committed_head, 'root': str(root),
+                      'passed': passed})
+    return {'decision': 'deny', 'reason': check_instructions(turn, root, committed_head)}
 
 
 if __name__ == '__main__':

@@ -14,7 +14,7 @@ There are no per-language agents. Expertise lives in skills, which load only whe
 | Rust systems, unsafe, FFI, lifetimes, performance-critical Rust, compiler and runtime work (riven) | `rust-engineering` |
 | CI/CD, infrastructure as code, containers, deploy strategies, secrets, monitoring, SLOs, incidents | `devops-sre` |
 | Writing or trimming tests | `writing-specs` |
-| Any planning phase (before a plan, plan mode, `Plan` agent, work-council), or "interview me" | `interview-me` |
+| Any planning phase (before a plan, plan mode, work-council), or "interview me"; it runs in the session, before any `Plan` agent | `interview-me` |
 | A failing test, broken build, regression or bug report | `debugging` |
 | Setting or guarding a project's quality bar, or a repo with `CONSTRAINTS.md` | `constraint-driven` |
 | iOS or Android UI | `mobile-design` |
@@ -28,7 +28,7 @@ These are built into Claude Code. In Codex, do the same work directly or with a 
 | Task signal | Agent |
 |---|---|
 | Locating code, "where is X", grep across repo (3 lookups or fewer: do it yourself) | `Explore` |
-| Designing an implementation plan before touching code | `Plan` |
+| Drafting an implementation plan once the session has settled the intent | `Plan` |
 | Claude Code, Claude Agent SDK, or Anthropic API questions | `claude-code-guide` |
 | Genuinely cross-cutting research no skill covers | `general-purpose` |
 

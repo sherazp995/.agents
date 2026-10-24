@@ -1,6 +1,6 @@
 ---
 name: rethink
-description: Plan any fix, feature or change with two models, fast. A lead subagent builds one evidence packet, Claude and Codex each draft a plan blind in parallel, the lead merges one final plan, and BOTH models must approve that exact plan before the caller shows it to the user. Default tier `fast` (about 10-20 minutes); `deep` adds up to 3 cross-review rounds for risky plans; `small` uses one draft. Use for every plan once the intent is settled (interview-me confirmed it, or the request fully stated it), in doing-substantial-work step 2, plan mode, any "plan this", or when the user says "rethink", "think it through" or asks for Claude and Codex plans. Not for one-line or mechanical changes, pure questions (llm-council), or reviewing code (general-review). It is not rule 44's "rethink the approach" step, though that step plans its new approach with this skill.
+description: Plan a risky change, or one the user asks to rethink, with two models. A lead subagent builds one evidence packet, Claude and Codex each draft a plan blind in parallel, the lead merges one final plan, and BOTH models must approve that exact plan before the caller shows it to the user. Tiers `fast`, `deep` (cross-review rounds, for the risk list) and `small`; time limits in its Budget table. Use once the intent is settled (interview-me confirmed it, or the request fully stated it) only when the plan hits the `deep` risk list in its "Tiers" section, or when the user asks: "rethink", "think it through", or Claude and Codex plans. A routine plan is written by one author and approved by the user, without this skill. Not for one-line or mechanical changes, pure questions (llm-council), or reviewing code (general-review). It is not rule 44's "rethink the approach" step, though that step plans its new approach with this skill.
 argument-hint: "<what to plan>"
 ---
 
@@ -14,16 +14,16 @@ Agreement between drafts is not evidence that the merged plan is sound, so the p
 
 - **Caller (the session, or the skill that asked):** settles intent, picks the tier, starts the lead, relays the result, owns the one approval gate. It writes and judges no plan.
 - **Lead:** one fresh subagent (Claude Code: `general-purpose`, never a fork; Codex: a sub-agent, or the session itself when it has none, saying so). Neutral: it writes no plan of its own; it builds the evidence packet, runs the passes, merges, applies the approvers' fixes, and re-proves facts. Prompt: [lead.md](lead.md).
-- **Planners:** Claude (`claude -p`, opus) and Codex (`codex exec`, gpt-6-astra). Leaf CLI processes, not agents: they start nothing, edit nothing, and get [guard.md](guard.md) prepended to every prompt. They are the one allowed exception to "subagents cannot start subagents".
+- **Planners:** Claude (`claude -p`, opus) and Codex (`codex exec`, gpt-6-astra). Leaf CLI processes, not agents: they start nothing, edit nothing, and get [guard.md](guard.md) prepended to every prompt. They are one of the named exceptions in AGENTS.md's delegation rule ("Keep the Chat Session Clean").
 - **Runner:** [run-planner.sh](run-planner.sh) is the only way to call a planner. It enforces read-only flags for both CLIs (Claude: read tools only, plan mode, no prompts, no MCP, no hooks, no session file; Codex: read-only sandbox, no approvals, user config and rules ignored, no MCP, ephemeral), a deadline, a section check, the Codex effort, and a `.meta` record.
 
 ## Tiers
 
-The caller picks one and says why in one line.
+The caller picks one and says why in one line. A plan that hits the `deep` risk list below runs `deep`; `fast` (the default when the user asks for rethink) and `small` are for runs the user asks for.
 
-- `fast` (default): evidence packet, two blind drafts in parallel, merge, up to 2 approval rounds by both models.
-- `deep`: for a schema, auth, payments or permissions change, a public contract or ABI change across several layers, or an open design question. Adds up to 3 cross-review rounds (each reviews the other's draft, then each refines) before the merge, and allows 3 approval rounds.
-- `small`: at most 3 files, no public contract, schema, auth, payments or permissions change, no open design question. One draft (planner chosen by coin flip), merge, up to 2 approval rounds by both models.
+- `fast`: evidence packet, two blind drafts in parallel, merge, up to 2 approval rounds by both models.
+- `deep`: the risk list, kept only here: a schema or data migration, auth, payments or permissions change, a public contract or ABI change across several layers, or an open design question. Adds up to 3 cross-review rounds (each reviews the other's draft, then each refines) before the merge, and allows 3 approval rounds.
+- `small`: at most 3 files, no public contract change, none of the `deep` risk list. One draft (planner chosen by coin flip), merge, up to 2 approval rounds by both models.
 
 Every tier ends the same way: both models must approve the exact final plan.
 
@@ -37,7 +37,7 @@ The finished work may be reviewed by general-review, so rethink applies its rule
 
 ## Caller steps
 
-1. **Intent.** Accept one of: `confirmed` (interview-me got an explicit yes) or `fully stated, interview skipped` (the request already states outcome, user, success, constraint and out of scope; say so in one line). In a non-interactive run with neither, do not start: return the open questions as blockers.
+1. **Intent.** Accept one of: `confirmed` (interview-me got an explicit yes) or `fully stated, interview skipped` (the request already states all six intent lines of interview-me step 4; say so in one line). In a non-interactive run with neither, do not start: return the open questions as blockers.
 2. **Data-sharing yes**, once per repository (see "Data sharing"). Then **start the lead** with lead.md, filling `{TASK}` (the user's words), `{TIER}`, `{START}`, `{INTENT}` (six lines verbatim), `{INTENT status}` (`confirmed` or `fully stated, interview skipped`), `{REPO}`, `{CONTEXT}`, `{DRAFT}` and `{OUT}`:
    - `{START}`: `full` (default), or `approval-only: <plan path>` to put an existing plan straight through the approval rounds (after the user's decisions or a council critique changed its steps).
    - `{CONTEXT}`: pointers to requirements and evidence only (project instruction files, trackers, decision records, review records, failing output). Never candidate plans or this session's own conclusions.

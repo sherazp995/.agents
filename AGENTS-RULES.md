@@ -216,7 +216,7 @@ Use one `<form>` with two `type="submit"` buttons differentiated by `name=...`. 
 ## Tooling & Workflow
 
 ### 41. Cache test/build output instead of re-running unchanged commands
-Long-running commands (cargo test, rspec, jest, etc.) run once per code state; output goes to `tmp/test-cache/`. Future questions read the cache, not re-run. Re-run with a new cache filename if code changes.
+Long-running commands (cargo test, rspec, jest, etc.) run once per code state; output goes to `tmp/test-cache/`. Future questions read the cache, not re-run. Re-run with a new cache filename if code changes. (The `related-tests` hook keeps its own cache under `~/.agents/tmp/test-cache/related-tests/`; manual logs like these stay repo-local.)
 
 **Why:** Inspecting a cached log is instant; re-running burns minutes and context.
 
@@ -231,48 +231,13 @@ Full integration runs happen once per phase in a dedicated task, not in every in
 `cd` into the repo once, then run git there. (The `git-guard` hook enforces this in Claude Code and Codex: it denies `git -C` with the same command rewritten as `cd <dir> && git ...`, so the agent reruns it without asking the user.)
 
 ### 44. Review every code change; the full protocol runs on request
-Every code change gets a self-review of its full diff against the plan before it is "done": scope, dead code, missed callers, tests. The full protocol below (the `general-review` skill, an agent that did not write the change, verdict **PASS** with every introduced blocker, high and medium fixed, or the rethink below after three fix rounds) runs when the user asks for a review or before a PR is opened.
+Every code change gets one end check before it is "done": `done-check` (doing-substantial-work step 7), or its checker prompt run once by hand where the hook is not installed. The Unified Review Protocol is the `general-review` skill, sections 1 to 6 of its SKILL.md (phases P0 to P6, verdict and report template); it runs when the user asks for a review or before a PR is opened.
 
 Review feedback from a person, Copilot or another agent is a claim to verify against the code before acting. When it is wrong, push back with the evidence; never apply a suggestion only because a reviewer made it.
 
 **Three fix rounds, then rethink.** A round is: the reviewer reports, you fix, the reviewer rechecks. If a reviewer still reports a high or medium finding after three rounds (new or repeated), stop patching: the approach is likely wrong, not the details. Re-read the request, list what the reviewers keep finding and the cause those findings share, and weigh a simpler or different design, a narrower scope, or keeping the change with the risk named. Tell the user the open findings, the options and your recommendation, and wait. Lows and nits never extend the loop.
 
-**Why:** A second, evidence-bound pass catches what you miss. Splitting findings by origin (introduced vs pre-existing) lets you gate regressions *this change* caused without holding it hostage to inherited debt.
-
-**The phases:**
-
-**P0: Load context.** Read intent/ticket. Establish diff scope (`git diff` for uncommitted, `git diff <base>...HEAD` for a branch, where `<base>` is the branch's actual base (for a PR, `origin/<its base branch>`), never assumed to be `main`). Open full touched files. Load conventions.
-
-**P1: Understand intent.** Restate in one line what the change does and why this approach. Judge against *that*, not an imagined ideal.
-
-**P2: Systematic dimension review:** correctness/logic, regressions/blast-radius, security, perf/N+1, data/migrations/concurrency, API/backward-compat, tests adequacy, design/smells, readability/conventions.
-
-**P3: Classify every finding:** severity (`blocker | high | medium | low`) AND origin (`introduced | pre-existing`).
-
-**P4: Verify every finding with evidence** before reporting. Cite `file:line`, quote code, back with code/command/source. No proof → drop it.
-
-**P5: Apply gate.** Blockers must be fixed. High/medium introduced findings fixed now. Introduced low parked for user decision. Pre-existing never gates.
-
-**P6: Emit template:**
-```
-## Review: <intent>
-Verdict: PASS | CHANGES REQUIRED | BLOCKED
-Counts (introduced / pre-existing): blocker A/B · high C/D · medium E/F · low G/H
-
-### Introduced
-**Blockers**: [I-1] file:line: what | evidence: code | why: impact | fix: action
-**High**: [I-2] ...
-**Medium**: [I-3] ...
-**Low**: [I-4] ...
-
-### Pre-existing
-- [P-1] file:line: what | evidence: proof | why: impact | fix/ticket: suggestion
-
-### Verification log
-- [I-1] re-proof: read file / ran cmd / traced caller → upheld | discarded (reason)
-```
-
-When zero introduced blocker/high/medium findings, emit: `Verdict: PASS` + `✅ LGTM: No critical issues found.`
+**Why:** A second, evidence-bound pass catches what you miss, and one written protocol cannot drift from a copy of itself.
 
 ### 54. Keep exactly one unpushed commit per branch
 Before committing, count unpushed commits with `git rev-list --count HEAD --not --remotes`. If one exists and it holds this same work (git-guard's deny names its subject), fold the new work into it with `git commit --amend --no-edit` (or `--amend -m` to update the one-line message) without asking; if it holds unrelated work, do not amend: leave the change uncommitted and report that the branch already holds it; if several exist, do not commit or squash: leave the change uncommitted and tell the user the branch needs squashing first. Never rewrite a commit that is already on a remote. (The `git-guard` hook enforces this for commits and amends in Claude Code and Codex; resets, rebases and force-pushes are on you.)

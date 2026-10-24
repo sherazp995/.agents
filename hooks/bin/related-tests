@@ -31,8 +31,11 @@ task notifications do not start a new turn there; files changed only through she
 seen. Without a readable transcript every changed file counts.
 
 Failing tests block the stop with the output tail ({"decision": "deny", "reason": ...}) and mark the
-snapshot blocked. No changes, no related tests, a timeout or a hook already sending the agent back
-(stop_hook_active) let the turn end silently.
+snapshot blocked. A timeout kills the run's whole process group and blocks the stop once with an
+UNVERIFIED reason naming the commands to run by hand; it is never cached. No changes, no related tests
+or a hook already sending the agent back (stop_hook_active) let the turn end silently. The result cache
+is keyed on the whole dirty tree (tracked files as a tree, untracked file contents), HEAD and the
+commands, so work left dirty in an earlier turn cannot reuse a stale pass.
 
 Mapping: a repo file `.agents/project.toml` wins when it has a [tests] table:
     [tests]
@@ -59,6 +62,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -80,6 +84,7 @@ LAUNCH_ID = re.compile(r'(?:agentId|Task ID): *([\w-]+)')  # the task id a launc
 NOTIFICATION_ID = re.compile(r'<(task-id|tool-use-id)>([^<]+)</\1>')
 PENDING_LIMIT = 45 * 60  # seconds after which a launch that never reported back stops holding the turn
 UNTRACKED_CAP = 20_000  # above this many untracked files the snapshot records only their count
+UNTRACKED_LIMIT = 1_000_000  # bytes; a larger untracked file is keyed on its size and mtime
 SNAPSHOT_MAX_AGE = 24 * 3600  # seconds
 # Records that can neither edit, start or end a turn, launch or finish a background task are skipped unparsed.
 TRANSCRIPT_WORDS = ('tool_use', 'File: ', 'Move to: ', '"user', '"assistant', '_call', 'agent_message',
@@ -134,6 +139,29 @@ def file_stat(root, name):
     except OSError:
         return None
     return stat.st_size, stat.st_mtime_ns
+
+
+def untracked_content(root, name):
+    """An untracked file's bytes, or its size and mtime when it is large or unreadable."""
+    try:
+        if (root / name).is_file() and (root / name).stat().st_size <= UNTRACKED_LIMIT:
+            return (root / name).read_bytes()
+    except OSError:
+        pass
+    return repr(file_stat(root, name)).encode()
+
+
+def dirty_tree_digest(root):
+    """A digest of the working tree (tracked files as a tree id, untracked file contents), or None
+    when git fails."""
+    tree, names = worktree_tree(root), untracked_names(root)
+    if tree is None or names is None:
+        return None
+    digest = hashlib.sha256(tree.encode())
+    for name in names:
+        digest.update(f'\0{name}\0'.encode(errors='replace'))
+        digest.update(untracked_content(root, name))
+    return digest.hexdigest()
 
 
 def snapshot_file(session_id, root):
@@ -545,18 +573,39 @@ def run_all(commands, timeout):
     for cwd, argv in commands:
         shown = argv if isinstance(argv, str) else shlex.join(argv)
         try:
-            result = subprocess.run(argv, cwd=cwd, shell=isinstance(argv, str), capture_output=True, text=True,
-                                    env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
-                                    timeout=max(1, deadline - time.monotonic()), start_new_session=True)
-        except subprocess.TimeoutExpired:
-            return None, '\n'.join(output)
+            process = subprocess.Popen(argv, cwd=cwd, shell=isinstance(argv, str), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True,
+                                       env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}, start_new_session=True)
         except OSError as error:
             output.append(f'$ {shown}\n{error}')
             return 127, '\n'.join(output)
-        output.append(f'$ {shown}\n{result.stdout}{result.stderr}')
-        if result.returncode != 0:
-            return result.returncode, '\n'.join(output)
+        try:
+            stdout, stderr = process.communicate(timeout=max(1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            kill_group(process)
+            return None, '\n'.join(output)
+        output.append(f'$ {shown}\n{stdout}{stderr}')
+        if process.returncode != 0:
+            return process.returncode, '\n'.join(output)
     return 0, '\n'.join(output)
+
+
+def kill_group(process):
+    """Stop a timed-out run and everything left in its process group (spring, servers): TERM, a short
+    grace, then KILL. Waits only for the leader: a daemon that left the group may keep the pipes open."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except OSError:
+            break  # the group is gone, or only an unreaped leader is left (macOS refuses with EPERM)
+        if sig == signal.SIGTERM:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+    process.wait()
+    process.stdout.close()
+    process.stderr.close()
 
 
 def load_config(root):
@@ -600,7 +649,8 @@ def verdict(event):
 
 def test_changes(root, changed):
     """(verdict, finished): the deny verdict when related tests fail, and whether the turn's testing is
-    done (False on a failure or a timeout, so the snapshot stays and the next Stop tests again)."""
+    done (False on a failure or a timeout, so the snapshot stays and the next Stop tests again). A timeout
+    is a deny that says the tests are UNVERIFIED, and is never cached."""
     if not changed:
         return None, True
     config = load_config(root)
@@ -611,20 +661,27 @@ def test_changes(root, changed):
         commands = [(root, config['command'].replace('{files}', shlex.join(tests)))]
     else:
         commands = runner_commands(root, tests)
+    tree = dirty_tree_digest(root)
     digest = file_digest(root, changed + tests + lockfiles(root, commands))
     head = (git(root, 'rev-parse', 'HEAD') or '').strip()
-    digest.update(json.dumps([str(root), head, [[str(c), a] for c, a in commands]]).encode())
+    digest.update(json.dumps([str(root), head, tree, [[str(c), a] for c, a in commands]]).encode())
     cache = CACHE / f'{digest.hexdigest()}.json'
     try:
+        if tree is None:
+            raise OSError('no tree digest: run without the cache')
         cached = json.loads(cache.read_text())
         code, output = cached['exit'], cached['output']
     except (OSError, ValueError, KeyError):
-        code, output = run_all(commands, int(config.get('timeout', DEFAULT_TIMEOUT)))
+        timeout = int(config.get('timeout', DEFAULT_TIMEOUT))
+        code, output = run_all(commands, timeout)
         if code is None:
-            print('related-tests: timed out; the turn may end', file=sys.stderr)
-            return None, False
-        CACHE.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({'exit': code, 'output': output, 'tests': tests}))
+            shown = '\n'.join(a if isinstance(a, str) else shlex.join(a) for _, a in commands)
+            return {'decision': 'deny',
+                    'reason': f'UNVERIFIED: related tests timed out after {timeout} s ({", ".join(tests)}). '
+                              f'Run them by hand and report their result:\n{shown}'}, False
+        if tree is not None:
+            CACHE.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({'exit': code, 'output': output, 'tests': tests}))
     if code == 0:
         return None, True
     tail = '\n'.join(output.splitlines()[-TAIL_LINES:])

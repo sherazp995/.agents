@@ -1,17 +1,18 @@
 ---
 name: interview-me
-description: Find out what the user actually wants before any plan exists, by asking one question at a time, each with a guess attached, until you can predict their answers (about 95% confidence), then get an explicit yes on a short statement of intent. Required before every plan (doing-substantial-work step 2, plan mode, work-council, any "plan this" request). Also use when the user says "interview me", "grill me", "are we sure?" or "stress-test my thinking". Skipped only for mechanical asks (rename, typo, file move), pure questions, or when the user's message already states outcome, user, success, constraint and out of scope.
+description: Find out what the user actually wants before any plan exists. By default the short form: restate the intent in six lines and get an explicit yes. Only when the intent is unclear (or the user asks) ask one question at a time, each with a guess attached, until you can predict their answers. Runs before a plan is written (doing-substantial-work step 2, plan mode, work-council, any "plan this" request). Also use when the user says "interview me", "grill me", "are we sure?" or "stress-test my thinking". Skipped for mechanical asks (rename, typo, file move), pure questions, or when the user's message already states all six intent lines.
 ---
 
 # Interview me
 
-What people ask for and what they want differ. "A dashboard" may mean "a list". "Make it faster" has no number. The cheapest moment to find the gap is before the plan, so this runs first in every planning phase.
+What people ask for and what they want differ. "A dashboard" may mean "a list". "Make it faster" has no number. The cheapest moment to find the gap is before the plan, so this runs first in every planning phase, as cheaply as the request allows.
 
 ## When it runs
 
-- **Always** before a plan is written: `doing-substantial-work` step 2, plan mode, `work-council`, `llm-council` questions about what to build, and any "plan this" request.
+- **Before a plan is written:** `doing-substantial-work` step 2, plan mode, `work-council`, `llm-council` questions about what to build, and any "plan this" request.
+- **Short form (the default):** read the code first, then go straight to the restate (step 4) and ask for a yes. The user's corrections refine it.
+- **Full interview (steps 1 to 3)** only when the intent is unclear (you could not fill a restate line with a confident guess, roughly below 80%) or the user asks ("interview me", "grill me").
 - **Skip it** for mechanical work (rename, typo, format, file move), pure information questions, or when the request already answers all six restate lines below. When you skip, say so in one line in the plan ("Intent was fully stated, no interview").
-- **Short form** when you are already above about 80%: skip straight to the restate (step 4) and ask for a yes.
 - **Never** in non-interactive runs (CI, `/loop`, scheduled or autonomous runs, subagents). There, write the open questions into the report as blockers instead of guessing.
 
 ## The process

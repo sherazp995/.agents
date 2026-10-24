@@ -152,6 +152,29 @@ test('a missing check result counts as not passing', async () => {
   assert.equal(result.decidedBy, 'checks')
 })
 
+const FAILING = [{ command: 'npm test', exitCode: 1, tail: 'boom' }, { command: 'npm run lint', exitCode: 0, tail: '' }]
+
+test('a sole usable candidate that failed its checks never wins', async () => {
+  const { result } = await run({
+    'builder:claude': null,
+    'builder:codex': candidate('codex', { checks: FAILING }),
+  })
+  assert.equal(result.winner, null)
+  assert.deepEqual(result.missing.map((m) => [m.builder, m.reason]), [['claude', 'builder failed'], ['codex', 'failed checks']])
+  assert.equal(result.missing[1].worktreePath, '/tmp/wt-2')
+})
+
+test('two failing candidates give no winner and no judge calls', async () => {
+  const { result, calls } = await run({
+    'builder:claude': candidate('claude', { checks: FAILING }),
+    'builder:codex': candidate('codex', { checks: FAILING }),
+  })
+  assert.equal(result.winner, null)
+  assert.equal(result.decidedBy, 'none')
+  assert.deepEqual(result.missing.map((m) => m.reason), ['failed checks', 'failed checks'])
+  assert.equal(calls.filter((c) => c.opts.label.startsWith('judge:')).length, 0)
+})
+
 test('agreeing judges decide and their grafts are kept', async () => {
   const { result, calls } = await run({
     'builder:claude': candidate('claude'),

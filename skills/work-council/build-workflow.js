@@ -135,7 +135,10 @@ const built = (await parallel(BUILDERS.map((b) => () =>
   agent(b.prompt, { label: `builder:${b.id}`, phase: 'Build', isolation: 'worktree', schema: CANDIDATE_SCHEMA, ...b.opts }),
 ))).map((result, i) => ({ builder: BUILDERS[i].id, ...(result ?? {}) }))
 
-const candidates = built.filter(usable).map((c) => ({ ...c, passedAllChecks: passedAll(c) }))
+const usableBuilds = built.filter(usable).map((c) => ({ ...c, passedAllChecks: passedAll(c) }))
+// Only a candidate that passed every check can win; a failing one is reported with its worktree.
+const candidates = usableBuilds.filter((c) => c.passedAllChecks)
+const failed = usableBuilds.filter((c) => !c.passedAllChecks)
 const missing = built
   .filter((c) => !usable(c))
   .map((c) => ({
@@ -146,7 +149,8 @@ const missing = built
       : 'nothing staged',
     notes: c.notes ?? '',
   }))
-if (missing.length) log(`No usable candidate from: ${missing.map((m) => `${m.builder} (${m.reason})`).join(', ')}`)
+  .concat(failed.map((c) => ({ builder: c.builder, reason: 'failed checks', notes: c.notes ?? '', worktreePath: c.worktreePath })))
+if (missing.length) log(`Not eligible to win: ${missing.map((m) => `${m.builder} (${m.reason})`).join(', ')}`)
 
 const result = (overrides) => ({
   task: TASK,
@@ -161,14 +165,14 @@ const result = (overrides) => ({
 })
 
 if (!candidates.length) return result({})
-if (candidates.length === 1) return result({ winner: candidates[0], decidedBy: 'only-candidate' })
-
 // Checks decide before taste: a candidate that passes every check beats one that does not.
-const [first, second] = candidates
-if (first.passedAllChecks !== second.passedAllChecks) {
-  const [winner, runnerUp] = first.passedAllChecks ? [first, second] : [second, first]
-  return result({ winner, runnerUp, decidedBy: 'checks' })
+if (candidates.length === 1) {
+  return result(failed.length
+    ? { winner: candidates[0], runnerUp: failed[0], decidedBy: 'checks' }
+    : { winner: candidates[0], decidedBy: 'only-candidate' })
 }
+
+const [first, second] = candidates
 
 phase('Judge')
 // Anonymized as X and Y; judges never learn which model built which.

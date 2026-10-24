@@ -62,22 +62,74 @@ def check(home, repo_only=False):
 
 
 def check_repo(hub):
-    """The checks that read only the checkout: selected skills exist and AGENTS.md links survive symlinks."""
+    """The checks that read only the checkout: selected skills exist and are all listed, AGENTS.md links
+    survive symlinks, and skill references in the rule and skill docs resolve (check_references)."""
     data = json.loads((hub / 'selected-skills.json').read_text())
     shared = hub / 'skills'
     # App-owned folders: Claude syncs organization skills and Codex rewrites its system skills.
     # Git-ignored folders are downloaded third-party skills (AGENTS.md names their source), not authored.
     names = [p.name for p in shared.iterdir() if not p.name.startswith('.') and p.name != 'synced']
-    ignored = subprocess.run(['git', 'check-ignore', '--stdin'], cwd=hub, capture_output=True, text=True,
-                             input='\n'.join(f'skills/{n}' for n in names)).stdout.split()
-    authored = set(names) - {Path(p).name for p in ignored}
+    authored = set(names) - ignored_folders(hub, [f'skills/{n}' for n in names])
     assert set(data['skills']) <= authored, f'Selected skills missing: {sorted(set(data["skills"]) - authored)}'
-    if authored - set(data['skills']):
-        WARNINGS.append(f'skills not listed in selected-skills.json: {sorted(authored - set(data["skills"]))}')
+    assert authored <= set(data['skills']), \
+        f'Skills not listed in selected-skills.json: {sorted(authored - set(data["skills"]))}'
     agents_md = (hub / 'AGENTS.md').read_text()
     assert not re.search(r'\]\((?!~/|/|https?:)', agents_md), 'AGENTS.md has a relative link; it breaks through symlinks'
     assert re.search(r'\]\((/|~/)[^)]*AGENTS-CONFIG\.md\)', agents_md), 'AGENTS.md does not link AGENTS-CONFIG.md'
+    broken = check_references(hub)
+    assert not broken, 'Broken skill references:\n    ' + '\n    '.join(broken)
     return data, authored
+
+
+def ignored_folders(hub, folders):
+    """The names of the given repo-relative folders that git ignores. Each is asked with a trailing
+    slash, so a directory pattern (`skills/brag/`) matches even when the folder is absent."""
+    found = subprocess.run(['git', 'check-ignore', '--stdin'], cwd=hub, capture_output=True, text=True,
+                           input='\n'.join(f'{f.rstrip("/")}/' for f in folders)).stdout.split()
+    return {Path(f).name for f in found}
+
+
+STEP_REF = re.compile(r'`([a-z0-9_-]+)` steps? (\d+)(?: (?:to|and) (\d+))?')
+SKILL_REF = re.compile(r'`([a-z0-9_-]+)` skill\b')
+PATH_REF = re.compile(r'(?:~/\.agents/|(?<![/.\w]))skills/([a-z0-9_-]+)(?=/|\b)')
+
+
+def check_references(hub):
+    """path:line for each skill reference in AGENTS*.md, skills/*/SKILL.md and skills/*/references/*.md
+    that does not resolve. Fenced code blocks are skipped. The forms checked, and only these:
+    (1) `name` step N, `name` steps N to M or N and M (both ends): the skill's SKILL.md has a numbered step N
+        (a line `N. **...` or a heading `## N. ...`);
+    (2) `name` skill: skills/<name>/SKILL.md exists;
+    (3) ~/.agents/skills/<name> or a bare skills/<name> (not inside another path such as
+        .claude/skills/<name>): skills/<name>/ exists.
+    A folder git ignores (a downloaded third-party skill) is skipped."""
+    docs = sorted(hub.glob('AGENTS*.md')) + sorted(hub.glob('skills/*/SKILL.md')) \
+        + sorted(hub.glob('skills/*/references/*.md'))
+    refs = []  # (where, name, steps)
+    for doc in docs:
+        fenced = False
+        for number, line in enumerate(doc.read_text(errors='replace').splitlines(), 1):
+            if line.lstrip().startswith('```'):
+                fenced = not fenced
+            if fenced or line.lstrip().startswith('```'):
+                continue
+            where = f'{doc.relative_to(hub)}:{number}'
+            refs += [(where, m[1], [int(n) for n in m.groups()[1:] if n]) for m in STEP_REF.finditer(line)]
+            refs += [(where, m[1], []) for m in SKILL_REF.finditer(line)]
+            refs += [(where, m[1], []) for m in PATH_REF.finditer(line)]
+    ignored = ignored_folders(hub, sorted({f'skills/{name}' for _, name, _ in refs}))
+    broken = []
+    for where, name, steps in refs:
+        skill = hub / 'skills' / name / 'SKILL.md'
+        if name in ignored:
+            continue
+        if not skill.is_file():
+            broken.append(f'{where}: no skill `{name}`')
+            continue
+        text = skill.read_text(errors='replace')
+        broken += [f'{where}: `{name}` has no step {n}' for n in steps
+                   if not re.search(rf'^(?:{n}\. \*\*|#+ {n}\. )', text, re.M)]
+    return broken
 
 
 def check_skills_and_rules(home, hub):

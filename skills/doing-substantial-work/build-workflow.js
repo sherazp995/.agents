@@ -1,6 +1,6 @@
 export const meta = {
   name: 'doing-substantial-work-build',
-  description: 'Build plan cards with builder agents, recheck each pass/fail command independently, prove it in the real product, then review and fix until general-review passes',
+  description: 'Stale: predates rethink and the current doing-substantial-work steps; kept for run-workflow.mjs callers; not maintained. Build plan cards with builder agents, recheck each pass/fail command independently, prove it in the real product, then review and fix until general-review passes',
   whenToUse: 'Steps 3 to 6 of the doing-substantial-work skill, launched from the chat session',
   phases: [
     { title: 'Build', detail: 'one builder agent per card, then an independent recheck of its command' },
@@ -8,6 +8,9 @@ export const meta = {
     { title: 'Review', detail: 'general-review of the real diff by a fresh lead and a sibling diff-only agent, a fixer for introduced findings, rounds by tier' },
   ],
 }
+
+// Stale: predates rethink and the current doing-substantial-work steps; kept for run-workflow.mjs callers;
+// not maintained. Its risk lists and review rounds below are not policy (see rethink's "Tiers").
 
 // args: { repo, plan, intent?, cards: [{ id, title, files?, command, after?, agentType?, model? }],
 //         sequential?, proof?, review?, risky?, tier?, base?, maxAttempts? }
