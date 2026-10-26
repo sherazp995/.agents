@@ -1,4 +1,4 @@
-Run owner: {RUNNER}; run ID: {RUN_ID}. The parent has selected the isolated ledger namespace {L} and holds any required lock. Clean only that namespace. Never change locks, legacy root records, other runner namespaces, worktrees or databases.
+Run owner: {RUNNER}; run ID: {RUN_ID}. The parent holds the cleanup lock for the ledger namespace {L}. Clean only that namespace. Never change locks, legacy root records, other runner namespaces, worktrees or databases. Keep every key that has a `{L}/<key>.lock/` folder: a review of it is running.
 
 Clean the PR review ledger at {L}. Delete only the records of work that is finished: merged or closed PRs, and branches that are merged or deleted. Do not post to GitHub or Slack. The only git commands allowed are the read-only ones below, run as `cd {REPO} && git …` (never `git -C`, global rule 43). Never fetch, checkout or change refs.
 

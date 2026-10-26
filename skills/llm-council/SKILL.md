@@ -130,7 +130,7 @@ Start with one line naming the council that ran. Then render two parts, in this 
 - The chairman and every peer reviewer run on Claude, because the workflow needs Claude for
   the structured ranking and the synthesis. Keep that possible bias in mind when Claude
   members top the leaderboard.
-- Codex members: a thin Claude relay runs `codex exec` with a read-only sandbox, approvals
+- Codex members (AGENTS.md delegation exception 6; waits follow [host-lifecycle.md](../workflow-runner/references/host-lifecycle.md)): a thin Claude relay runs `codex exec` with a read-only sandbox, approvals
   off, and the Codex user config and exec-policy allow rules ignored, then returns Codex's
   answer verbatim. The relay keeps its temporary files only while Codex runs: the prompt copy
   and log are deleted as soon as Codex returns, and the answer right after it is read. They need the `codex` CLI installed and signed in. Each run is capped by

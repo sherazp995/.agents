@@ -1,4 +1,4 @@
-"""Offline launcher regressions. Run with python3 tests/test_launch.py."""
+"""Offline launcher regressions. Run with python3 scripts/test_launch.py."""
 import os
 from pathlib import Path
 import shutil
@@ -14,12 +14,12 @@ name=${0##*/}
 if [[ "$name" == claude ]]; then
   report=/dev/stdout
   status=${CLAUDE_STATUS:-0}
-  body=${CLAUDE_BODY-Review complete}
+  body=${CLAUDE_BODY-Verdict: PASS}
 else
   while [[ "$1" != -o ]]; do shift; done
   report=$2
   status=${CODEX_STATUS:-0}
-  body=${CODEX_BODY-Review complete}
+  body=${CODEX_BODY-Verdict: PASS}
 fi
 if [[ ${BLOCK:-0} == 1 ]]; then
   sleep 60 &
@@ -44,7 +44,7 @@ class LauncherTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.bin = self.root / 'bin'
         self.bin.mkdir()
-        for command in ('mkdir', 'date', 'rm', 'cat', 'grep', 'sleep'):
+        for command in ('mkdir', 'date', 'rm', 'cat', 'grep', 'sleep', 'ps'):
             (self.bin / command).symlink_to(shutil.which(command))
         for reviewer in ('claude', 'codex'):
             path = self.bin / reviewer
@@ -63,7 +63,7 @@ class LauncherTest(unittest.TestCase):
     def result(self, expected, **environment):
         self.run = self.root / f'run-{time.monotonic_ns()}'
         process = self.launch(**environment)
-        output = process.communicate(timeout=5)
+        output = process.communicate(timeout=10)
         self.assertEqual(process.returncode, expected, output)
         self.assertEqual((self.run / 'launcher.exit').read_text().strip(), str(expected))
         self.assertTrue((self.run / 'finished_at').exists())
@@ -72,8 +72,35 @@ class LauncherTest(unittest.TestCase):
     def test_success_collects_both_reports(self):
         self.result(0)
         for reviewer in ('claude', 'codex'):
-            self.assertEqual((self.run / f'{reviewer}.md').read_text(), 'Review complete')
+            self.assertEqual((self.run / f'{reviewer}.md').read_text(), 'Verdict: PASS')
             self.assertEqual((self.run / f'{reviewer}.exit').read_text().strip(), '0')
+
+    def test_report_needs_a_whole_line_verdict(self):
+        for body, expected in [('Still running; Verdict: soon', 1), ('**Verdict: Approve.**', 0),
+                               ('| PR | State | Result |\n|---|---|---|', 0)]:
+            with self.subTest(body=body):
+                self.result(expected, CLAUDE_BODY=body)
+                self.assertEqual((self.run / 'claude.incomplete').exists(), expected == 1)
+
+    def test_deadline_stops_both_reviewers(self):
+        for path in self.root.glob('*.child'):
+            path.unlink()
+        # Long enough for both fixtures to start and record their child.
+        self.result(124, BLOCK='1', DUAL_PR_REVIEW_TIMEOUT='3')
+        self.assertEqual((self.run / 'interrupted').read_text().strip(), 'TIMEOUT')
+        for reviewer in ('claude', 'codex'):
+            self.assertEqual((self.run / f'{reviewer}.exit').read_text().strip(), '124')
+            child = int((self.root / f'{reviewer}.child').read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child, 0)
+
+    def test_invalid_deadline_is_rejected(self):
+        for value in ('abc', '0', '-5', '1.5'):
+            with self.subTest(value=value):
+                process = self.launch(DUAL_PR_REVIEW_TIMEOUT=value)
+                process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 2)
+                self.assertFalse(self.run.exists())
 
     def test_failures_preserve_status_and_wait_for_both(self):
         for claude, codex, expected in [('7', '0', 7), ('0', '9', 9), ('7', '9', 7)]:

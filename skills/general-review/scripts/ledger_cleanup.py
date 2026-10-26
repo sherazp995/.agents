@@ -24,10 +24,18 @@ WITH_LOCK = os.path.join(HERE, "with_lock.py")
 CHANGED, BUSY = 3, 75
 
 
+CMD_TIMEOUT = 120  # seconds per gh or git call
+
+
 def run(cmd, cwd):
-    """Run a read-only gh or git command; return (exit code, stdout)."""
+    """Run a read-only gh or git command; return (exit code, stdout).
+
+    A timeout returns 124 like any other failure; callers treat a failed lookup as "unknown" and keep the record.
+    """
     try:
-        done = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        done = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=CMD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, ""
     except OSError:
         return 127, ""
     return done.returncode, done.stdout
@@ -75,7 +83,9 @@ class Checker:
         return run(["git", *args], self.repo)
 
     def local_branch_exists(self, branch):
-        return self.git("show-ref", "--verify", "--quiet", f"refs/heads/{branch}")[0] == 0
+        """True or False from git; None when the lookup failed (timeout or error), which is not absence."""
+        code = self.git("show-ref", "--verify", "--quiet", f"refs/heads/{branch}")[0]
+        return {0: True, 1: False}.get(code)
 
     def absent_on_origin(self, branch):
         code, out = self.git("ls-remote", "--heads", "origin", f"refs/heads/{branch}")
@@ -89,10 +99,16 @@ class Checker:
         return (state in ("MERGED", "CLOSED"), state.lower() if state else "unknown")
 
     def branch_finished(self, branch, base):
-        if self.gh("pr", "list", "--head", branch, "--state", "all", "--json", "number", "-q", ".[0].number"):
+        pr = self.gh("pr", "list", "--head", branch, "--state", "all", "--json", "number", "-q", ".[0].number")
+        if pr:
             return False, "has a PR"
+        if pr is None and self.gh_repo != "none":
+            return False, "PR lookup failed"
         if self.absent_on_origin(branch):
-            if self.local_branch_exists(branch):
+            local = self.local_branch_exists(branch)
+            if local is None:
+                return False, "local lookup failed"
+            if local:
                 return False, "still exists locally"
             return True, "deleted on origin"
         if not base:
@@ -109,7 +125,7 @@ class Checker:
     def local_finished(self, branch):
         if branch == "detached":
             return False, "detached"
-        if not self.local_branch_exists(branch) and self.absent_on_origin(branch):
+        if self.local_branch_exists(branch) is False and self.absent_on_origin(branch):
             return True, "deleted"
         return False, "branch still exists"
 

@@ -63,7 +63,8 @@ const parseCli = (argv) => {
   return opts
 }
 
-const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
+// A hung git throws after 60 s instead of holding the run open.
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' }).trim()
 
 // One slot per running agent, so a 100-item parallel() still runs only MAX_CONCURRENT at once.
 const makeLimiter = (limit) => {

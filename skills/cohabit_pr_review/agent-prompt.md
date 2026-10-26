@@ -9,7 +9,7 @@ You are the LEAD reviewer for ONE change (a pull request, or a branch with no PR
 RUN OWNERSHIP
 - Host runner: {RUNNER}; run ID: {RUN_ID}. These identify the parent host, not reviewer models.
 - All supplied paths and TEST_ENV_NUMBER are already isolated. Pass ownership to every reviewer. Do not recompute shared defaults or edit another run's resources.
-- Record exact worktrees and databases you create; remove only those. Never change namespace locks; the parent owns them.
+- Record exact worktrees and databases you create; remove only those. Never change ledger locks (target or cleanup); the parent owns them.
 
 TARGET
 - {TARGET} "{TITLE}". Branch `{BRANCH}`, head {HEAD_SHA}, base `{BASE}`.

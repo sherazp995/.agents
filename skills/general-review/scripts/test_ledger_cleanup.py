@@ -95,17 +95,34 @@ class Decisions(Base):
 
     def test_branch_deleted_on_origin_needs_local_absence_and_a_successful_lookup(self):
         self.write("branch-a%25b/claude.md")
-        self.responses["ls-remote --heads origin refs/heads/a%b"] = (0, "")
+        no_pr = {"gh pr list --head a%b": (0, "")}
+        self.responses = dict(no_pr, **{"ls-remote --heads origin refs/heads/a%b": (0, "")})
         self.assertIn("Would clean", self.cleanup())
-        self.responses = {"show-ref --verify --quiet refs/heads/a%b": (0, ""),
-                          "ls-remote --heads origin refs/heads/a%b": (0, "")}
+        self.responses = dict(no_pr, **{"show-ref --verify --quiet refs/heads/a%b": (0, ""),
+                                        "ls-remote --heads origin refs/heads/a%b": (0, "")})
         self.assertIn("Kept: branch-a%25b (still exists locally)", self.cleanup())
-        self.responses = {}  # failed remote lookup is not evidence of deletion
+        self.responses = dict(no_pr)  # failed remote lookup is not evidence of deletion
         self.assertIn("Kept: branch-a%25b (not merged)", self.cleanup())
+
+    def test_failed_or_timed_out_lookups_never_clean(self):
+        self.write("branch-a/claude.md")
+        self.write("local-b/claude.md")
+        gone = {"ls-remote --heads origin refs/heads/a": (0, ""), "ls-remote --heads origin refs/heads/b": (0, "")}
+        self.responses = dict(gone, **{"gh pr list --head a": (124, "")})
+        out = self.cleanup()
+        self.assertIn("Kept: branch-a (PR lookup failed)", out)
+        self.responses = dict(gone, **{"gh pr list --head a": (0, ""),
+                                       "show-ref --verify --quiet refs/heads/a": (124, ""),
+                                       "show-ref --verify --quiet refs/heads/b": (124, "")})
+        out = self.cleanup()
+        self.assertIn("branch-a (local lookup failed)", out)
+        self.assertIn("local-b (branch still exists)", out)
+        self.assertIn("Nothing to clean", out)
 
     def test_branch_merged_into_base_is_finished_only_when_both_commits_exist(self):
         self.write("branch-x/claude.md")
         self.responses = {
+            "gh pr list --head x": (0, ""),
             "ls-remote --heads origin refs/heads/x": (0, "aaa\trefs/heads/x\n"),
             "ls-remote origin refs/heads/x refs/heads/main": (0, "aaa\trefs/heads/x\nbbb\trefs/heads/main\n"),
             "cat-file -e aaa": (0, ""),

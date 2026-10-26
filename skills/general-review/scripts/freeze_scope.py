@@ -30,9 +30,13 @@ import sys
 UNTRACKED_DROPPED = ("tmp/", "log/", "coverage/", ".nyc_output/")
 
 
+GIT_TIMEOUT = 300  # seconds; a hung git raises TimeoutExpired and the freeze fails instead of waiting forever
+
+
 def git(*args, env=None, stdin=None, cwd=None):
     full = dict(os.environ, GIT_OPTIONAL_LOCKS="0", **(env or {}))
-    return subprocess.run(["git", *args], cwd=cwd, env=full, input=stdin, capture_output=True, check=True).stdout
+    return subprocess.run(["git", *args], cwd=cwd, env=full, input=stdin, capture_output=True, check=True,
+                          timeout=GIT_TIMEOUT).stdout
 
 
 def zsplit(out):

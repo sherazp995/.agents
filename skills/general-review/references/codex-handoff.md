@@ -1,6 +1,6 @@
 # Codex second opinion
 
-Every general review gets an independent review from Codex on `gpt-6-astra`. Start it once the scope is frozen, run it in the background, and keep reviewing while it runs.
+Every general review gets an independent review from Codex on `gpt-6-astra`. Start it once the scope is frozen, run it in the background (Claude Code: Bash with `run_in_background`; a foreground call is killed at 10 minutes), and keep reviewing while it runs. Before the merge, wait for it inside your turn as [host-lifecycle.md](../../workflow-runner/references/host-lifecycle.md) says.
 
 **When the host is Codex,** the second opinion must come from the other model, Claude. The host is the RUNNER that runs SKILL.md as coordinator or review lead; a second-opinion reviewer started from this file is never the host and never runs this step. Use the same prompt below and ask Claude through the sibling `workflow-runner` skill's `second-opinion.js` workflow, which runs one read-only Claude agent. On this machine a Codex allow rule (`~/.codex/rules/default.rules`) runs the runner outside the sandbox, where Claude can read its login. Run these as three separate commands, from inside the repository, with absolute paths:
 
@@ -29,7 +29,7 @@ mkdir -p "$REVIEW_TMP"
 cat > "$REVIEW_TMP/codex-review-<short-tag>.prompt" <<'CODEX_REVIEW_PROMPT'
 <prompt below>
 CODEX_REVIEW_PROMPT
-timeout 1800 codex exec -m gpt-6-astra --sandbox read-only -c approval_policy=never --ignore-user-config --ignore-rules --ephemeral --color never -c 'model_reasoning_effort="high"' -c 'mcp_servers={}' - \
+timeout --kill-after=30 1800 codex exec -m gpt-6-astra --sandbox read-only -c approval_policy=never --ignore-user-config --ignore-rules --ephemeral --color never -c 'model_reasoning_effort="high"' -c 'mcp_servers={}' - \
   < "$REVIEW_TMP/codex-review-<short-tag>.prompt" \
   > "$REVIEW_TMP/codex-review-<short-tag>.log" 2>&1
 ```
@@ -37,12 +37,12 @@ timeout 1800 codex exec -m gpt-6-astra --sandbox read-only -c approval_policy=ne
 **PR batch** (inside the lead's throwaway merged worktree, writable so Codex can run tests there; the prompt is the lead's `codex.prompt.md`):
 
 ```bash
-cd {WORKDIR}/wt && { [ -f {WORKDIR}/ruby-env.sh ] && source {WORKDIR}/ruby-env.sh; true; } && timeout 1800 codex exec -C {WORKDIR}/wt -m gpt-6-astra -s workspace-write --ephemeral --color never \
+cd {WORKDIR}/wt && { [ -f {WORKDIR}/ruby-env.sh ] && source {WORKDIR}/ruby-env.sh; true; } && timeout --kill-after=30 1800 codex exec -C {WORKDIR}/wt -m gpt-6-astra -s workspace-write --ephemeral --color never \
   -c 'model_reasoning_effort="high"' -c 'mcp_servers={}' -c 'shell_environment_policy.inherit="all"' \
   -o {WORKDIR}/codex-review.md - < {WORKDIR}/codex.prompt.md > {WORKDIR}/codex.log 2>&1
 ```
 
-If `timeout` is not installed, use `gtimeout`; if neither exists, run without it and stop waiting after 30 minutes.
+If `timeout` is not installed, use `gtimeout`. If neither exists, do not run Codex: record `codex: not run (no timeout tool)` as a limitation, so a stuck call can never hold the review open.
 
 **Fallback, both variants:** if the model is rejected, rerun once with `-m gpt-5.6-sol` and say so in the report. In every other failure (Codex missing, an error, a timeout, empty output), or when the fallback model also fails, do not retry: record the command, exit status and log path as a limitation and continue. In PR batch mode the lead then starts one fresh `general-purpose` agent with the same prompt as the senior-engineer reviewer, and the report says so.
 

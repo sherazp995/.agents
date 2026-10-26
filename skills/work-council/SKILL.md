@@ -23,7 +23,7 @@ To run a workflow script with args:
 - **Claude Code:** `Workflow({ scriptPath: "<absolute script path>", args: <args> })`. The Run ID is printed with the launch.
 - **Codex or another host:** from inside the repository, with the longest command timeout the host allows (each agent may take up to 30 minutes, and phases run one after another; if the host's limit is shorter, run it in the background and wait for it), `node <skills folder>/workflow-runner/run-workflow.mjs <absolute script path> --args @<args.json>` (write args to a JSON file in `WC_TMP`). Its output is `{ "runId", "result" }`; `runId` is the Run ID. See `workflow-runner`'s SKILL.md for the one-time Codex setup.
 
-The Codex builder runs `codex exec --sandbox workspace-write`, which a permission mode (such as auto mode) may deny. Then the build yields one candidate, which wins (`decidedBy: only-candidate`) only if it passed every check. Never work around a denial; tell the user, who can approve that command or add a permission rule for it and rerun.
+The Codex builder (AGENTS.md delegation exception 6; waits follow [host-lifecycle.md](../workflow-runner/references/host-lifecycle.md)) runs `codex exec --sandbox workspace-write`, which a permission mode (such as auto mode) may deny. Then the build yields one candidate, which wins (`decidedBy: only-candidate`) only if it passed every check. Never work around a denial; tell the user, who can approve that command or add a permission rule for it and rerun.
 
 Estimated cost: about 15 agents, 3 Codex runs, a few minutes. Model and effort per agent are set in each script's header table: cheap relays (haiku, low), one opus high plus one sonnet medium judge, opus high tie-breaker only on a split.
 

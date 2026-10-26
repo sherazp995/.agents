@@ -17,6 +17,7 @@ There are no per-language agents. Expertise lives in skills, which load only whe
 | Any planning phase (before a plan, plan mode, work-council), or "interview me"; it runs in the session, before any `Plan` agent | `interview-me` |
 | A failing test, broken build, regression or bug report | `debugging` |
 | Setting or guarding a project's quality bar, or a repo with `CONSTRAINTS.md` | `constraint-driven` |
+| Writing any chat reply to the user, or "sound more human", "less robotic" | `human-conversation` |
 | iOS or Android UI | `mobile-design` |
 
 A change across stacks loads each matching skill. A subagent you start gets the skill names in its brief.
