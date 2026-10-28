@@ -1,0 +1,85 @@
+# Relay Slack app manifest.
+#
+# Paste this into api.slack.com/apps when creating the app "from a manifest".
+# It encodes exactly the scopes the code declares in SLACK_BOT_SCOPES, so the
+# scopes granted at install time match what `relay doctor` expects. Editing
+# the scope list here without editing the code will make the doctor's
+# slack-scopes check fail, which is the intended behaviour.
+#
+# Deliberately absent: search:read and users:read.email, and every other
+# workspace wide read scope. Relay sees only the channels it is invited to
+# plus its own DMs, per FR-SLA-5.
+
+display_information:
+  name: Relay
+  description: Chat driven computer use agent
+  background_color: "#2c2d30"
+
+features:
+  bot_user:
+    display_name: Relay
+    always_online: false
+  # Without this block Slack defaults the Messages tab to read only, which
+  # shows "Sending messages to this app has been turned off" and makes DMs to
+  # the bot impossible. The bot can still post to you, so the failure looks
+  # like a one way channel rather than a settings problem.
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  # Declared so the `commands` scope is legitimately requested. Socket Mode
+  # means no request URL is needed. The command is not implemented until
+  # phase 2 (FR-SL-9); it exists here only to justify the scope.
+  slash_commands:
+    # Puts this thread in DIRECT mode: an ordinary Claude Code session in a
+    # directory, which Relay carries messages to and from. Unmediated, and
+    # the reply says so. Everything else stays governed.
+    - command: /direct
+      description: Start a plain Claude Code session in a directory
+      usage_hint: "[directory] [first message]"
+      should_escape: false
+    - command: /relay
+      description: Run a Relay task
+      usage_hint: "[task]"
+      should_escape: false
+    # FR-ATT-5. Lists the Claude Code sessions already on the operator's
+    # machine and lets them bind this thread to one, so work runs in that
+    # project with its own skills, agents, and settings.
+    #
+    # The adapter also answers a plain message reading exactly "sessions",
+    # deliberately kept alongside this: that trigger needs no manifest change
+    # and so survives a reinstall that omits this declaration. Slack only
+    # autocompletes the declared one, which is why this exists.
+    - command: /sessions
+      description: List your Claude Code sessions and attach this thread to one
+      usage_hint: ""
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - im:history
+      - im:read
+      - im:write
+      - channels:history
+      - groups:history
+      - files:read
+      - files:write
+      - reactions:read
+      - reactions:write
+      - commands
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

@@ -1,0 +1,53 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "description": "Chat-driven computer-use agent: message Slack, Relay runs the work on your Mac under policy and answers in the thread.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "bin": {
+    "relay": "./dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "dist/scripts",
+    "dist/egress-audit.json",
+    "config/profiles.example.yaml",
+    "docs/slack-app-manifest.yaml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsc -p tsconfig.json && node dist/src/cli.js",
+    "slack:smoke": "tsc -p tsconfig.json && node dist/scripts/slack-smoke.js",
+    "orchestrator:live": "tsc -p tsconfig.json && node dist/scripts/relay-orchestrator.js",
+    "prepublishOnly": "pnpm typecheck && pnpm build && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/pg": "8.11.10",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  },
+  "dependencies": {
+    "@slack/bolt": "^5.0.0",
+    "@slack/web-api": "^8.0.0",
+    "commander": "12.1.0",
+    "ioredis": "5.4.2",
+    "pg": "8.13.1",
+    "pino": "9.5.0",
+    "rotating-file-stream": "3.2.9",
+    "smol-toml": "1.3.1",
+    "yaml": "2.6.1",
+    "zod": "3.24.1"
+  }
+}

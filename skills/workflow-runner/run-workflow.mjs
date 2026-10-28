@@ -162,7 +162,7 @@ export const createRuntime = ({ repoRoot, runId, log = (m) => process.stderr.wri
   const permissionMode = (opts) =>
     opts.agentType === 'Plan' ? 'plan' : opts.isolation === 'worktree' ? 'bypassPermissions' : 'auto'
 
-  // Same layout the Workflow tool uses, so cleanup-worktrees.sh finds these too.
+  // Same layout the Workflow tool uses.
   const addWorktree = () => {
     worktreeCount += 1
     const name = `${runId}-${worktreeCount}`

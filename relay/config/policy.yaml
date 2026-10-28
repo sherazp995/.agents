@@ -1,0 +1,15 @@
+version: 1
+defaults:
+  unmatched: ask
+# FR-POL-4: this list cannot be overridden at runtime. Editing it requires a restart.
+# The operator extends it during setup; it is never shipped empty.
+hard_blocked_origins:
+  - "*.chase.com"
+  - "*.coinbase.com"
+  - "console.aws.amazon.com"
+  - "*.1password.com"
+# FR-POL-7 spend caps in dollars, required by autonomous mode.
+budget:
+  run_cap_usd: 5
+  session_cap_usd: 20
+  principal_day_cap_usd: 50

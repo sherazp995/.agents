@@ -32,7 +32,7 @@ came from a correction or preference the user gave in a past session.
 
 - Use the agent's scratchpad or a temp directory.
 - Remove them when the run ends.
-- Exception: the Workflow tool's `isolation: 'worktree'` and `workflow-runner` put their own throwaway worktrees in `.claude/worktrees/` and remove them (`work-council/cleanup-worktrees.sh` clears leftovers). Leave those where they are.
+- Exception: the Workflow tool's `isolation: 'worktree'` and `workflow-runner` put their own throwaway worktrees in `.claude/worktrees/` and remove them. Leave those where they are while a run is going; one left behind after a crashed run goes with `git worktree remove <path>` and `git branch -D worktree-<name>`.
 
 ### 4. Never let a feature branch track the shared base
 

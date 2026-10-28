@@ -18,6 +18,7 @@ There are no per-language agents. Expertise lives in skills, which load only whe
 | A failing test, broken build, regression or bug report | `debugging` |
 | Setting or guarding a project's quality bar, or a repo with `CONSTRAINTS.md` | `constraint-driven` |
 | Writing any chat reply to the user, or "sound more human", "less robotic" | `human-conversation` |
+| Messaging the user on Slack (`relay notify`): done, blocked or a decision while they are away | `relay` |
 | iOS or Android UI | `mobile-design` |
 
 A change across stacks loads each matching skill. A subagent you start gets the skill names in its brief.
@@ -36,7 +37,7 @@ These are built into Claude Code. In Codex, do the same work directly or with a 
 ## Working across Claude and Codex
 
 - **Second opinion from the other model:** from Claude, `codex exec --sandbox read-only -` with the prompt on stdin; from Codex, `claude -p "<prompt>"`. Treat its findings as candidates and re-prove them.
-- **Several models on one task:** the `llm-council` skill (independent opinions, then a synthesis) and the `work-council` skill (plan critique, then Claude and Codex build and judges pick one).
+- **Several models on one task:** the `llm-council` skill (independent opinions, then a synthesis) and the `work-council` skill (Claude and Codex as one team: a plan both approve, each builds its own parts, each reviews the other, both sign off).
 - **Handing work to another session or agent:** `agents-hub handoff <agent> <session>` writes a brief the other side can read; long-running parallel builds each get their own git worktree.
 - **Shared state:** every session reads and writes the same memory (`agents-hub memory`) and can search every other session's chats (`agents-hub search`).
 

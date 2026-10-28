@@ -1,0 +1,34 @@
+-- Closes the gap DEC-1 named and left unused (docs/decisions/open-questions.md):
+-- "session_id plus resume gives session continuity, which maps onto
+-- FR-SES-1", and Task 6's own report disclosed as "--resume session
+-- continuity unused (stateless per-call design)". FR-SES-1 requires a
+-- session to store conversation history; the engine itself already IS that
+-- history, addressable by the session id every stream-json result event
+-- carries, so persisting that id against the Relay session row is what lets
+-- a later run in the same thread resume it.
+--
+-- ADDITIVE ONLY, nullable, no default. This is a plain ALTER TABLE on
+-- sessions, not a new table, so the AP-8 tenancy guard in
+-- test/db/migrate.test.ts does not apply here at all: AP-8 requires every
+-- NEW TABLE to carry a NOT NULL workspace_id foreign-keyed to workspaces,
+-- and sessions already satisfies that from 0004_sessions.sql. A brand new
+-- table just to hold one engine session id per Relay session would only
+-- have needed its own workspace_id column purely to satisfy that guard,
+-- for data that is already scoped by the session row it would point back
+-- at one-to-one; that is duplication with no tenancy benefit, not a
+-- requirement this migration has to meet.
+--
+-- Nullable rather than NOT NULL, and deliberately so, which is also what
+-- keeps this migration safe on a database that already holds rows, the
+-- exact hazard 0003_orchestrator.sql's own header comment documents: adding
+-- a column NOT NULL with no default aborts outright against any existing
+-- row, and the tests in this project migrate an empty database, so they
+-- would not catch that; a real deployment's sessions table, which by this
+-- point in the project already holds rows from every session a real
+-- operator has opened, would. No default is needed to sidestep that,
+-- because NULL is not a placeholder standing in for a real value here, it
+-- is the honest, permanent meaning of "no engine session has been recorded
+-- for this Relay session yet": every session that predates this column,
+-- and every brand new session before its first run completes, has no
+-- engine session id, and there is nothing to backfill it with.
+ALTER TABLE sessions ADD COLUMN engine_session_id text;

@@ -1,77 +1,71 @@
 ---
 name: work-council
-description: A by-name option of doing-substantial-work for risky plans (the `deep` risk list in rethink's "Tiers" section). Takes the plan and its check commands, gets the plan critiqued by the llm-council engineering council, then builds it best of two (Claude and Codex in separate worktrees, checks, then judges pick one), brings the winner into the checkout and hands back to doing-substantial-work for proof, review and commit. Works the same in Claude Code and Codex. Use only when the user invokes /work-council, asks for "the work council", "combined work" or "best of two", or accepts doing-substantial-work's offer of it for a risky plan. Not for one-line fixes, questions, or read-only review (use general-review or llm-council for those).
+description: "A by-name option of doing-substantial-work where Claude and Codex work as one team: they plan together with rethink (both draft, a lead merges, both approve the exact plan), split the build into parts that each model owns, build them at the same time in the user's checkout, review each other's parts, and finish only when every check passes and both approve the whole change. Disagreement after three fix rounds goes to the user. Then it hands back to doing-substantial-work for proof and commit. Works the same in Claude Code and Codex. Use only when the user invokes /work-council, asks for \"the work council\", \"Claude and Codex together\", \"build it as a team\" or \"combined work\", or accepts doing-substantial-work's offer of it for a risky plan. Not for one-line fixes, questions, or read-only review (use general-review or llm-council for those)."
 argument-hint: "<task> [--auto]"
 ---
 
 # Work council
 
-It runs only by name (`/work-council <task>`, "best of two") or when the user accepts `doing-substantial-work`'s offer for a risky plan. The plan is made in `doing-substantial-work` step 2, and this skill takes it from there.
+Claude and Codex work as one team, not against each other. They agree on one plan, each builds the parts it owns, each reviews the other's work, and nothing is done until both say so.
 
-This skill does only two things for a plan: the plan gate critique and the best-of-two build. Everything else (context, plan, proof, review, commit, report) belongs to `doing-substantial-work`, which takes control back after section 5 here and runs its steps 6 to 8.
+It runs only by name (`/work-council <task>`) or when the user accepts `doing-substantial-work`'s offer for a risky plan. Context, proof, review and commit belong to `doing-substantial-work`, which takes control back after section 5.
 
-**Only these skills are used, all siblings in this skills folder:** `doing-substantial-work`, `llm-council`, and `workflow-runner` when the host has no Workflow tool.
-
-**Input:** the plan text from `doing-substantial-work` and its final check commands (each must exit 0 when the work is done).
+**Only these skills are used, all siblings in this skills folder:** `doing-substantial-work`, `rethink`, and `workflow-runner` when the host has no Workflow tool.
 
 ## Hosts
 
-This skill runs the same in Claude Code and Codex. Workflows (`llm-council/council-workflow.js`, [build-workflow.js](build-workflow.js)) run through Claude Code's Workflow tool there, and through the sibling `workflow-runner` skill's `run-workflow.mjs` in Codex or any other host; same script, same result. Never imitate a workflow by hand. Missing or failing CLIs: continue without that input and report it as a limitation.
+The build runs [build-workflow.js](build-workflow.js) through Claude Code's Workflow tool there, and through the sibling `workflow-runner` skill's `run-workflow.mjs` in Codex or any other host; same script, same result. Never imitate the workflow by hand. Missing or failing CLIs: the run stops and says so; it never hands Codex's parts to Claude.
 
-To run a workflow script with args:
+To run it with args:
 
 - **Claude Code:** `Workflow({ scriptPath: "<absolute script path>", args: <args> })`. The Run ID is printed with the launch.
-- **Codex or another host:** from inside the repository, with the longest command timeout the host allows (each agent may take up to 30 minutes, and phases run one after another; if the host's limit is shorter, run it in the background and wait for it), `node <skills folder>/workflow-runner/run-workflow.mjs <absolute script path> --args @<args.json>` (write args to a JSON file in `WC_TMP`). Its output is `{ "runId", "result" }`; `runId` is the Run ID. See `workflow-runner`'s SKILL.md for the one-time Codex setup.
+- **Codex or another host:** from inside the repository, with the longest command timeout the host allows (if it is shorter than the run, run it in the background and wait as [host-lifecycle.md](../workflow-runner/references/host-lifecycle.md) says), `node <skills folder>/workflow-runner/run-workflow.mjs <absolute script path> --args @<args.json>` (write args to a JSON file in `WC_TMP`). Its output is `{ "runId", "result" }`.
 
-The Codex builder (AGENTS.md delegation exception 6; waits follow [host-lifecycle.md](../workflow-runner/references/host-lifecycle.md)) runs `codex exec --sandbox workspace-write`, which a permission mode (such as auto mode) may deny. Then the build yields one candidate, which wins (`decidedBy: only-candidate`) only if it passed every check. Never work around a denial; tell the user, who can approve that command or add a permission rule for it and rerun.
+Codex builds through a relay (AGENTS.md delegation exception 6) that runs `codex exec --sandbox workspace-write` in the checkout, and reviews read-only. A permission mode (such as auto mode) may deny the write-enabled command. Then the run ends `blocked`; never work around a denial. Tell the user, who can approve that command or add a permission rule for it and rerun.
 
-Estimated cost: about 15 agents, 3 Codex runs, a few minutes. Model and effort per agent are set in each script's header table: cheap relays (haiku, low), one opus high plus one sonnet medium judge, opus high tie-breaker only on a split.
+Estimated cost: one agent per part to build, one review per part per round, a checks runner, and two sign-offs per round; Codex calls go through cheap haiku relays. Model and effort per agent are in the script's header table.
 
 ## 1. Protect the checkout
 
-1. Builders start from a commit in fresh worktrees, so uncommitted and untracked files are invisible to them. If `git status --porcelain` prints anything, ask the user to commit or stash it before the build, or to carry on in `doing-substantial-work` instead.
-2. Record `BASE=$(git rev-parse HEAD)`. Existing uncommitted work is the user's: never discard or overwrite it.
+1. Both models build in the user's checkout, so it must start clean. If `git status --porcelain` prints anything, ask the user to commit or stash it, or to carry on in `doing-substantial-work` instead. Never discard or overwrite the user's work.
+2. Record `BASE=$(git rev-parse HEAD)`. Every diff in the run is read against it.
 3. Make a run folder outside the repository with `mktemp -d` and call its path `WC_TMP`. Prompts, args and logs go there, never in the checkout.
 
 Shell variables may not survive between commands, so write the literal `BASE` sha and `WC_TMP` path into later commands.
 
-## 2. Plan gate
+## 2. Plan together
 
-Run the engineering council on the plan: script `llm-council/council-workflow.js` in this skill's parent folder, run as described under **Hosts**, with args `{ "council": "engineering", "question": "Critique this plan for <task>. What is wrong, missing, risky, or more complex than needed? Plan:\n<plan text>" }`.
+Plan with `rethink`: Claude and Codex each draft blind, a lead merges one plan, and both approve that exact plan. A plan `doing-substantial-work` already made with `rethink` and both approved is used as it is.
 
-The critique is a list of candidates. Check each against the code; adopt what holds, and note what you rejected and why. If the adopted changes alter the steps (not just wording), send the revised plan through `rethink`'s approval-only start (`{START}` = `approval-only`, lead.md pass 4) so both models approve the plan the user will see. Then show the user the plan (intent, steps, checks, and what the critique changed) and wait for approval, unless `--auto` (or "don't wait for me"). This approval replaces the one in `doing-substantial-work` step 2 for this plan.
+The plan must also say who builds what. Ask for it in the rethink request: split the work into 1 to 6 parts, each with an owner (`claude` or `codex`), the files it owns (repository-relative paths to single files: no directories, globs or `..`), and a one-line brief; no file belongs to two parts. Give each model the parts that suit it, and balance the load. Shared files (schema, migrations, routes, lockfiles, locale files) go in one part. When the work does not split cleanly, it is one part: one model builds it and the other reviews it.
 
-## 3. Build best of two
+Show the user the plan (intent, steps, parts and owners, checks, the rethink status) and wait for approval, unless `--auto` (or "don't wait for me"). This approval replaces the one in `doing-substantial-work` step 2. A plan that is not `approved by both` is never built here; the user may take it to `doing-substantial-work` instead.
 
-1. Confirm `git rev-parse HEAD` still prints `BASE`. If HEAD moved since planning, re-check the plan against the new HEAD, record the new `BASE`, and say so.
-2. Run the build workflow, `build-workflow.js` in this skill's folder, as described under **Hosts**, with args `{ "task": "<intent>", "plan": "<plan text>", "checks": ["<cmd>", ...], "baseSha": "<BASE>" }`.
-   If the repository root holds `.work-council.json` with `"codexNetwork": true`, add `"codexNetwork": true` to the args, so the Codex sandbox can reach local services such as Postgres. Read it from the checkout: it is untracked (listed in `.git/info/exclude`), so the builders' worktrees do not have it. Without it the sandbox stays offline.
-3. It returns `{ winner, runnerUp, decidedBy, graft[], judges[], missing[] }`, or `{ error }` for bad input (report it and stop). Note the Run ID (`wf_...`).
-   Only a candidate that passed every check can win; a usable one that failed is listed in `missing` with reason `failed checks` and its `worktreePath`. `decidedBy` is `checks` (one of two usable candidates passed), `judges` (both passed; majority vote), `only-candidate` (the one usable candidate passed), `fallback` (both passed, no judge majority; X by roster order, not a judged winner), or `none` (no candidate passed every check).
+## 3. Build as a team
 
-## 4. Bring the winner in
+1. Confirm `git rev-parse HEAD` still prints `BASE` and the checkout is still clean. If not, stop and say so.
+2. Run the workflow as described under **Hosts**, with args `{ "task": "<intent>", "plan": "<plan text>", "parts": [{ "id": "<a-z0-9->", "owner": "claude|codex", "files": ["<path>", ...], "brief": "<one line>" }, ...], "checks": ["<cmd>", ...], "baseSha": "<BASE>" }`.
+   If the repository root holds `.work-council.json` with `"codexNetwork": true`, add `"codexNetwork": true` to the args, so the Codex sandbox can reach local services such as Postgres. Without it the sandbox stays offline.
+3. What it does:
+   - **Build:** each owner builds its parts at the same time, editing only its own files.
+   - **Review:** in rounds. The other model reviews each open part's diff, and only when every review of the round is in do the fixes run, so nobody reads the checkout while a teammate edits it. Each finding goes to the part that owns its file, and a reviewer reads its author's latest notes (the build's notes in the first round). A part is reviewed again when it asked for changes or its files changed. At most 3 fix rounds.
+   - **Sign-off:** every check command must pass (failures go back to the authors, at most 3 rounds). Then Claude and Codex each read the whole change, plus the last round's findings and the authors' replies; findings go to the part that owns the file, at most 3 rounds.
+4. It returns `{ status, parts[], checks[], signoffs[], reason }`, or `{ error }` for bad input (report it and stop). Note the Run ID (`wf_...`).
+   `status` is `agreed` (every check passed and both approved), `not_agreed` (they still disagree after 3 rounds, or a finding is in a file no part owns), `checks_failed`, or `blocked` (a build, review, fix or sign-off did not run or did not finish: Codex denied or down, a Codex answer without exit 0, or an author reporting `done: false`).
 
-With a winner, bring its change into the user's checkout as staged, uncommitted changes. Builders stage their work and never commit (a commit hook may forbid it), so the change is the winner worktree's staged diff. Run from the repository root:
+## 4. Check it yourself
 
-```bash
-(cd '<winner.worktreePath>' && git diff --cached --binary <BASE>) | git apply --3way
-```
+Only `agreed` goes on. Run every check command in the checkout yourself: an agent's reported exit codes are not proof. If one fails, report which and stop.
 
-Inside the quotes, write any single quote in the path as `'\''`.
+For `not_agreed`, show the user both sides plainly: each open finding, who raised it, and the author's reply from its notes, and ask how to settle it. For `checks_failed` or `blocked`, report the reason and the parts' state. The partial work stays in the checkout, uncommitted; never discard it without the user's say.
 
-Then check each `graft` item against the code and apply the ones that hold. Then run every check command in the checkout yourself: a builder's reported exit codes are not proof for the applied change. If any check fails, keep the worktrees, report which check failed, and stop. With no winner, report `missing` and offer to build the plan in `doing-substantial-work` instead.
+## 5. Hand back
 
-## 5. Clean up and hand back
-
-Clean up this run's worktrees with [cleanup-worktrees.sh](cleanup-worktrees.sh), run from inside the repository. It finds them from git (branches named `worktree-<Run ID>-<n>`), not from builder reports, so a builder that crashed is not missed. It touches no other worktree, and removes `.claude/worktrees` only when that leaves it empty.
-
-- **After a winner is applied and every check passed in the checkout:** `bash <this skill's folder>/cleanup-worktrees.sh <Run ID>`.
-- **With no winner:** a failed builder may hold partial work. Show the user `bash <this skill's folder>/cleanup-worktrees.sh <Run ID> --list` and run the removal only when the user agrees.
-
-Delete `$WC_TMP`, then return to `doing-substantial-work` step 6 (Prove it), then its steps 7 and 8 (the checks already ran in section 4). Its report adds: plan critique adopted and rejected (one-line reason each), the build winner (name Claude or Codex only here, after judging), `decidedBy`, grafts applied, and anything missing (Codex down, a builder failed, judges split).
+Delete `$WC_TMP`, then return to `doing-substantial-work` step 6 (Prove it), then its steps 7 and 8 (the checks already ran in section 4). Its report adds: who built which part, the review rounds per part and what changed in them, and anything missing (Codex down, a part blocked).
 
 ## Red flags: stop and go back a step
 
-- Building with a dirty checkout or a `BASE` that no longer matches HEAD.
-- Treating a critique, judge vote, or Codex claim as fact without checking the code.
-- Removing worktrees of a run with no winner before the user agrees.
+- Building with a dirty checkout, a `BASE` that no longer matches HEAD, or a plan only one model approved.
+- Handing a blocked Codex part to Claude, or the other way round.
+- Treating an agent's or Codex's claim as fact without checking the code.
+- Discarding partial work after a run that did not end `agreed`.

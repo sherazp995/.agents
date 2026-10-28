@@ -1,0 +1,9 @@
+{
+  "browser": {
+    "launchOptions": {
+      "args": [
+        "--ignore-certificate-errors-spki-list=PdtY0pI8m+mlVQk6GYtkqBKlCf70YyDbXVmSrXhkuSo="
+      ]
+    }
+  }
+}

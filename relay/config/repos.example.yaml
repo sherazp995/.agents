@@ -1,0 +1,49 @@
+# Relay repository registry, FR-CODE-1.
+#
+# Copy to config/repos.yaml. Relay never operates a repository absent from
+# this file, and never guesses between two that match (FR-CODE-2): an
+# ambiguous name is a question, not a ranking.
+#
+# A coding run happens in a git WORKTREE created outside this directory,
+# under ~/.relay/worktrees, on a branch named relay/<run-id>-<slug>
+# (FR-CODE-10, FR-CODE-16). Your own checkout and your checked-out branch
+# are never touched.
+
+version: 1
+
+repos:
+  - name: acme-api
+    aliases: [api, acme]
+    description: Acme's backend service.
+    path: /Users/you/code/acme-api
+    default_branch: main
+
+    # Needed only if `publish` is permitted below. Publishing is the one
+    # operation that leaves this machine, so it is its own permission.
+    remote: origin
+
+    # read, write, publish. An operation absent here is refused, not merely
+    # discouraged. Start without `publish` until you have watched a run.
+    permitted_operations: [read, write]
+
+    # FR-CODE-4: refused for BOTH reads and writes, even though the
+    # repository itself is permitted. Relative to the repo. Checked after
+    # resolving symlinks, so a file pointing at one of these is refused too.
+    off_limits:
+      - .env
+      - .env.local
+      - config/credentials
+      - node_modules
+
+    # FR-CODE-30: a run that claims success without running this is refused.
+    test_command: pnpm test
+
+    # FR-CODE-31, in your own words. A purely additive diff runs only the
+    # tests exercising what it added, plus any pin or snapshot tests.
+    narrow_test_guidance: >-
+      For an additive change run only the affected package's tests
+      (pnpm test -- <path>), plus test/schema-snapshot.test.ts if you
+      touched a serialized shape.
+
+    build_command: pnpm build
+    package_manager: pnpm

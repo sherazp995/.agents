@@ -1,0 +1,33 @@
+-- Gate fix, Blocker 2: FR-ORC-1 requires a monotonically increasing
+-- sequence number for a run's own state transitions. 0007_agent_runs.sql's
+-- own header comment already states the gap plainly: only steps.seq
+-- carries one, and it sequences steps, not the run's own transitions
+-- (queued to running, running to a terminal state), and step completion
+-- itself was a plain UPDATE that incremented nothing.
+--
+-- Codex's own suggestion was a workspace-scoped event ledger: a new
+-- append-only table recording every transition across every run. That
+-- satisfies FR-ORC-1 too, but it is heavier than the requirement needs: a
+-- run transitions a handful of times over its life, always driven by the
+-- single loop instance that owns it (0007's own reasoning for why runs
+-- never needed steps.seq's concurrent-writer arbitration), so a per-run
+-- counter, bumped transactionally with the write it numbers, is the
+-- smaller design that still makes every transition's sequence number
+-- monotonic, persisted, and visible before any externally visible side
+-- effect depending on it can occur.
+--
+-- transition_seq lives on runs itself, bumped by every write that changes
+-- either the run's own state (startRun, finishRun) or completes one of its
+-- steps (completeStep), all in the same transaction as the write. steps
+-- gains run_transition_seq to record which of the run's own transition
+-- numbers a given step's completion landed on, so a reader can interleave
+-- run-level and step-level transitions into one ordered timeline for a
+-- single run without a separate ledger table. Nullable on steps: a step
+-- that has not completed yet (state 'running') has not consumed one.
+--
+-- Both columns are additive on tables this same milestone introduced, so
+-- neither carries the non-empty-table hazard 0003_orchestrator.sql had to
+-- guard against: DEFAULT 0 backfills every existing runs row cleanly, and
+-- run_transition_seq is nullable so no backfill value is needed at all.
+ALTER TABLE runs  ADD COLUMN transition_seq integer NOT NULL DEFAULT 0;
+ALTER TABLE steps ADD COLUMN run_transition_seq integer;

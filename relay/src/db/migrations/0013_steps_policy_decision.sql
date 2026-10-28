@@ -1,0 +1,32 @@
+-- Task 3 of the P0.4 policy-and-approvals milestone: makes the policy
+-- mediation seam's decision and reason a queryable part of a step's own
+-- persisted record, not only a log line. src/policy/engine.ts's
+-- mediateCapabilityCall() resolves every capability call to a final
+-- 'proceed' or 'refuse' (an 'ask' verdict has already been settled one way
+-- or the other by the time a step completes, via the injected
+-- requestApproval), and src/runs/store.ts's completeStep is what writes
+-- that here. The audit question this milestone has to answer is not only
+-- "what was blocked" (already recoverable from a failed step's own `error`
+-- column) but "what was permitted, and on what grounds" — a rotated log
+-- file cannot answer that months later, a queryable column can.
+--
+-- ADDITIVE ONLY, nullable, no default, mirroring
+-- 0011_session_engine_session_id.sql's own reasoning exactly: adding a
+-- column NOT NULL with no default aborts outright against any existing
+-- row, and the tests in this project migrate an empty database, so they
+-- would not catch that; a real deployment's steps table, holding rows from
+-- every run executed before this migration, would. NULL is not a
+-- placeholder standing in for a real value here, it is the honest,
+-- permanent meaning of "this step predates the mediation seam" for every
+-- row inserted before this migration ran, and there is nothing to backfill
+-- it with: no policy decision was ever computed for those rows in the first
+-- place.
+--
+-- A plain ALTER TABLE on `steps`, not a new table, so the AP-8 tenancy
+-- guard in test/db/migrate.test.ts does not apply here at all, the same
+-- carve-out 0011's own header comment states: AP-8 requires every NEW TABLE
+-- to carry a NOT NULL workspace_id foreign-keyed to workspaces, and `steps`
+-- already satisfies that from 0007_agent_runs.sql.
+ALTER TABLE steps ADD COLUMN policy_decision text
+  CHECK (policy_decision IN ('proceed', 'refuse'));
+ALTER TABLE steps ADD COLUMN policy_reason text;

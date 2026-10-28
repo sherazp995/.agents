@@ -9,7 +9,7 @@ const problems = []
 
 // Skills this one may use. Each must be a real folder in the same skills folder, not a
 // symlink or its own git repository, so the parent repository ships it.
-const ALLOWED_SIBLINGS = ['doing-substantial-work', 'llm-council', 'workflow-runner']
+const ALLOWED_SIBLINGS = ['doing-substantial-work', 'rethink', 'workflow-runner']
 // Names that would pull in something shipped separately.
 const BANNED = [/fable/i, /superpowers:/i, /principal-[a-z]+-engineer/i, /~\/\.claude\/agents/]
 
@@ -43,10 +43,10 @@ for (const name of ALLOWED_SIBLINGS) {
   else if (lstatSync(dir).isSymbolicLink()) problems.push(`sibling skill is a symlink: ${name}`)
   else if (existsSync(join(dir, '.git'))) problems.push(`sibling skill is its own git repo: ${name}`)
 }
-if (!existsSync(join(skillsDir, 'llm-council', 'council-workflow.js'))) problems.push('llm-council/council-workflow.js missing')
+if (!existsSync(join(skillsDir, 'workflow-runner', 'run-workflow.mjs'))) problems.push('workflow-runner/run-workflow.mjs missing')
 
 // Backticked names that look like skills must be allowed siblings (or this skill).
-const KNOWN_NON_SKILLS = new Set(['general-purpose', 'only-candidate', 'plan-critique', 'build-workflow', 'council-workflow'])
+const KNOWN_NON_SKILLS = new Set(['general-purpose', 'build-workflow', 'not-agreed'])
 for (const [, name] of skill.matchAll(/`([a-z]+(?:-[a-z]+)+)`/g)) {
   if (name === 'work-council' || ALLOWED_SIBLINGS.includes(name) || KNOWN_NON_SKILLS.has(name)) continue
   if (existsSync(join(skillsDir, name, 'SKILL.md'))) problems.push(`SKILL.md uses skill outside the allow list: ${name}`)

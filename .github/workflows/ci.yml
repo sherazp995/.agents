@@ -49,7 +49,6 @@ jobs:
         working-directory: skills/work-council
         run: |
           node tests/build-workflow.test.mjs
-          node tests/cleanup-worktrees.test.mjs
           node tests/lint-skill.mjs
 
       - name: Syntax check every skill script

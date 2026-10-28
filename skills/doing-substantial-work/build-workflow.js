@@ -10,7 +10,7 @@ export const meta = {
 }
 
 // Stale: predates rethink and the current doing-substantial-work steps; kept for run-workflow.mjs callers;
-// not maintained. Its risk lists and review rounds below are not policy (see rethink's "Tiers").
+// not maintained. Its risk lists and review rounds below are not policy (see rethink's "Risk list").
 
 // args: { repo, plan, intent?, cards: [{ id, title, files?, command, after?, agentType?, model? }],
 //         sequential?, proof?, review?, risky?, tier?, base?, maxAttempts? }

@@ -1,6 +1,6 @@
 ---
 name: doing-substantial-work
-description: The default way to build any feature or fix that changes more than one file, adds behaviour, refactors, or chases a bug that survived a fix. One lead agent (with 2-6 parallel parts when the files split cleanly), a plan by one author that the user approves (rethink, with both models, only for the risk list or on request), general-review rules applied while building, checks that pass or fail, one end check, one commit. Councils, best of two and the multi-agent build workflow run only when the user asks for them by name. Not for one-line fixes, questions, or read-only exploration.
+description: The default way to build any feature or fix that changes more than one file, adds behaviour, refactors, or chases a bug that survived a fix. One lead agent (with 2-6 parallel parts when the files split cleanly), a plan by one author that the user approves (rethink, with both models, only for the risk list or on request), general-review rules applied while building, checks that pass or fail, one end check, one commit. Councils (llm-council, the work-council team build) and the multi-agent build workflow run only when the user asks for them by name. Not for one-line fixes, questions, or read-only exploration.
 ---
 
 # Doing substantial work
@@ -15,11 +15,11 @@ One lead agent owns the work, in this session, and checks it with commands rathe
    - the files to change;
    - the check commands that prove it (the narrowest specs, rubocop or eslint on the changed files, a migration up and down);
    - parallel parts, only when the build splits into 2-6 parts that share no file: each part and the files it owns, plus the shared work the lead does itself;
-   - risk: if it hits the `deep` risk list in `rethink`'s "Tiers", say so in one line, plan it with `rethink`, and offer `work-council`. Do not start `work-council` unless the user says yes.
+   - risk: if it hits `rethink`'s "Risk list", say so in one line, plan it with `rethink`, and offer `work-council`. Do not start `work-council` unless the user says yes.
 
    After approval, build without check-ins unless something changes the plan.
 
-   **When to use `rethink`.** A routine plan is written by you (one author) and approved by the user. Use `rethink` only when the plan hits the `deep` risk list in its "Tiers" (it then runs `deep`), or when the user asks for it ("rethink", "think it through", Claude and Codex plans). Run it as that skill says (the session coordinates, a lead subagent runs Claude and Codex). Copy into the plan file: the result status, the `## Review pre-check` section, and the decisions the user settled. If the status is not `approved by both` (or is stale), show it and the open findings plainly; the user may waive and build, but never call that plan approved by both models. If the user's decisions change the steps, send the plan back for approval rounds as `rethink` says.
+   **When to use `rethink`.** A routine plan is written by you (one author) and approved by the user. Use `rethink` only when the plan hits its "Risk list", or when the user asks for it ("rethink", "think it through", Claude and Codex plans). Run it as that skill says (the session coordinates, a lead subagent runs Claude and Codex). Copy into the plan file: the result status, the `## Review pre-check` section, and the decisions the user settled. If the status is not `approved by both` (or is stale), show it and the open findings plainly; the user may waive and build, but never call that plan approved by both models. If the user's decisions change the steps, send the plan back for approval rounds as `rethink` says.
 
    **Plan file.** Every build has one. Save the plan after approval to `~/.agents/tmp/plans/<checkout folder>-<branch with / as ->-<task in 2-4 words>.md` (git-ignored, never committed; never reuse another task's file) and show its full path in the plan the user approves, so the path survives a chat summary. It holds the request verbatim, the confirmed intent, the approved plan as a checklist, the check commands, and a short log. Keep it current: tick a step when its check passes, log each decision the user makes and each failed try with the reason it failed. After the chat is summarized, re-read the file at that path before the next step; it, not the summary, is the plan.
 3. **Build.** Before writing code, load general-review's rules alongside the stack skill: `~/.agents/skills/general-review/references/review-checklist.md`, `references/structural-standards.md`, and SKILL.md sections "2. Understand the approach" and "Root causes and sibling sweep". Build to the plan's `## Review pre-check`.
@@ -52,9 +52,9 @@ One lead agent owns the work, in this session, and checks it with commands rathe
 
 ## Heavier tools, by name only
 
-Run these only when the user names them (or names the outcome, like "best of two" or "council"):
+Run these only when the user names them (or names the outcome, like "Claude and Codex together" or "council"):
 
-- `work-council`: plan critique and a Claude vs Codex build.
+- `work-council`: Claude and Codex as one team: a plan both approve, a split build, cross-review, joint sign-off.
 - `llm-council`: several independent opinions on a hard question.
 - [build-workflow.js](build-workflow.js) (stale: it predates `rethink` and the current steps, and is not maintained): multi-card build in waves with independent rechecks, for large plans the user wants run as a workflow.
 - `dual-pr-review`, `cohabit_pr_review`, `branch-visual-qa`, `video-qa`.

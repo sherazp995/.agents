@@ -1,0 +1,94 @@
+# Relay browser profile registry, FR-PRF-1.
+#
+# Copy to config/profiles.yaml and edit, or skip the editing entirely and
+# let Relay maintain it:
+#
+#   relay profile-list                       # the Chrome profiles you could clone
+#   relay profile-clone --from "Profile 3" --to acme --origin acme.com
+#   relay profile-add acme --dir ~/chrome-profiles/acme --origin acme.com
+#   relay profile-origins acme --allow billing.acme.com
+#   relay profile-registry                   # what is registered, and what it may reach
+#
+# Those commands preserve the comments in this file and refuse any edit that
+# would leave a registry Relay cannot load, so hand editing and commands mix
+# freely. config/profiles.yaml is gitignored: it names real clients and points
+# at directories holding copies of their cookies.
+#
+# Relay treats an ABSENT file and an INVALID one very differently, on purpose:
+#
+#   - No file at all means browser profiles are simply not configured, and
+#     every browser call is refused with a clear reason. That is a safe
+#     state, not a broken one.
+#   - A file that exists and does not validate is a statement you believe and
+#     Relay cannot honour, so it refuses to start rather than silently
+#     skipping the entry it could not read.
+#
+# THE CONSTRAINT THAT SHAPES EVERYTHING HERE (FR-PRF-6a): Chrome 136 and
+# later ignore remote-debugging switches for the DEFAULT user-data directory,
+# and a user-data directory permits only one running browser instance. So
+# Relay cannot drive the Chrome you use day to day. Point a profile at a
+# dedicated automation directory, or accept tier 1, where origin scoping is
+# detected and reported rather than prevented.
+#
+# Run `relay doctor` after editing. It reports which tiers are actually
+# available for each profile rather than leaving you to find out at task time.
+
+version: 1
+
+profiles:
+  # A dedicated automation profile. Because user_data_dir is NOT Chrome's own
+  # default, Relay can drive it over CDP, which means an off-allowlist
+  # navigation is PREVENTED rather than merely noticed after the fact.
+  - name: acme
+    description: Acme client work, dedicated automation profile
+    project: acme
+    user_data_dir: /Users/you/chrome-profiles/acme
+    profile_directory: Default
+    classification: client
+    allowed_origins:
+      - '*.acme.com'
+      - acme.com
+    denied_origins:
+      # Deny beats allow, always. A broad allowlist pattern can never
+      # silently re-permit something denied here.
+      - admin.acme.com
+    extension: false
+    # FR-PRF-4a. A pin promises that scoping is ENFORCED, so it is only
+    # accepted where a driver-owned tier is genuinely available. Pinning a
+    # profile whose user_data_dir is Chrome's default is refused at
+    # configuration time, with the reason, rather than accepted and
+    # discovered later.
+    pinned_tier: 2
+
+  # An everyday profile with the Claude-in-Chrome extension. Tier 2 is NOT
+  # available here and `relay doctor` will say so: the extension owns
+  # navigation, so Relay refuses to ISSUE an off-allowlist navigation and
+  # reports any out-of-allowlist origin actually reached as an incident.
+  # That is detection, not prevention, and it is described that way
+  # deliberately rather than overstated.
+  - name: work
+    description: Everyday work browser with the Claude-in-Chrome extension
+    user_data_dir: /Users/you/Library/Application Support/Google/Chrome
+    profile_directory: Profile 1
+    classification: work
+    allowed_origins:
+      - '*.github.com'
+      - '*.atlassian.net'
+    extension: true
+
+  # FR-PRF-5. A personal profile is listed ONLY to declare it excluded, and
+  # `usable: false` is required rather than optional here. Listing it is the
+  # point: naming it in a task then produces an explicit refusal that says
+  # why, instead of finding nothing, which reads like a typo and invites
+  # someone to "fix" it.
+  - name: personal
+    description: Personal browsing, excluded from all agent use
+    user_data_dir: /Users/you/Library/Application Support/Google/Chrome
+    profile_directory: Default
+    classification: personal
+    # Required by the schema even though nothing may use it: a profile with
+    # no allowed origins is rejected, so an excluded profile still has to
+    # state a scope it would have had.
+    allowed_origins:
+      - localhost
+    usable: false

@@ -1,0 +1,23 @@
+model_provider:
+  name: anthropic
+  zero_data_retention: true
+database:
+  url: keystore:relay-database-url
+  # Operator commands connect here; this Postgres trusts local connections, so no password is involved.
+  operator_url: postgres://relay_app@localhost:5432/relay
+redis:
+  url: redis://localhost:6379/13
+logging:
+  level: info
+autonomous:
+  # Every Slack conversation runs as an autonomous task: one thread is one
+  # Claude Code session, run without the sandbox. Needs the policy budget.
+  enabled: true
+  # Reserved per turn before it starts, and charged when real usage is unknown.
+  per_turn_fallback_usd: 1
+  # Codex reports tokens, not dollars; cost is estimated at this rate.
+  codex_usd_per_mtok: 10
+  # Fixed charge for general-review's nested Codex lens.
+  review_codex_allowance_usd: 2
+secrets:
+  provider: keychain

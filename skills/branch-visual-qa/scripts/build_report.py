@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build a portable branch QA report from a manifest and real screenshots."""
 import argparse
+import base64
+import mimetypes
 import html
 import json
 import re
@@ -39,7 +41,12 @@ def bullets(title, values):
     return f'<section><h2>{esc(title)}</h2><ul>' + ''.join(f'<li>{esc(v)}</li>' for v in values) + '</ul></section>'
 
 
-def case_html(case, prefix=''):
+def data_uri(root, path):
+    mime = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+    return f'data:{mime};base64,' + base64.b64encode((root / path).read_bytes()).decode('ascii')
+
+
+def case_html(case, prefix='', embed_root=None):
     status = case['status']
     body = (f'<h2>{esc(case["title"])}</h2><p class="status {status}">{esc(status)}</p>'
             f'<p class="meta">{esc(case["viewport"])} · {esc(case["role"])} · {esc(case["route"])}</p>'
@@ -51,8 +58,13 @@ def case_html(case, prefix=''):
     for side in ('before', 'after'):
         path = case.get(side + '_image')
         if path:
-            url = esc(prefix + quote(path, safe='/'))
-            images.append(f'<figure><figcaption>{side.title()}</figcaption><a href="{url}"><img src="{url}" alt="{esc(side.title() + ": " + case["title"])}" loading="lazy"></a></figure>')
+            alt = esc(side.title() + ': ' + case['title'])
+            if embed_root is not None:
+                img = f'<img src="{data_uri(embed_root, path)}" alt="{alt}">'
+            else:
+                url = esc(prefix + quote(path, safe='/'))
+                img = f'<a href="{url}"><img src="{url}" alt="{alt}" loading="lazy"></a>'
+            images.append(f'<figure><figcaption>{side.title()}</figcaption>{img}</figure>')
     if len(images) == 2:
         body += '<div class="pair">' + ''.join(images) + '</div>'
     elif images:
@@ -109,11 +121,14 @@ def validate_review(review, data, root, case_ids):
             artifact['path'] = local_path(root, artifact['path'])
 
 
-def artifact_links(items):
+def artifact_links(items, embed=False):
+    # A sent embedded report has no files beside it, so evidence is named, not linked.
+    if embed:
+        return ' · '.join(f'{esc(item["label"])} (<code>{esc(item["path"])}</code>)' for item in items)
     return ' · '.join(link(item['path'], item['label']) for item in items)
 
 
-def review_html(review):
+def review_html(review, embed=False):
     status = review['status']
     body = ('<section id="code-review"><h2>Combined QA and code review</h2>'
             f'<p class="status {review["combined_status"]}"><strong>Combined result: '
@@ -128,7 +143,7 @@ def review_html(review):
             f'{esc(review["integration"])}</p>'
             f'<p>{esc(review["summary"])}</p>')
     if review.get('evidence'):
-        body += '<p>' + artifact_links(review['evidence']) + '</p>'
+        body += '<p>' + artifact_links(review['evidence'], embed) + '</p>'
     if not review['comments']:
         body += '<p>No comments recorded. See the review status and scope above.</p>'
     for comment in review['comments']:
@@ -141,16 +156,17 @@ def review_html(review):
                  f'<p>{esc(comment["problem"])}</p>'
                  f'<p><strong>Proof:</strong> {esc(comment["proof"])}</p>'
                  f'<p><strong>Suggested fix / trial:</strong> {esc(comment["fix"])}</p>')
-        links = [link(f'comparisons/{case_id}.html', f'Comparison: {case_id}')
+        links = [f'<a href="#case-{esc(case_id)}">Comparison: {esc(case_id)}</a>' if embed
+                 else link(f'comparisons/{case_id}.html', f'Comparison: {case_id}')
                  for case_id in comment.get('case_ids', [])]
-        links += [artifact_links(comment['evidence'])] if comment.get('evidence') else []
+        links += [artifact_links(comment['evidence'], embed)] if comment.get('evidence') else []
         if links:
             body += '<p>' + ' · '.join(links) + '</p>'
         body += '</article>'
     return body + '</section>'
 
 
-def build(manifest):
+def build(manifest, embed=False):
     root = manifest.parent.resolve()
     data = json.loads(manifest.read_text())
     for key in ('title', 'base', 'current', 'method', 'coverage', 'cases'):
@@ -193,13 +209,17 @@ def build(manifest):
         body += f'<tr><td>{esc(row["scenario"])}</td><td class="status {row["status"]}">{esc(row["status"])}</td><td>{esc(row["evidence"])}</td></tr>'
     body += '</tbody></table></div></section>'
     if review is not None:
-        body += review_html(review)
+        body += review_html(review, embed)
     body += bullets('Findings', data.get('findings')) + bullets('Checks actually run', data.get('checks'))
     evidence = data.get('evidence', [])
     if evidence:
-        body += '<section><h2>Supporting evidence</h2><p>' + ' · '.join(link(i['path'], i['label']) for i in evidence) + '</p></section>'
+        body += '<section><h2>Supporting evidence</h2><p>' + artifact_links(evidence, embed) + '</p></section>'
     pages = {}
     for case in data['cases']:
+        if embed:
+            # One self-contained page: screenshots inline, no comparison pages to link to.
+            body += f'<article id="case-{esc(case["id"])}">' + case_html(case, embed_root=root) + '</article>'
+            continue
         path = f'comparisons/{case["id"]}.html'
         body += '<article>' + case_html(case) + '<p>' + link(path, 'Open comparison page') + '</p></article>'
         pages[path] = document(case['title'], '<p>' + link('index.html', 'All comparisons', '../') + '</p>' + case_html(case, '../'))
@@ -207,7 +227,7 @@ def build(manifest):
     if data.get('live_urls'):
         body += '<section><h2>Local test pages</h2><p>' + ' · '.join(f'<a href="{esc(i["url"])}">{esc(i["label"])}</a>' for i in data['live_urls']) + '</p></section>'
     body += bullets('Limitations and unresolved issues', data.get('limitations'))
-    pages['index.html'] = document(data['title'], body)
+    pages['report-embedded.html' if embed else 'index.html'] = document(data['title'], body)
     # Validate all artifacts before writing any page.
     for path, content in pages.items():
         target = root / path
@@ -217,14 +237,18 @@ def build(manifest):
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-    return root / 'index.html'
+    return root / ('report-embedded.html' if embed else 'index.html')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('manifest', type=Path)
+    parser.add_argument('--embed', action='store_true',
+                        help='also write report-embedded.html: one file with the screenshots inline, for sending (Slack)')
     args = parser.parse_args()
     try:
         print(build(args.manifest.resolve()))
+        if args.embed:
+            print(build(args.manifest.resolve(), embed=True))
     except (ValueError, KeyError, TypeError, OSError) as error:
         parser.exit(1, f'Report build failed: {error}\n')

@@ -74,7 +74,7 @@ A standalone review request always runs at the normal tier. When an authorized i
 
 | Tier | When | Lenses | Rounds |
 | --- | --- | --- | --- |
-| small | 3 changed files or fewer and nothing on the risk list (the `deep` bullet in ~/.agents/skills/rethink/SKILL.md "Tiers"). | The lead's senior engineer and simplicity lenses plus the diff-only agent; no structural or Codex lens. | 2: one fix, then a recheck of the fix diff |
+| small | 3 changed files or fewer and nothing on the risk list (~/.agents/skills/rethink/SKILL.md "Risk list"). | The lead's senior engineer and simplicity lenses plus the diff-only agent; no structural or Codex lens. | 2: one fix, then a recheck of the fix diff |
 | normal / risky | Everything else / anything on that risk list. | Senior, structural, simplicity and diff-only, each required; Codex when it is installed, its absence recorded as a limitation. Risky: a required lens that did not run means the caller must not treat the round as done, and the lead checks the risk-list paths hardest. | Up to 3 |
 
 The lead lists the lenses that actually ran (`Lenses run:` in the verification log), so the caller can check the tier was honoured instead of trusting the verdict line. Round 1 reviews the whole frozen change. Each later round rechecks only the earlier findings plus the fix diff since the previous round (a new `diff.patch` holding that fix diff for the diff-only agent); it does not reopen an unbounded audit (see [review closure](references/review-closure.md)).

@@ -1,0 +1,20 @@
+node_modules/
+dist/
+tmp/
+.env
+.DS_Store
+
+# The live profile registry names real clients and the origins they are
+# reached at, and points at directories holding copies of their cookies.
+# That is one operator's configuration, not part of Relay. The tracked
+# template is config/profiles.example.yaml; `relay init` copies it, and
+# `relay profile-add` maintains it from then on.
+config/profiles.yaml
+
+# The repository registry names the operator's own checkouts, their remotes,
+# and which paths inside them are off limits. Same reasoning as the profile
+# registry above: one operator's configuration, not part of Relay. The
+# tracked template is config/repos.example.yaml.
+config/repos.yaml
+/run/
+/bin/
