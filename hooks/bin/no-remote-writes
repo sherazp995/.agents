@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""Block remote writes in an autonomous run, before the tool call runs.
+
+Active only when AGENTS_AUTONOMOUS_RUN names the run directory (skills/autonomous/launch.sh sets it
+for the headless session and wires this hook with --fail-closed); any other session passes untouched.
+
+Blocked in a shell command, including each part of a chain (`git status && git push`), command
+substitutions and `bash -c` or `eval` strings:
+- git push, git send-email, git lfs push, git svn dcommit;
+- gh, except read-only commands (view, list, diff, status, checks, search, auth status, a local
+  checkout or clone, and `gh api` with GET and no body: a write method, -f/-F/--field/--raw-field
+  fields without an explicit GET, or --input is a write);
+- curl and wget with a write method or a request body to a host other than this machine;
+- publishing: npm, pnpm, yarn and bun publish, unpublish, deprecate, owner and dist-tag changes; gem
+  push, yank and owner; cargo publish, yank and owner; twine upload; poetry and uv publish; docker
+  and podman push;
+- ssh and sftp, and scp or rsync to a remote destination;
+- relay, except `relay notify` and `relay live say` to the run's own Slack thread (the run's report).
+Also blocked: MCP tools of services that post as the user (Slack, GitHub, Linear and the like), the
+user's own browser (playwright-extension, claude-in-chrome), and Artifact publishing.
+
+Not caught: a script that makes the request itself (a Python or Node HTTP call, a shell script read
+from stdin). The run prompt's never list covers those; this hook stops the obvious commands.
+
+Reads the normalized hook event (see ../adapters/run.py) and returns {"decision": "deny", "reason": ...}
+saying what to do instead, so the agent records the write in the run report and goes on.
+"""
+from importlib.machinery import SourceFileLoader
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+guard = SourceFileLoader('git_guard', str(Path(__file__).with_name('git-guard'))).load_module()
+
+SHELLS = {'bash', 'sh', 'zsh', 'dash', 'ksh'}
+WRAPPERS = guard.WRAPPERS | {'xargs', 'nice', 'caffeinate'}
+WATCHED = {'git', 'gh', 'curl', 'wget', 'npm', 'pnpm', 'yarn', 'bun', 'gem', 'cargo', 'twine', 'poetry', 'uv',
+           'docker', 'podman', 'ssh', 'sftp', 'scp', 'rsync', 'relay', 'eval'} | SHELLS
+
+GH_READ_GROUPS = {'search', 'browse', 'help', 'version', 'completion', 'status'}
+GH_READ_COMMANDS = {'view', 'list', 'ls', 'diff', 'status', 'checks', 'watch', 'download', 'checkout', 'clone',
+                    'get', 'verify'}
+GH_GLOBAL_WITH_VALUE = {'-R', '--repo', '--hostname'}
+GH_API_WITH_VALUE = {'-X', '--method', '-H', '--header', '-q', '--jq', '-t', '--template', '--cache',
+                     '-p', '--preview', '--hostname'}
+GH_API_FIELDS = {'-f', '-F', '--field', '--raw-field'}
+
+CURL_WITH_VALUE = {'-X', '--request', '-d', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--json',
+                   '-F', '--form', '--form-string', '-H', '--header', '-o', '--output', '-u', '--user', '-A',
+                   '--user-agent', '-e', '--referer', '-b', '--cookie', '-c', '--cookie-jar', '-T', '--upload-file',
+                   '-w', '--write-out', '--connect-timeout', '-m', '--max-time', '--retry', '-x', '--proxy',
+                   '--resolve', '--cacert', '--cert', '--key', '-K', '--config', '-r', '--range', '-U',
+                   '--proxy-user', '--url'}
+CURL_BODY = {'-d', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--json', '-F', '--form',
+             '--form-string', '-T', '--upload-file'}
+WGET_BODY = ('--post-data', '--post-file', '--body-data', '--body-file')
+READ_METHODS = {'GET', 'HEAD', 'OPTIONS'}
+LOCAL_HOSTS = {'localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'}
+
+PUBLISH = {
+    'npm': {'publish', 'unpublish', 'deprecate', 'owner', 'dist-tag', 'access', 'team', 'star'},
+    'pnpm': {'publish', 'unpublish', 'deprecate', 'owner', 'dist-tag'},
+    'yarn': {'publish', 'unpublish', 'deprecate', 'owner', 'npm'},
+    'bun': {'publish'},
+    'gem': {'push', 'yank', 'owner'},
+    'cargo': {'publish', 'yank', 'owner'},
+    'twine': {'upload'},
+    'poetry': {'publish'},
+    'uv': {'publish'},
+    'docker': {'push'},
+    'podman': {'push'},
+}
+MCP_WRITE_SERVERS = re.compile(r'slack|github|gitlab|linear|jira|atlassian|notion|gmail|google|docs|figma|asana|'
+                               r'discord|calendar|drive|todoist|playwright-extension|claude-in-chrome', re.I)
+ARTIFACT_TOOLS = {'Artifact', 'ArtifactData', 'ArtifactComments'}
+INSTEAD = ('Remote writes are off in autonomous runs (no push, gh writes, PRs, publishing or posts). '
+           'Do not retry it another way: record what would have been sent in the task report and go on.')
+
+
+def command_words(words):
+    """The words after env assignments and wrappers (`env`, `sudo`, `timeout 60`, `xargs`, ...)."""
+    while words:
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0]):
+            words = words[1:]
+            continue
+        name = os.path.basename(words[0])
+        if name == 'timeout':
+            words = words[1:]
+            while words and words[0].startswith('-'):
+                words = words[1:]
+            words = words[1:]  # the duration
+            continue
+        if name not in WRAPPERS:
+            break
+        words = words[1:]
+        while words and words[0].startswith('-'):
+            option, words = words[0], words[1:]
+            if option == '--':
+                break
+            if option in guard.WRAPPER_OPTIONS_WITH_VALUE.get(name, set()) and words:
+                words = words[1:]
+    return words
+
+
+def positionals(args, with_value):
+    """Arguments that are not options or option values. A short cluster (`-sd`) takes a value when its
+    last letter does as a short option of its own."""
+    short = {option[1] for option in with_value if re.fullmatch(r'-[A-Za-z]', option)}
+    found, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg.startswith('-') and arg != '-':
+            skip = arg in with_value or bool(re.fullmatch(r'-[A-Za-z]{2,}', arg) and arg[-1] in short)
+        else:
+            found.append(arg)
+    return found
+
+
+def option_values(args, names):
+    """Values given to any of the named options, as `-X POST`, `-XPOST`, `--request=POST`."""
+    values = []
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name and i + 1 < len(args):
+                values.append(args[i + 1])
+            elif name.startswith('--') and arg.startswith(name + '='):
+                values.append(arg.split('=', 1)[1])
+            elif not name.startswith('--') and arg.startswith(name) and len(arg) > len(name):
+                values.append(arg[len(name):])
+    return values
+
+
+def host_of(target):
+    match = re.match(r'^(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^@/]*@)?(\[[^\]]*\]|[^:/?#]+)', target)
+    return match[1].lower() if match else ''
+
+
+def remote_targets(targets):
+    return [t for t in targets if host_of(t) not in LOCAL_HOSTS]
+
+
+def check_git(words):
+    invocation = guard.git_invocation(words)
+    if not invocation:
+        return None
+    _, subcommand, args = invocation
+    if subcommand in ('push', 'send-email') or (subcommand == 'lfs' and args[:1] == ['push']) \
+            or (subcommand == 'svn' and 'dcommit' in args):
+        return f'`git {subcommand}` writes to a remote. Leave the commit local; the report names it'
+    return None
+
+
+def check_gh(args):
+    i = 0
+    while i < len(args) and args[i].startswith('-'):
+        i += 2 if args[i] in GH_GLOBAL_WITH_VALUE else 1
+    rest = args[i:]
+    if not rest or rest[0] in ('-h', '--help') or '--help' in rest:
+        return None
+    group, sub = rest[0], next((a for a in rest[1:] if not a.startswith('-')), None)
+    if group == 'api':
+        api = rest[1:]
+        methods = [m.upper() for m in option_values(api, ['-X', '--method'])]
+        if methods and all(m in READ_METHODS for m in methods) and '--input' not in api:
+            return None
+        writes = [m for m in methods if m not in READ_METHODS]
+        if writes or any(a in GH_API_FIELDS or a.startswith(('--field=', '--raw-field=')) for a in api) \
+                or '--input' in api or any(a.startswith('--input=') for a in api):
+            return '`gh api` with a write method, fields or a body writes to GitHub. Only GET reads are allowed'
+        return None
+    if group == 'auth' and sub in ('status', 'token'):
+        return None
+    if group in GH_READ_GROUPS or sub in GH_READ_COMMANDS:
+        return None
+    return f'`gh {group}{" " + sub if sub else ""}` is not a read-only gh command'
+
+
+def check_http(name, args):
+    if name == 'curl':
+        methods = [m.upper() for m in option_values(args, ['-X', '--request'])]
+        body = any(a in CURL_BODY or a.startswith(tuple(f'{b}=' for b in CURL_BODY if b.startswith('--')))
+                   or re.fullmatch(r'-[A-Za-z]*[dFT].*', a) for a in args)
+        targets = positionals(args, CURL_WITH_VALUE) + option_values(args, ['--url'])
+    else:
+        methods = [m.upper() for m in option_values(args, ['--method'])]
+        body = any(a.startswith(WGET_BODY) for a in args)
+        targets = positionals(args, {'-O', '--output-document', '-o', '--output-file', '-P', '--directory-prefix',
+                                     '-U', '--user-agent', '--header', '-e', '--execute'})
+    if not (body or any(m not in READ_METHODS for m in methods)):
+        return None
+    remote = remote_targets(targets)
+    if remote or not targets:
+        return f'`{name}` sends a write request to {remote[0] if remote else "a remote host"}'
+    return None
+
+
+def check_remote_copy(name, args):
+    if name in ('ssh', 'sftp'):
+        return f'`{name}` runs on or writes to another machine'
+    targets = positionals(args, {'-e', '-P', '-i', '-o', '-F', '-l', '-S', '-J', '--rsh', '--port'})
+    remote = re.match(r'^(?:[^/@:]+@)?([^/:]+):', targets[-1]) if len(targets) >= 2 else None
+    if remote and remote[1].lower() not in LOCAL_HOSTS:
+        return f'`{name}` copies to another machine ({targets[-1]})'
+    return None
+
+
+def slack_thread():
+    try:
+        state = json.loads((Path(os.environ['AGENTS_AUTONOMOUS_RUN']) / 'state.json').read_text())
+    except (OSError, ValueError, KeyError):
+        return None
+    slack = state.get('slack') if isinstance(state, dict) else None
+    return slack if isinstance(slack, dict) else None
+
+
+def check_relay(args):
+    if not args or args[0] in ('-h', '--help', 'help', '--version', '-V') or '--help' in args:
+        return None
+    if args[0] == 'notify':
+        return None
+    if args[:2] == ['live', 'say']:
+        slack = slack_thread()
+        if not slack:
+            return 'this run was started from the terminal, so its report goes out with one `relay notify`'
+        channel = option_values(args[2:], ['--channel'])
+        thread = option_values(args[2:], ['--thread'])
+        if channel != [slack.get('channel')] or thread != [slack.get('thread')]:
+            return (f'`relay live say` may post only in the run\'s own thread: --channel {slack.get("channel")} '
+                    f'--thread {slack.get("thread")}')
+        return None
+    return f'`relay {args[0]}` is not the run report; autonomous runs post only with relay notify or relay live say'
+
+
+def shell_string(name, args):
+    """The command string a shell runs with -c (`bash -c`, `sh -lc`, `zsh -ec`), or None."""
+    for i, arg in enumerate(args):
+        if re.fullmatch(r'-[A-Za-z]*c[A-Za-z]*', arg) and not arg.startswith('--'):
+            return args[i + 1] if i + 1 < len(args) else ''
+        if not arg.startswith('-'):
+            return None
+    return None
+
+
+def problems_in_command(command, depth=0):
+    return problems_in_parsed(guard.parse_shell(command), depth)
+
+
+def problems_in_parsed(parsed, depth):
+    problems = []
+    _, masked, substitutions = parsed
+    for words in guard.segments(masked):
+        for marker, (body, original) in substitutions.items():
+            if any(marker in word for word in words):
+                problems += problems_in_parsed(body, depth)
+                words = [word.replace(marker, original) for word in words]
+        problems += problems_in_words(words, depth)
+    return problems
+
+
+def problems_in_words(words, depth):
+    words = command_words(words)
+    if not words:
+        return []
+    name, args = os.path.basename(words[0]), words[1:]
+    if name in SHELLS or name == 'eval':
+        inner = ' '.join(args) if name == 'eval' else shell_string(name, args)
+        if inner and depth < 5:
+            return problems_in_command(inner, depth + 1)
+        return []
+    if name == 'git':
+        problem = check_git(words)
+    elif name == 'gh':
+        problem = check_gh(args)
+    elif name in ('curl', 'wget'):
+        problem = check_http(name, args)
+    elif name in ('ssh', 'sftp', 'scp', 'rsync'):
+        problem = check_remote_copy(name, args)
+    elif name == 'relay':
+        problem = check_relay(args)
+    elif name in PUBLISH:
+        sub = next((a for a in args if not a.startswith('-')), None)
+        problem = f'`{name} {sub}` publishes to a registry' if sub in PUBLISH[name] else None
+        if name in ('npm', 'pnpm', 'yarn') and sub == 'dist-tag' and args[args.index(sub) + 1:][:1] in (['ls'], []):
+            problem = None
+    else:
+        problem = None
+    return [problem] if problem else []
+
+
+def check_tool(tool):
+    if tool in ARTIFACT_TOOLS:
+        return f'{tool} publishes a page'
+    if tool.startswith('mcp__'):
+        server = tool.split('__')[1] if tool.count('__') >= 2 else tool
+        if MCP_WRITE_SERVERS.search(server):
+            return f'{tool} acts as the user on a remote service'
+    return None
+
+
+def verdict(event):
+    if not os.environ.get('AGENTS_AUTONOMOUS_RUN'):
+        return None
+    tool = event.get('tool') or ''
+    command = (event.get('input') or {}).get('command')
+    if isinstance(command, str):
+        try:
+            problems = problems_in_command(command)
+        except Exception as error:
+            words = set(re.findall(r'[A-Za-z][\w.-]*', command))
+            if not words & WATCHED:
+                return None
+            return {'decision': 'deny', 'reason': f'Autonomous run: this command could not be parsed ({error}) '
+                    'and may hold a remote write. Split it into simple commands and rerun them.'}
+    else:
+        problem = check_tool(tool)
+        problems = [problem] if problem else []
+    if not problems:
+        return None
+    return {'decision': 'deny', 'reason': 'Autonomous run: ' + '; '.join(dict.fromkeys(problems)) + '. ' + INSTEAD}
+
+
+if __name__ == '__main__':
+    result = verdict(json.loads(sys.stdin.read() or '{}'))
+    if result:
+        print(json.dumps(result))

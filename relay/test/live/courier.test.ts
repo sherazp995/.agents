@@ -49,6 +49,15 @@ describe('buildCourierPrompt', () => {
     expect(prompt).not.toContain('whose name begins with')
   })
 
+  it('sends to the open chat by its name when the session is open, ahead of the recorded peer and the folder', () => {
+    const prompt = buildCourierPrompt(request({ targetName: 'cohabit-web-29', targetPeer: 'cohabit-web-c1 [cbb964]' }))
+
+    expect(prompt).toContain('whose name is exactly "cohabit-web-29"')
+    expect(prompt).toContain('Do not pick another one')
+    expect(prompt).not.toContain('cohabit-web-c1')
+    expect(prompt).not.toContain('whose name begins with')
+  })
+
   it('carries the reply command, because a session that replies to the courier reaches nobody', () => {
     // The trap this closes: a message arriving over the messaging channel
     // invites a reply over the same channel, back to a courier that has
@@ -59,6 +68,13 @@ describe('buildCourierPrompt', () => {
     expect(prompt).toContain('relay live say --channel C1 --thread T1')
     expect(prompt).toContain('Do NOT reply to whoever sent you this message')
     expect(prompt).toContain('already exited')
+  })
+
+  it('tells the open chat to ack long work in its own words, answer a quick question directly, and end with the report', () => {
+    const prompt = buildCourierPrompt(request())
+
+    expect(prompt).toContain('more than about a minute, first post one short ack in your own words')
+    expect(prompt).toContain('For a quick question, just answer. Your final reply is the report.')
   })
 
   it('fences the operator\'s text as data, not as instruction to the courier', () => {

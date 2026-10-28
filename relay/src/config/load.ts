@@ -73,21 +73,6 @@ export function loadRelayConfig(filePath: string): RelayConfig {
 }
 
 /**
- * Autonomous tasks spend without anyone watching, so they never run
- * unmetered: `autonomous.enabled` with no policy `budget` section is a
- * startup error naming the missing section.
- */
-export function assertAutonomousBudget(config: RelayConfig, policy: Policy, policyPath: string): void {
-  if (config.autonomous?.enabled && policy.budget === undefined) {
-    throw new ConfigError(
-      policyPath,
-      'autonomous.enabled is true in the relay config, but this policy has no `budget` section; ' +
-        'add budget.run_cap_usd, budget.session_cap_usd and budget.principal_day_cap_usd',
-    )
-  }
-}
-
-/**
  * Loads and validates the profile registry, per FR-PRF-1.
  *
  * Throws rather than returning a partial registry, for the same reason the

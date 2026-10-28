@@ -14,7 +14,7 @@ Every wait names three things: its condition (a file is non-empty, a `.meta` or 
 | --- | --- | --- |
 | Claude Code session | Yes: background Bash (`run_in_background`) and background agents notify it. | |
 | Claude Code subagent started without `name` | Yes: it may end its turn on its own background Bash or agent and is resumed when that exits (tested 2026-10-26, 90 s job). | |
-| Claude Code agent started with `name` (a teammate) | | Its own background Bash exiting does not wake it; it waits for a message. A rethink lead started this way idled about 100 minutes (2026-10-26). |
+| Claude Code agent started with `name` (a teammate) | | Its own background Bash exiting does not wake it; it waits for a message. A lead started this way idled about 100 minutes (2026-10-26). |
 | Headless `claude -p`, `codex exec`, or `AGENT_REVIEW_HEADLESS=1` | Not to be relied on. One probe saw `claude -p` wait for a background subagent; that is one run on one version. | Treat as never resumed. |
 | Codex | Only while attached: `wait_agent` for sub-agents, `write_stdin` waits of at most 60 s for exec sessions ([workflow-runner SKILL.md](../SKILL.md); agent ownership in [coordinator-reviews.md](coordinator-reviews.md)). | A detached process. |
 
@@ -32,4 +32,4 @@ For example, `<condition>` = `[ -f "$OUT/a.meta" ] && [ -f "$OUT/b.meta" ]`. The
 
 ## The caller's watchdog
 
-Calls are judged by activity, not by a clock: `run-planner.sh` stops a call only when its output stops growing for the idle limit, or at a runaway ceiling, so a working call is never cut off mid-turn. Nothing inside a lead watches the whole run, so the caller does: when it starts a rethink lead it also starts [`~/.agents/skills/rethink/watch-run.sh`](../../rethink/watch-run.sh) in the background on the run folder. The watchdog has no deadline. It exits when the done file appears, or when no file in the folder (planner logs included) changes for the stall time, and prints which. On a stall, the caller sends the lead one message. On a second stall, the caller reads the run folder and reports the status the last reviewed version earned, or `unreviewed draft`, with the reason.
+Calls are judged by activity, not by a clock: `run-planner.sh` stops a call only when its output stops growing for the idle limit, or at a runaway ceiling, so a working call is never cut off mid-turn. The session that calls the rethink advisor waits on that one call itself, in the background with the in-turn wait above.

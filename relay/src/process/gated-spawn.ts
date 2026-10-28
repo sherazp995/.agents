@@ -6,7 +6,10 @@
  * caller can record the pid durably first and only then open the gate. If
  * the caller dies before writing `go`, the shell reads end of file and exits
  * without ever starting the CLI: no worker runs unrecorded. After `go`,
- * stdin is closed, so the CLI sees an empty, closed stdin.
+ * stdin is closed, so the CLI sees an empty, closed stdin, unless the caller
+ * passes `input`: then stdin stays open for the CLI, starting with that
+ * text, and the caller writes more with `write()` and closes it with
+ * `endInput()`.
  *
  * `detached: true` makes the child a process-group leader (pgid = pid), so
  * `kill()` signals the whole group and descendants the CLI started die too.
@@ -36,6 +39,8 @@ export type GatedSpawnOptions = {
   beforeStart?: (pid: number, pgid: number) => Promise<boolean>
   /** Each complete stdout line as it arrives, for callers that meter usage mid-run. */
   onStdoutLine?: (line: string) => void
+  /** Text the CLI reads first on stdin; stdin then stays open until `endInput()`. */
+  input?: string
 }
 
 export type GatedSpawnResult = {
@@ -56,6 +61,10 @@ export type GatedProcess = {
   pgid: number
   /** Kills the whole process group. Safe to call more than once. */
   kill(): void
+  /** Writes to the CLI's open stdin; false before the gate opens, after `endInput()` or a broken pipe, or without `input`. True means handed to the pipe, not read. */
+  write(text: string): boolean
+  /** Closes the CLI's stdin. Safe to call more than once. */
+  endInput(): void
   done: Promise<GatedSpawnResult>
 }
 
@@ -104,6 +113,7 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
 
   let killed = false
   let started = false
+  let inputOpen = false
   let rekill: NodeJS.Timeout | undefined
   // A process forked while the group is being signalled can miss that
   // signal, so kill() keeps re-signalling until the group is empty.
@@ -155,7 +165,10 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
       stderr += text
     })
     // A refused or killed gate closes stdin under the shell; that is expected.
-    child.stdin.on('error', () => undefined)
+    // A broken stdin also ends `write()`, so later input is not reported as sent.
+    child.stdin.on('error', () => {
+      inputOpen = false
+    })
     child.on('error', (error) => {
       clearTimeout(timer)
       kill()
@@ -164,6 +177,7 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
     })
     child.on('close', (code) => {
       clearTimeout(timer)
+      inputOpen = false
       if (!processGroupAlive(pgid)) {
         if (rekill !== undefined) clearInterval(rekill)
         liveGroups.delete(pgid)
@@ -185,9 +199,25 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
       return
     }
     started = true
-    child.stdin.end('go\n')
+    if (options.input === undefined) {
+      child.stdin.end('go\n')
+      return
+    }
+    // `read` takes one line from a pipe byte by byte, so the CLI gets everything after it.
+    inputOpen = true
+    child.stdin.write(`go\n${options.input}`)
   }
   void open()
 
-  return { pid, pgid, kill, done }
+  const write = (text: string): boolean => {
+    if (!inputOpen || killed) return false
+    child.stdin.write(text)
+    return true
+  }
+  const endInput = (): void => {
+    inputOpen = false
+    child.stdin.end()
+  }
+
+  return { pid, pgid, kill, write, endInput, done }
 }

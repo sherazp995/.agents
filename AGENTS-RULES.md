@@ -198,6 +198,18 @@ Before writing code against a library, framework or service API you have not con
 
 **Don't:** Write a Rails 8 `normalizes` call from memory of a Rails 6 pattern | **Do:** Check the Rails 8 API docs for `normalizes`, then write it.
 
+### 58. Save the lesson from every mistake, and fix the instruction when it repeats
+A mistake is any of: the user corrects you, a review finds a bug you introduced, a fix fails twice, or a check you said passed actually fails. At the mistake, without being asked:
+
+- Search memory first (`agents-hub memory show`, plus the promoted ones in `~/.agents/memory/.promotions.json`).
+- No match: save a `feedback` memory with **Why:**, **How to apply:** and an `Incidents:` list (date, repo, what happened). Claude Code writes its memory file; other agents use `agents-hub memory add --type feedback`.
+- A match from a different incident with the same cause (the same incident twice does not count): write the fix into the owning rule, skill or test yourself with a scoped edit, add the incident and a `Promoted: <file> <date>` line to the memory (Claude Code edits the file; other agents add a new one with `--supersedes`, carrying the incidents over), and list the edit under "Learned" in your report. The user can undo it.
+- Read-only agents (reviewers, advisors, checkers) report lesson evidence to the agent that started them, which saves it. `done-check` audits that every incident in a finished turn has its lesson.
+
+**Why:** A lesson nobody writes down is learned again at the user's expense, and one that repeats belongs in the instruction itself, not in a note.
+
+**Don't:** Apologise for pushing to the wrong branch and move on | **Do:** Save the lesson; if it happened before, add the check to the rule that should have caught it.
+
 ## Forms & Turbo (Rails + Hotwire)
 
 ### 38. Default to Turbo + `form_with` for state-changing actions

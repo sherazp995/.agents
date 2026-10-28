@@ -30,8 +30,17 @@ def said(text):
 
 
 def codex_exec(argv, workdir=None):
-    return {'type': 'response_item', 'payload': {'type': 'function_call', 'name': 'exec_command',
+    return {'type': 'response_item', 'payload': {'type': 'function_call', 'name': 'exec_command', 'call_id': 'c1',
                                                  'arguments': json.dumps({'cmd': argv, 'workdir': workdir})}}
+
+
+def result(text, is_error=False, tool_use_id='t1'):
+    return {'type': 'user', 'message': {'role': 'user', 'content': [
+        {'type': 'tool_result', 'tool_use_id': tool_use_id, 'content': text, 'is_error': is_error}]}}
+
+
+def codex_output(text, call_id='c1'):
+    return {'type': 'response_item', 'payload': {'type': 'function_call_output', 'call_id': call_id, 'output': text}}
 
 
 def codex_message(role, text):
@@ -203,6 +212,46 @@ class DoneCheckTest(unittest.TestCase):
             codex_message('assistant', 'Done.'),
             codex_message('user', 'what is the timeout?'),
             codex_message('assistant', '60 seconds.')))
+
+    def test_a_claude_correction_and_failed_command_reach_the_checker_as_incidents(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        reason = self.stop(prompt(), tool('Bash', command='python3 -m unittest a_test'),
+                           result('Exit code 1\nFAILED (errors=1)', is_error=True),
+                           prompt('no, keep the old header'), tool('Edit', file_path=str(self.repo / 'a.py')),
+                           said('Done.'))['reason']
+        for words in ('LESSONS', 'no, keep the old header', '`python3 -m unittest a_test` gave: Exit code 1'):
+            self.assertIn(words, reason)
+
+    def test_a_codex_correction_and_failed_command_reach_the_checker_as_incidents(self):
+        reason = self.stop(codex_message('user', 'add the export button'), codex_exec(['npm', 'test']),
+                           codex_output('Chunk ID: a1\nProcess exited with code 2\nOutput:\nTypeError'),
+                           codex_message('user', 'that broke the import, revert it'),
+                           codex_exec('git commit --amend --no-edit'), codex_message('assistant', 'Done.'))['reason']
+        for words in ('LESSONS', 'that broke the import, revert it', '`npm test` gave: Chunk ID: a1'):
+            self.assertIn(words, reason)
+
+    def test_an_edit_after_a_review_result_is_an_incident(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        reason = self.stop(prompt(), tool('Agent', prompt='review the diff'),
+                           result('Review done. One finding: a.py drops the header.'),
+                           tool('Edit', file_path=str(self.repo / 'a.py')), said('Done.'))['reason']
+        self.assertIn(f'Files edited after a review result:\n- {self.repo / "a.py"}', reason)
+
+    def test_a_turn_without_incidents_skips_lessons(self):
+        (self.repo / 'a.py').write_text('x = 2\n')
+        reason = self.stop(prompt(), tool('Bash', command='python3 -m unittest a_test'), result('Exit code 0\nOK'),
+                           tool('Edit', file_path=str(self.repo / 'a.py')), said('Done.'))['reason']
+        self.assertIn('The turn has no incidents', reason)
+        self.assertNotIn('LESSONS:', reason)
+
+    def test_the_autonomous_policy_appears_only_in_an_autonomous_run(self):
+        self.assertNotIn('autonomous run', self.edit_and_claim()['reason'])
+        self.transcript.unlink()
+        shutil.rmtree(self.dir / 'state')
+        with unittest.mock.patch.dict('os.environ', {'AGENTS_AUTONOMOUS_RUN': '/runs/r1'}):
+            reason = self.edit_and_claim()['reason']
+        for words in ('autonomous run', 'fix only findings this change introduced', '/runs/r1/report.md'):
+            self.assertIn(words, reason)
 
     def state(self):
         return json.loads(next((self.dir / 'state').glob('*.json')).read_text())

@@ -78,6 +78,8 @@ export type CourierRequest = {
   readonly targetCwd: string
   /** The exact peer ("name [ref]" as ListAgents prints it), when the thread was attached by `relay notify --peer`. Wins over the folder match. */
   readonly targetPeer?: string
+  /** The peer name of the open chat running the thread's session, from `findOpenSessionName`. Wins over both others: it is live and exact. */
+  readonly targetName?: string
   /** What the operator actually said. Untrusted content: see `buildCourierPrompt`. */
   readonly body: string
   /** The exact command the session must run to answer. Built by the caller from the parked message's own reply ref. */
@@ -130,7 +132,13 @@ export function folderHandle(cwd: string): string {
 export function buildCourierPrompt(request: CourierRequest): string {
   const handle = folderHandle(request.targetCwd)
   const findPeer =
-    request.targetPeer !== undefined
+    request.targetName !== undefined
+      ? [
+          `2. Find the peer session whose name is exactly "${request.targetName}" (ListAgents prints it as "${request.targetName} [<ref>]").`,
+          `   - If it is listed, continue.`,
+          `   - If it is not, print exactly "${COURIER_NOT_DELIVERED} the session is not open" and stop. Do not pick another one.`,
+        ]
+      : request.targetPeer !== undefined
       ? [
           `2. Find the peer session listed exactly as "${request.targetPeer}".`,
           `   - If it is listed, continue.`,
@@ -160,6 +168,8 @@ export function buildCourierPrompt(request: CourierRequest): string {
           '',
           'To answer, run this command. Do NOT reply to whoever sent you this message: that sender is a courier process that has already exited, and a reply to it reaches nobody.',
           request.replyCommand,
+          '',
+          'Before work that takes more than about a minute, first post one short ack in your own words (what you understood and what you will do) with that command. For a quick question, just answer. Your final reply is the report.',
         ].join('\n'),
       ),
     ),

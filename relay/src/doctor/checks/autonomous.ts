@@ -1,8 +1,7 @@
 /**
- * Autonomous mode's setup, checked only when `autonomous.enabled` is on:
- * the CLIs and the account pool, the keystore items and the budget it
- * needs, a registered repository, and the codex hook proof per codex
- * account. The proof runs a real `codex exec` per account and records the
+ * Slack chats' setup, checked only when `autonomous.enabled` is on: the
+ * CLIs and the account pool, a registered repository, and the codex hook
+ * proof per codex account. The proof runs a real `codex exec` per account and records the
  * result in `<relayHome>/codex-eligibility.json`, which is the only thing
  * that lets the runtime use a codex account (src/autonomous/codex-probe.ts).
  *
@@ -10,15 +9,12 @@
  * compares every scope relay needs.
  */
 
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { accessSync, constants, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readAccountPool } from '../../autonomous/accounts.js'
-import { ignoredReadOnlyMcpEntries } from '../../autonomous/guard.js'
 import { codexVersion, probeCodexAccount, writeCodexEligibility, type CodexEligibility } from '../../autonomous/codex-probe.js'
 import { DEFAULT_CODEX_HOME } from '../../autonomous/turn-runner.js'
-import { READ_ONLY_GITHUB_TOKEN_SECRET, WRITE_GITHUB_TOKEN_SECRET } from '../../autonomous/runtime.js'
 import { loadRepoRegistryIfPresent } from '../../config/load.js'
 import { defaultReposPath, resolveRelayHome } from '../../config/paths.js'
 import type { CheckResult } from '../checks.js'
@@ -31,15 +27,6 @@ function executable(path: string): boolean {
   try {
     accessSync(path, constants.X_OK)
     return true
-  } catch {
-    return false
-  }
-}
-
-/** A github.com entry in ~/.netrc gives git a credential relay did not issue; reported, not fixed. */
-function netrcHasGithub(): boolean {
-  try {
-    return /\bmachine\s+github\.com\b/.test(readFileSync(join(homedir(), '.netrc'), 'utf8'))
   } catch {
     return false
   }
@@ -60,18 +47,9 @@ registerCheck({
     if (!accounts.some((account) => account.client === 'claude')) problems.push('the account pool has no claude account (~/.agents/accounts.toml plus the default logins)')
     notes.push(`accounts: ${accounts.map((account) => account.key).join(', ') || 'none'}`)
 
-    for (const name of [READ_ONLY_GITHUB_TOKEN_SECRET, WRITE_GITHUB_TOKEN_SECRET]) {
-      if (!(await ctx.secrets.has(name).catch(() => false))) problems.push(`keystore item ${name} is missing (relay secrets set ${name})`)
-    }
-    const ignored = ignoredReadOnlyMcpEntries(ctx.policy.remote_writes)
-    if (ignored.length > 0) problems.push(`read_only_mcp_tools entries without a server ("server/tool") match nothing: ${ignored.join(', ')}`)
-    if (ctx.policy.budget === undefined) problems.push('the policy has no budget section, and autonomous mode refuses to start without one')
-
     const reposPath = process.env.RELAY_REPOS_PATH ?? defaultReposPath()
     const repos = loadRepoRegistryIfPresent(reposPath).repos
     if (repos.length === 0) problems.push(`no repository is registered in ${reposPath}`)
-
-    if (netrcHasGithub()) notes.push('~/.netrc has a github.com entry; workers run with their own git config, but other tools may still read it')
 
     if (problems.length > 0) {
       return { name: SETUP, status: 'failed', detail: [...problems, ...notes].join('; '), remediation: 'Fix each item named, then re-run `relay doctor`.' }

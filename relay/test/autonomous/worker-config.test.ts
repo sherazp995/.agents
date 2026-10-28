@@ -9,10 +9,9 @@ import {
 const HOOK = `'/opt/node' '/relay home/dist/scripts/hook-pretooluse.js'`
 
 describe('worker hook config', () => {
-  it('registers the Bash PreToolUse hook for claude and turns the Playwright plugin off', () => {
+  it('registers the Bash PreToolUse hook for claude and nothing else', () => {
     expect(JSON.parse(buildClaudeSettings({ hookCommand: HOOK }))).toEqual({
       hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: HOOK, timeout: HOOK_TIMEOUT_SECONDS }] }] },
-      enabledPlugins: { 'playwright@claude-plugins-official': false },
     })
   })
 

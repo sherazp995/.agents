@@ -462,7 +462,7 @@ describeDb('orchestrator', () => {
       expect(await runCount(workspaceId)).toBe(1)
     })
 
-    it('parks a message in a thread attached to an open chat instead of routing it, with only 👀', async () => {
+    it('parks a message in a thread attached to an open chat instead of routing it, with no reaction from Relay', async () => {
       const { workspaceId, principalId } = await createFixtures()
       const auto = fakeAutonomous('handled')
       const adapter = new MockAdapter()
@@ -473,7 +473,7 @@ describeDb('orchestrator', () => {
       await handleChatEvent({ pool, dispatcher: adapter, log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, autonomous: auto.routing, liveControlGraceMs: 60_000 }, event)
 
       expect(auto.routed).toEqual([])
-      expect(adapter.performed).toEqual([expect.objectContaining({ kind: 'react', name: 'eyes' })])
+      expect(adapter.performed).toEqual([])
       const { rows } = await pool.query('SELECT 1 FROM live_control_messages WHERE session_id = $1', [session.id])
       expect(rows).toHaveLength(1)
     })

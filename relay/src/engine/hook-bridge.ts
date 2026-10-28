@@ -54,14 +54,6 @@ import { classify } from '../policy/classify.js'
 import { decide } from '../policy/decide.js'
 import type { Logger } from '../obs/logger.js'
 import { registerSecretValue } from '../secrets/scrubber.js'
-import {
-  MCP_CALL_PATH,
-  MCP_RESULT_PATH,
-  type InvocationContext,
-  type McpCallDecision,
-  type McpCallRequest,
-  type McpResultRequest,
-} from '../autonomous/mcp-protocol.js'
 import type { ClassificationContext, DecisionContext, ProposedCall } from '../policy/schema.js'
 
 // ---------------------------------------------------------------------------
@@ -223,6 +215,14 @@ export function resolveHookDecision(request: HookDecisionRequest, context: HookD
  * `context` is the InvocationContext of the per-invocation token the request
  * authenticated with, or undefined for the instance's own single token.
  */
+/** Who a bridge token was issued to: one chat turn (its run) under one lease generation. */
+export type InvocationContext = {
+  workspaceId: string
+  taskId: string
+  runId: string
+  leaseGeneration: number
+}
+
 export type HookDecide = (request: HookDecisionRequest, context: InvocationContext | undefined) => Promise<HookDecisionResult>
 /**
  * `signal` aborts when the deadline has already answered deny: an
@@ -230,8 +230,6 @@ export type HookDecide = (request: HookDecisionRequest, context: InvocationConte
  * approval, a claim), so a late answer never leaves state the caller was
  * told did not happen.
  */
-export type McpCallDecide = (call: McpCallRequest, context: InvocationContext | undefined, signal: AbortSignal) => Promise<McpCallDecision>
-export type McpResultRecorder = (result: McpResultRequest, context: InvocationContext | undefined, signal: AbortSignal) => Promise<void>
 
 /** The governed decision: resolveHookDecision, unchanged, behind the async seam. */
 export function governedDecide(policy: Policy, knownOrigins: readonly string[] = []): HookDecide {
@@ -240,24 +238,8 @@ export function governedDecide(policy: Policy, knownOrigins: readonly string[] =
 
 /** Below the hook script's own 8 s deadline, so the server's deny always reaches the script before the script gives up. */
 export const DEFAULT_DECISION_DEADLINE_MS = 5_000
-/** Request bodies above this are refused unread: a hook payload or an MCP call's arguments, never a file upload. */
+/** Request bodies above this are refused unread: a hook payload, never a file upload. */
 const MAX_BODY_BYTES = 4 * 1024 * 1024
-
-const mcpCallRequestSchema = z.object({ server: z.string().trim().min(1), tool: z.string().trim().min(1), args: z.unknown() }).strict()
-const mcpResultRequestSchema = z.object({ operationId: z.string().trim().min(1), ok: z.boolean(), result: z.unknown() }).strict()
-/** What `decideMcpCall` may answer; anything else is denied rather than forwarded to the gateway. */
-const mcpCallDecisionSchema = z.discriminatedUnion('decision', [
-  z.object({ decision: z.literal('allow') }).strict(),
-  z.object({ decision: z.literal('deny'), reason: z.string() }).strict(),
-  z.object({ decision: z.literal('pending'), operationId: z.string().min(1), message: z.string() }).strict(),
-  z
-    .object({
-      decision: z.literal('execute'),
-      operationId: z.string().min(1),
-      args: z.record(z.unknown()).optional(),
-    })
-    .strict(),
-])
 
 export interface HookBridgeServerOptions {
   /** The governed policy. Used to build the default `decide` when none is given; one of the two is required. */
@@ -265,11 +247,7 @@ export interface HookBridgeServerOptions {
   readonly knownOrigins?: readonly string[]
   /** Overrides the governed decision (the autonomous guard). Throwing or exceeding `deadlineMs` denies. */
   readonly decide?: HookDecide
-  /** Answers POST MCP_CALL_PATH. Absent: every MCP call is denied. */
-  readonly decideMcpCall?: McpCallDecide
-  /** Answers POST MCP_RESULT_PATH. Absent: every result report fails. */
-  readonly recordMcpResult?: McpResultRecorder
-  /** How long `decide`, `decideMcpCall` or `recordMcpResult` may take before the server answers deny. */
+  /** How long `decide` may take before the server answers deny. */
   readonly deadlineMs?: number
   /** Where a failure to answer a request is reported. */
   readonly logger?: Pick<Logger, 'error'>
@@ -344,8 +322,6 @@ export class HookBridgeServer {
   readonly token: string
   private readonly server: Server
   private readonly decide: HookDecide
-  private readonly decideMcpCall: McpCallDecide | undefined
-  private readonly recordMcpResult: McpResultRecorder | undefined
   private readonly deadlineMs: number
   private readonly logger: Pick<Logger, 'error'> | undefined
   private readonly host: string
@@ -360,8 +336,6 @@ export class HookBridgeServer {
     } else {
       throw new Error('HookBridgeServer needs a policy or a decide function')
     }
-    this.decideMcpCall = options.decideMcpCall
-    this.recordMcpResult = options.recordMcpResult
     this.deadlineMs = options.deadlineMs ?? DEFAULT_DECISION_DEADLINE_MS
     this.logger = options.logger
     this.host = options.host ?? '127.0.0.1'
@@ -416,7 +390,7 @@ export class HookBridgeServer {
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
     const path = (req.url ?? '').split('?')[0]
-    if (req.method !== 'POST' || (path !== '/pre-tool-use' && path !== MCP_CALL_PATH && path !== MCP_RESULT_PATH)) {
+    if (req.method !== 'POST' || path !== '/pre-tool-use') {
       res.writeHead(404).end()
       return
     }
@@ -454,13 +428,7 @@ export class HookBridgeServer {
         this.respondJson(res, 400, { decision: 'deny', reason: 'malformed JSON request body' })
         return
       }
-      const answer =
-        path === MCP_CALL_PATH
-          ? this.answerMcpCall(body, auth.context)
-          : path === MCP_RESULT_PATH
-            ? this.answerMcpResult(body, auth.context)
-            : this.answerPreToolUse(body, auth.context)
-      answer
+      this.answerPreToolUse(body, auth.context)
         .then(({ status, body: reply }) => this.respondJson(res, status, reply))
         .catch((error: unknown) => {
           this.logger?.error({ err: error, path }, 'hook bridge failed to answer a request')
@@ -482,37 +450,6 @@ export class HookBridgeServer {
       return { status: 200, body: result }
     } catch (error) {
       return { status: 200, body: { decision: 'deny', reason: failureReason(error) } }
-    }
-  }
-
-  private async answerMcpCall(body: unknown, context: InvocationContext | undefined): Promise<{ status: number; body: McpCallDecision }> {
-    const parsed = mcpCallRequestSchema.safeParse(body)
-    if (!parsed.success) return { status: 200, body: { decision: 'deny', reason: MALFORMED_REQUEST_REASON } }
-    const decideMcpCall = this.decideMcpCall
-    if (decideMcpCall === undefined) return { status: 200, body: { decision: 'deny', reason: 'this bridge does not gate MCP calls' } }
-    try {
-      const call: McpCallRequest = { server: parsed.data.server, tool: parsed.data.tool, args: parsed.data.args }
-      const decision = mcpCallDecisionSchema.safeParse(
-        await withinDeadline((signal) => decideMcpCall(call, context, signal), this.deadlineMs),
-      )
-      if (!decision.success) return { status: 200, body: { decision: 'deny', reason: INTERNAL_ERROR_REASON } }
-      return { status: 200, body: decision.data as McpCallDecision }
-    } catch (error) {
-      return { status: 200, body: { decision: 'deny', reason: failureReason(error) } }
-    }
-  }
-
-  private async answerMcpResult(body: unknown, context: InvocationContext | undefined): Promise<{ status: number; body: unknown }> {
-    const parsed = mcpResultRequestSchema.safeParse(body)
-    if (!parsed.success) return { status: 400, body: { ok: false, reason: MALFORMED_REQUEST_REASON } }
-    const recordMcpResult = this.recordMcpResult
-    if (recordMcpResult === undefined) return { status: 404, body: { ok: false, reason: 'this bridge does not record MCP results' } }
-    try {
-      const result: McpResultRequest = { operationId: parsed.data.operationId, ok: parsed.data.ok, result: parsed.data.result }
-      await withinDeadline((signal) => recordMcpResult(result, context, signal), this.deadlineMs)
-      return { status: 200, body: { ok: true } }
-    } catch (error) {
-      return { status: 500, body: { ok: false, reason: failureReason(error) } }
     }
   }
 

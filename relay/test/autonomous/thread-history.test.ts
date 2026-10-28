@@ -27,9 +27,16 @@ describe('renderThreadHistory', () => {
 
 describe('buildTurnPrompt with thread history', () => {
   it('puts the earlier thread before the new messages, as untrusted data', () => {
-    const prompt = buildTurnPrompt({ pendingEvents: [], files: [], worktreePath: null }, [], '- U1: Yes it works')
+    const prompt = buildTurnPrompt({ pendingEvents: [], files: [], chatSessionId: null, chatCwd: null }, [], '- U1: Yes it works')
     expect(prompt).toContain('Earlier in this Slack thread')
     expect(prompt).toContain('relay:untrusted-data')
     expect(prompt).toContain('Yes it works')
+    expect(prompt).not.toContain('Claude Code chat')
+  })
+
+  it('points a fresh session at the taken-over chat\'s transcript', () => {
+    const task = { pendingEvents: [], files: [], chatSessionId: 'chat-1', chatCwd: '/Users/me/.agents' }
+    expect(buildTurnPrompt(task, [], '- U1: hi')).toMatch(/Claude Code chat chat-1\. Read its transcript first for the history: .*\/-Users-me--agents\/chat-1\.jsonl/)
+    expect(buildTurnPrompt(task, [])).not.toContain('chat-1')
   })
 })

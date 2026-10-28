@@ -231,3 +231,15 @@ export async function runLiveSay(params: LiveSayParams): Promise<string> {
   if (file) await queueUpload(params.pool, params.workspaceId, ref, file)
   return `queued for ${composeThreadRef(params.channel, params.thread)}; the relay daemon posts it.`
 }
+
+export type LiveReactParams = LiveClaimParams & { readonly message: string; readonly name: string }
+
+/** Adds an emoji reaction to one message in the thread, through the outbox like runLiveSay. */
+export async function runLiveReact(params: LiveReactParams): Promise<string> {
+  await resolveSessionId(params)
+  const name = params.name.trim().replace(/:/g, '')
+  if (name === '') throw new Error('nothing to react with: give --name, for example eyes')
+  const ref = { channel: params.channel, thread: params.thread, message: params.message }
+  await params.pool.query(`INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, 'slack', $2, now())`, [params.workspaceId, { kind: 'react', ref, name }])
+  return `queued :${name}: on ${params.message} in ${composeThreadRef(params.channel, params.thread)}; the relay daemon adds it.`
+}

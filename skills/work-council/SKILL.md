@@ -1,6 +1,6 @@
 ---
 name: work-council
-description: "A by-name option of doing-substantial-work where Claude and Codex work as one team: they plan together with rethink (both draft, a lead merges, both approve the exact plan), split the build into parts that each model owns, build them at the same time in the user's checkout, review each other's parts, and finish only when every check passes and both approve the whole change. Disagreement after three fix rounds goes to the user. Then it hands back to doing-substantial-work for proof and commit. Works the same in Claude Code and Codex. Use only when the user invokes /work-council, asks for \"the work council\", \"Claude and Codex together\", \"build it as a team\" or \"combined work\", or accepts doing-substantial-work's offer of it for a risky plan. Not for one-line fixes, questions, or read-only review (use general-review or llm-council for those)."
+description: "A by-name option of doing-substantial-work where Claude and Codex work as one team: they plan together with rethink (one writes the plan, the other gives its opinion on the direction and the draft, and they agree on it), split the build into parts that each model owns, build them at the same time in the user's checkout, review each other's parts, and finish only when every check passes and both approve the whole change. Disagreement after three fix rounds goes to the user. Then it hands back to doing-substantial-work for proof and commit. Works the same in Claude Code and Codex. Use only when the user invokes /work-council, asks for \"the work council\", \"Claude and Codex together\", \"build it as a team\" or \"combined work\", or accepts doing-substantial-work's offer of it for a risky plan. Not for one-line fixes, questions, or read-only review (use general-review or llm-council for those)."
 argument-hint: "<task> [--auto]"
 ---
 
@@ -35,11 +35,11 @@ Shell variables may not survive between commands, so write the literal `BASE` sh
 
 ## 2. Plan together
 
-Plan with `rethink`: Claude and Codex each draft blind, a lead merges one plan, and both approve that exact plan. A plan `doing-substantial-work` already made with `rethink` and both approved is used as it is.
+Plan with `rethink`: one model writes the plan and the other gives its opinion on the direction and on the draft, until the plan is `agreed`. A plan `doing-substantial-work` already made with `rethink` and `agreed` is used as it is.
 
 The plan must also say who builds what. Ask for it in the rethink request: split the work into 1 to 6 parts, each with an owner (`claude` or `codex`), the files it owns (repository-relative paths to single files: no directories, globs or `..`), and a one-line brief; no file belongs to two parts. Give each model the parts that suit it, and balance the load. Shared files (schema, migrations, routes, lockfiles, locale files) go in one part. When the work does not split cleanly, it is one part: one model builds it and the other reviews it.
 
-Show the user the plan (intent, steps, parts and owners, checks, the rethink status) and wait for approval, unless `--auto` (or "don't wait for me"). This approval replaces the one in `doing-substantial-work` step 2. A plan that is not `approved by both` is never built here; the user may take it to `doing-substantial-work` instead.
+Show the user the plan (intent, steps, parts and owners, checks, the rethink status) and wait for approval, unless `--auto` (or "don't wait for me"). This approval replaces the one in `doing-substantial-work` step 2. A plan that is not `agreed` is built here only after the user settles each open point. For an unattended build of a plan the user already approved, use `autonomous` instead.
 
 ## 3. Build as a team
 

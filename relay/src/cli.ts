@@ -27,6 +27,7 @@ import {
   resolveDrainWorkspace,
   runLiveClaim,
   runLiveDrain,
+  runLiveReact,
   runLiveRelease,
   runLiveSay,
   runLiveWait,
@@ -447,6 +448,16 @@ liveOptions(liveCommand.command('say'))
   .action(async (options: LiveOptions & { file?: string }) => {
     await withLivePool(options, (pool, workspaceId) =>
       runLiveSay({ pool, workspaceId, channel: options.channel, thread: options.thread, text: options.text ?? '', ...(options.file ? { file: options.file } : {}) }),
+    )
+  })
+
+liveOptions(liveCommand.command('react'))
+  .description('Add an emoji reaction to one message in the thread')
+  .requiredOption('--message <ts>', 'the ts of the message to react to')
+  .requiredOption('--name <emoji>', 'the emoji name, for example eyes')
+  .action(async (options: LiveOptions & { message: string; name: string }) => {
+    await withLivePool(options, (pool, workspaceId) =>
+      runLiveReact({ pool, workspaceId, channel: options.channel, thread: options.thread, message: options.message, name: options.name }),
     )
   })
 

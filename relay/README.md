@@ -111,8 +111,8 @@ Postgres and Redis are still needed either way, set up as above.
    read them.
 
 4. **Already installed the app before autonomous tasks?** Reinstall it from
-   `docs/slack-app-manifest.yaml`: the bot now needs `reactions:write` to put
-   👀 on a mention. `relay doctor` fails until the token has it.
+   `docs/slack-app-manifest.yaml`: the bot now needs `reactions:write` so the
+   agent can react to a message (`relay live react`). `relay doctor` fails until the token has it.
 
 ### Install the supervisor and lock down Relay's own secrets
 

@@ -490,7 +490,7 @@ export async function createApprovalInTransaction(client: PoolClient, params: Cr
 }
 
 /** Scoped by workspace, per AP-8: a caller in workspace A can never read an approval that belongs to workspace B, even by guessing its id. Returns null rather than throwing for "not found," matching src/sessions/store.ts's findActiveSession. */
-export async function getApproval(pool: Pool, workspaceId: string, approvalId: string): Promise<Approval | null> {
+export async function getApproval(pool: Pool | PoolClient, workspaceId: string, approvalId: string): Promise<Approval | null> {
   const { rows } = await pool.query<ApprovalRow>(
     'SELECT * FROM approvals WHERE id = $1 AND workspace_id = $2',
     [approvalId, workspaceId],

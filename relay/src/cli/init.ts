@@ -117,14 +117,8 @@ logging:
   level: info
 autonomous:
   # Every Slack conversation runs as an autonomous task: one thread is one
-  # Claude Code session, run without the sandbox. Needs the policy budget.
+  # Claude Code chat, run without the sandbox.
   enabled: true
-  # Reserved per turn before it starts, and charged when real usage is unknown.
-  per_turn_fallback_usd: 1
-  # Codex reports tokens, not dollars; cost is estimated at this rate.
-  codex_usd_per_mtok: 10
-  # Fixed charge for general-review's nested Codex lens.
-  review_codex_allowance_usd: 2
 secrets:
   # FR-SEC-2 and FR-SLA-6: the only provider production config may name.
   # Secrets live in the macOS Keychain, never in this file. relay init

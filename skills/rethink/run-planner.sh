@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One planner call for the rethink skill: read-only, stopped only when idle or runaway, with an output check.
+# One advisor call for the rethink skill: read-only, stopped only when idle or runaway, with an output check.
 # Usage: run-planner.sh claude|codex <repo dir> <prompt file> <out file> <idle seconds> [sections] [effort]
 #   <idle seconds>: the call is killed only when its answer, stream and log all stop growing for this long;
 #   a call that keeps producing output keeps running. RETHINK_CEILING (default 2700) caps one call's total

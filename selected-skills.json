@@ -1,5 +1,6 @@
 {
   "skills": [
+    "autonomous",
     "backend-engineering",
     "branch-visual-qa",
     "cohabit-local-browser-testing",
@@ -28,6 +29,7 @@
     "video-qa",
     "work-council",
     "workflow-runner",
+    "writing-plans",
     "writing-specs"
   ],
   "roots": [

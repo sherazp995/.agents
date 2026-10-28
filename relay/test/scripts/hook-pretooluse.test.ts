@@ -1,7 +1,4 @@
 import { execFile, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { createServer } from 'node:http'
 import type { Server } from 'node:http'
 import { promisify } from 'node:util'
@@ -349,48 +346,29 @@ describe('compiled hook script: codex payloads', () => {
 })
 
 describe('compiled hook script: through the bridge to the autonomous guard', () => {
-  it('denies git merge in the worktree and allows the QA merge, for claude and codex payloads', async () => {
-    const relayHome = await mkdtemp(join(tmpdir(), 'relay-hook-guard-'))
-    try {
-      const task = { id: 'task-1', workspaceId: 'w1', leaseGeneration: 2, cancelRequestedAt: null } as AutonomousTask
-      const worktree = join(relayHome, 'tasks', task.id, 'worktree')
-      const qa = join(relayHome, 'tasks', task.id, 'qa', 'snapshot')
-      await mkdir(worktree, { recursive: true })
-      await mkdir(qa, { recursive: true })
-      const guard = createAutonomousGuard({
-        loadTask: async (id) => (id === task.id ? task : undefined),
-        isInvocationCurrent: async (_taskId, invocationId) => invocationId === 'inv-1',
-        isKillSwitchEngaged: async () => false,
-        operations: {
-          requestMcpOperation: async () => ({ kind: 'refused', reason: 'unused' }),
-          recordOperationOutcome: async () => {},
-        },
-        remoteWrites: () => undefined,
-        qaCheckouts: async () => [qa],
-        defaultBranch: async () => 'main',
-        relayHome,
-      })
-      const bridge = new HookBridgeServer({ decide: guard.decide })
-      await bridge.start()
-      activeBridge = bridge
-      const env = {
-        RELAY_HOOK_URL: bridge.url,
-        RELAY_HOOK_TOKEN: bridge.issueToken({ workspaceId: 'w1', taskId: task.id, invocationId: 'inv-1', leaseGeneration: 2 }),
-      }
-      const claude = (command: string) =>
-        JSON.stringify({ session_id: 's', tool_name: 'Bash', tool_use_id: 't', cwd: worktree, tool_input: { command } })
-      const codex = (command: string, workdir: string) =>
-        JSON.stringify({ session_id: 's', tool_name: 'Bash', cwd: worktree, tool_input: { command, workdir } })
+  it('lets a plain command run and holds a push for approval, for claude and codex payloads', async () => {
+    const task = { id: 'task-1', workspaceId: 'w1', leaseGeneration: 2, cancelRequestedAt: null } as AutonomousTask
+    const requested: string[] = []
+    const guard = createAutonomousGuard({
+      loadTask: async (id) => (id === task.id ? task : undefined),
+      isKillSwitchEngaged: async () => false,
+      requestShellWrite: async (_context, write) => {
+        requested.push(write.command)
+        return { kind: 'pending' }
+      },
+    })
+    const bridge = new HookBridgeServer({ decide: guard.decide })
+    await bridge.start()
+    activeBridge = bridge
+    const env = { RELAY_HOOK_URL: bridge.url, RELAY_HOOK_TOKEN: bridge.issueToken({ workspaceId: 'w1', taskId: task.id, runId: 'run-1', leaseGeneration: 2 }) }
+    const claude = (command: string) => JSON.stringify({ session_id: 's', tool_name: 'Bash', tool_use_id: 't', cwd: '/w', tool_input: { command } })
+    const codex = (command: string) => JSON.stringify({ session_id: 's', tool_name: 'Bash', cwd: '/w', tool_input: { command, workdir: '/w' } })
 
-      expect(parseHookOutput((await runHookScript(claude('git merge feature'), env)).stdout)).toMatchObject({ decision: 'deny' })
-      expect(parseHookOutput((await runHookScript(claude(`cd ${qa} && git merge --no-commit --no-ff main`), env)).stdout)).toMatchObject({
-        decision: 'allow',
-      })
-      expect((await runHookScript(codex('git merge --no-commit --no-ff main', qa), env, ['--codex'])).stdout).toBe('')
-      const stale = { ...env, RELAY_HOOK_TOKEN: bridge.issueToken({ workspaceId: 'w1', taskId: task.id, invocationId: 'inv-1', leaseGeneration: 1 }) }
-      expect(parseHookOutput((await runHookScript(codex('ls', qa), stale, ['--codex'])).stdout)).toMatchObject({ decision: 'deny' })
-    } finally {
-      await rm(relayHome, { recursive: true, force: true })
-    }
+    expect(parseHookOutput((await runHookScript(claude('git status'), env)).stdout)).toMatchObject({ decision: 'allow' })
+    expect(parseHookOutput((await runHookScript(claude('git push origin main'), env)).stdout)).toMatchObject({ decision: 'deny' })
+    expect((await runHookScript(codex('ls'), env, ['--codex'])).stdout).toBe('')
+    const stale = { ...env, RELAY_HOOK_TOKEN: bridge.issueToken({ workspaceId: 'w1', taskId: task.id, runId: 'run-1', leaseGeneration: 1 }) }
+    expect(parseHookOutput((await runHookScript(codex('ls'), stale, ['--codex'])).stdout)).toMatchObject({ decision: 'deny' })
+    expect(requested).toEqual(['git push origin main'])
   }, SCRIPT_TIMEOUT_MS)
 })

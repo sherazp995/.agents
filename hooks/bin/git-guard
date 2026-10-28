@@ -322,6 +322,16 @@ class Correction(str):
     """A problem the agent fixes itself by rerunning differently; no user approval needed."""
 
 
+def branch_start(directory):
+    """The commit an `autonomous/<task>` branch was created from (its oldest reflog entry), else None.
+    An autonomous task branch holds one commit of its own, whatever its base has not pushed yet."""
+    branch = git(directory, 'symbolic-ref', '--short', '-q', 'HEAD') or ''
+    if not branch.startswith('autonomous/'):
+        return None
+    entries = (git(directory, 'reflog', 'show', '--format=%H', f'refs/heads/{branch}') or '').split()
+    return entries[-1] if entries else None
+
+
 def check_commit(directory, args):
     problems = []
     messages = commit_messages(args)
@@ -332,7 +342,8 @@ def check_commit(directory, args):
     if not os.path.isdir(directory):
         return problems  # a path only the shell knows ($D from mktemp): not the user's branch
     has_head = git(directory, 'rev-parse', '--verify', '-q', 'HEAD') is not None
-    unpushed = int(git(directory, 'rev-list', '--count', 'HEAD', '--not', '--remotes') or 0) if has_head else 0
+    start = branch_start(directory) if has_head else None
+    unpushed = int(git(directory, 'rev-list', '--count', 'HEAD', '--not', '--remotes', *([start] if start else [])) or 0) if has_head else 0
     amend = '--amend' in args
     mode, bad_setting = commit_mode(directory)
     if bad_setting:

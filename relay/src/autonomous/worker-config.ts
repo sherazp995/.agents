@@ -1,9 +1,8 @@
 /**
  * What the scheduler hands each worker CLI at spawn so relay's PreToolUse
- * hook (scripts/hook-pretooluse.ts) gates every shell call (plan step 8).
+ * hook (scripts/hook-pretooluse.ts) sees every shell call.
  *
- * Claude: a `--settings` JSON registering the hook for Bash, and turning the
- * Playwright plugin off so the only browser is relay's proxy-enforced one.
+ * Claude: a `--settings` JSON registering the hook for Bash.
  *
  * Codex: `-c` overrides. Codex runs a hook only when its hash is recorded as
  * trusted under `hooks.state`; overrides land in the `sessionFlags` layer,
@@ -26,7 +25,6 @@ import { canonicalise } from '../audit/chain.js'
 export const HOOK_TIMEOUT_SECONDS = 30
 
 export const CODEX_SESSION_FLAGS_SOURCE = '/<session-flags>/config.toml'
-const DISABLED_PLUGINS = ['playwright@claude-plugins-official'] as const
 
 export type HookCommandParams = {
   /** The shell command that runs scripts/hook-pretooluse.js, e.g. `'/path/node' '/path/dist/scripts/hook-pretooluse.js'`. */
@@ -38,7 +36,6 @@ export function buildClaudeSettings(params: HookCommandParams): string {
     hooks: {
       PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: params.hookCommand, timeout: HOOK_TIMEOUT_SECONDS }] }],
     },
-    enabledPlugins: Object.fromEntries(DISABLED_PLUGINS.map((plugin) => [plugin, false])),
   })
 }
 

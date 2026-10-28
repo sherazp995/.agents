@@ -6,7 +6,6 @@ import { applyMigrations } from '../../src/db/migrate.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
 import { findActiveSession, findOrCreateSession } from '../../src/sessions/store.js'
-import type { ChatAction } from '../../src/chat/contract.js'
 import {
   acquireLease,
   intakeMention,
@@ -15,7 +14,6 @@ import {
   requestCancel,
   updateTask,
   type IntakeMentionParams,
-  type IntakeOutbox,
 } from '../../src/autonomous/store.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 
@@ -39,28 +37,20 @@ describe('autonomous store', () => {
     return { workspaceId, principalId }
   }
 
-  /** Records queued actions in the caller's transaction, like Outbox.enqueue, optionally failing. */
-  function recordingOutbox(failOn?: ChatAction['kind']): IntakeOutbox & { queued: () => Promise<ChatAction[]> } {
-    const workspaceIds = new Set<string>()
-    return {
-      async enqueue(action: ChatAction, workspaceId: string, executor: PoolClient) {
-        if (action.kind === failOn) throw new Error(`injected failure on ${action.kind}`)
-        workspaceIds.add(workspaceId)
-        const { rows } = await executor.query<{ id: string }>(
-          `INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, 'test', $2, now()) RETURNING id`,
-          [workspaceId, action],
-        )
-        return rows[0]?.id ?? ''
-      },
-      async queued() {
-        const { rows } = await pool.query<{ action: ChatAction }>(
-          `SELECT action FROM outbox WHERE workspace_id = ANY ($1) ORDER BY created_at, id`,
-          [[...workspaceIds]],
-        )
-        return rows.map((row) => row.action)
-      },
+  /** The test pool, except its clients fail any query containing `match`. */
+  function failingPool(match: string): Pool {
+    const connect = async (): Promise<PoolClient> => {
+      const client = await pool.connect()
+      const query = (text: unknown, ...rest: unknown[]) =>
+        typeof text === 'string' && text.includes(match)
+          ? Promise.reject(new Error(`injected failure on ${match}`))
+          : (client.query as (...args: unknown[]) => Promise<unknown>).call(client, text, ...rest)
+      return Object.assign(Object.create(client) as PoolClient, { query, release: () => client.release() })
     }
+    return { connect } as unknown as Pool
   }
+
+  /** Records queued actions in the caller's transaction, like Outbox.enqueue. */
 
   function intakeParams(workspaceId: string, principalId: string, threadRef: string, eventId: string): IntakeMentionParams {
     return {
@@ -69,7 +59,6 @@ describe('autonomous store', () => {
       adapter: 'slack',
       threadRef,
       event: { id: eventId, principalId, text: 'review PR 12', ref: { channel: 'C1', message: '1.1' }, fileIds: [], receivedAt: new Date().toISOString() },
-      mentionRef: { channel: 'C1', message: '1.1' },
       replyRef: { channel: 'C1', thread: '1.1' },
       files: [],
     }
@@ -80,47 +69,43 @@ describe('autonomous store', () => {
     return Number(rows[0]?.n)
   }
 
-  it('creates the session as autonomous, the task, and queues only 👀 in one transaction', async () => {
+  it('creates the session as autonomous and the task in one transaction, and queues no reaction', async () => {
     const { workspaceId, principalId } = await setup()
-    const outbox = recordingOutbox()
 
-    const result = await intakeMention(pool, outbox, intakeParams(workspaceId, principalId, 'C1:1.1', 'C1:1.1'))
+    const result = await intakeMention(pool, intakeParams(workspaceId, principalId, 'C1:1.1', 'C1:1.1'))
 
     expect(result.kind).toBe('created')
     const session = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: 'C1:1.1' })
     expect(session?.mode).toBe('autonomous')
     const reread = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef: 'C1:1.1' })
     expect(reread.mode).toBe('autonomous')
-    expect((await outbox.queued()).map((action) => action.kind).sort()).toEqual(['react'])
+    expect(await count('outbox', workspaceId)).toBe(0)
   })
 
   it('rolls back the session and task when a failure hits after the session insert, and a retry yields one of each', async () => {
     const { workspaceId, principalId } = await setup()
     const params = intakeParams(workspaceId, principalId, 'C1:2.1', 'C1:2.1')
 
-    await expect(intakeMention(pool, recordingOutbox('react'), params)).rejects.toThrow('injected failure')
+    await expect(intakeMention(failingPool('INSERT INTO autonomous_tasks'), params)).rejects.toThrow('injected failure')
     expect(await count('sessions', workspaceId)).toBe(0)
     expect(await count('autonomous_tasks', workspaceId)).toBe(0)
     expect(await count('outbox', workspaceId)).toBe(0)
 
-    const outbox = recordingOutbox()
-    await intakeMention(pool, outbox, params)
-    const again = await intakeMention(pool, outbox, params)
+    await intakeMention(pool, params)
+    const again = await intakeMention(pool, params)
 
     expect(again).toMatchObject({ kind: 'appended', duplicate: true })
     expect(await count('sessions', workspaceId)).toBe(1)
     expect(await count('autonomous_tasks', workspaceId)).toBe(1)
-    expect((await outbox.queued()).map((action) => action.kind).sort()).toEqual(['react'])
   })
 
   it('appends a new event to an autonomous task once per event id', async () => {
     const { workspaceId, principalId } = await setup()
-    const outbox = recordingOutbox()
-    await intakeMention(pool, outbox, intakeParams(workspaceId, principalId, 'C1:3.1', 'C1:3.1'))
+    await intakeMention(pool, intakeParams(workspaceId, principalId, 'C1:3.1', 'C1:3.1'))
 
     const reply = intakeParams(workspaceId, principalId, 'C1:3.1', 'C1:3.2')
-    const first = await intakeMention(pool, outbox, reply)
-    const second = await intakeMention(pool, outbox, reply)
+    const first = await intakeMention(pool, reply)
+    const second = await intakeMention(pool, reply)
 
     expect(first).toMatchObject({ kind: 'appended', duplicate: false })
     expect(second).toMatchObject({ kind: 'appended', duplicate: true })
@@ -133,9 +118,11 @@ describe('autonomous store', () => {
     const governed = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef: 'C1:5.1' })
     await pool.query(`UPDATE sessions SET engine_cwd = '/p', engine_session_id = 'chat-1', courier_target = 'agents-39 [a1a227]', live_control_claimed_at = now() WHERE id = $1`, [governed.id])
 
-    const result = await intakeMention(pool, recordingOutbox(), { ...intakeParams(workspaceId, principalId, 'C1:5.1', 'C1:5.2'), adopt: true })
+    const result = await intakeMention(pool, { ...intakeParams(workspaceId, principalId, 'C1:5.1', 'C1:5.2'), adopt: true })
 
     expect(result).toMatchObject({ kind: 'created', session: { id: governed.id, mode: 'autonomous' } })
+    // The task carries the chat on: its turns resume chat-1 in /p.
+    expect(result).toMatchObject({ task: { chatSessionId: 'chat-1', chatCwd: '/p', engineSessionId: 'chat-1', accountKey: null } })
     // The attachment ends with the chat, so the next message routes to the task instead of parking again.
     expect(await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: 'C1:5.1' })).toMatchObject({ mode: 'autonomous', engineCwd: null, engineSessionId: null, courierTarget: null })
     const { rows } = await pool.query('SELECT 1 FROM sessions WHERE id = $1 AND live_control_claimed_at IS NULL', [governed.id])
@@ -147,7 +134,7 @@ describe('autonomous store', () => {
     const { workspaceId, principalId } = await setup()
     const governed = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef: 'C1:4.1' })
 
-    const result = await intakeMention(pool, recordingOutbox(), intakeParams(workspaceId, principalId, 'C1:4.1', 'C1:4.2'))
+    const result = await intakeMention(pool, intakeParams(workspaceId, principalId, 'C1:4.1', 'C1:4.2'))
 
     expect(result).toEqual({ kind: 'not_autonomous' })
     expect(governed.mode).toBe('governed')
@@ -157,7 +144,7 @@ describe('autonomous store', () => {
 
   it('fences writes by lease generation and refuses to lease a cancelled task', async () => {
     const { workspaceId, principalId } = await setup()
-    const created = await intakeMention(pool, recordingOutbox(), intakeParams(workspaceId, principalId, 'C1:5.1', 'C1:5.1'))
+    const created = await intakeMention(pool, intakeParams(workspaceId, principalId, 'C1:5.1', 'C1:5.1'))
     if (created.kind !== 'created') throw new Error('expected a new task')
     const taskId = created.task.id
 
@@ -171,9 +158,9 @@ describe('autonomous store', () => {
     const second = await acquireLease(pool, taskId, 'daemon-b', 60_000)
     if (!second) throw new Error('expected the expired lease to be taken')
     expect(second.generation).toBe(first.generation + 1)
-    expect(await updateTask(pool, first, { phase: 'working' })).toBeUndefined()
+    expect(await updateTask(pool, first, { accountKey: 'claude' })).toBeUndefined()
     expect(await renewLease(pool, first, 60_000)).toBe(false)
-    expect((await updateTask(pool, second, { phase: 'interview' }))?.phase).toBe('interview')
+    expect((await updateTask(pool, second, { accountKey: 'claude2' }))?.accountKey).toBe('claude2')
 
     await requestCancel(pool, taskId)
     await pool.query(`UPDATE autonomous_tasks SET lease_expires_at = NULL WHERE id = $1`, [taskId])

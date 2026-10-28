@@ -2,9 +2,9 @@
  * Persistence for autonomous tasks (0021_autonomous_tasks.sql).
  *
  * Two rules hold every write here together:
- *   - Intake is one transaction: the session, the task, its first event and
- *     the 👀 and ack notifications commit together or not at all, so a crash
- *     never leaves a task nobody was told about, or a told thread with no task.
+ *   - Intake is one transaction: the session, the task and its first event
+ *     commit together or not at all, so a crash never leaves a session with
+ *     no task. Relay posts no acknowledgement: the agent writes its own.
  *   - After intake, every state write is fenced by the lease: it names the
  *     owner and generation it holds, and a write from a superseded holder
  *     changes nothing.
@@ -48,47 +48,23 @@ export type TaskFile = {
   reason?: string
 }
 
-export type TaskFinding = {
-  id: string
-  severity: string
-  file: string
-  line: number | null
-  summary: string
-  status: string
-  inScope?: boolean
-}
-
 export type AutonomousTask = {
   id: string
   workspaceId: string
   sessionId: string
   requesterPrincipalId: string
-  repoName: string | null
-  taskType: 'review' | 'implement' | null
-  /** Copied from the approved plan; completion reads only these. */
-  changeKind: 'fix' | 'feature' | null
-  visible: boolean | null
-  acceptanceCriteria: string[] | null
-  testCommand: string | null
-  approvedScope: string | null
-  extensionGrantedBy: string | null
   phase: AutonomousPhase
-  planVersion: number
-  planDigest: string | null
-  plan: unknown
   cancelRequestedAt: Date | null
   agentPreference: string | null
   accountKey: string | null
   engineSessionId: string | null
-  worktreePath: string | null
-  findings: TaskFinding[]
-  progressLog: { at: string; text: string }[]
+  /** The Claude Code chat this task took over (see migration 0025), and its folder. */
+  chatSessionId: string | null
+  chatCwd: string | null
   pendingEvents: TaskEvent[]
   /** Relay's notes for the next turn, oldest first. */
   pendingNotes: string[]
-  qaCheckouts: string[]
   files: TaskFile[]
-  reviewRounds: number
   leaseOwner: string | null
   leaseGeneration: number
   leaseExpiresAt: Date | null
@@ -102,30 +78,16 @@ type TaskRow = {
   workspace_id: string
   session_id: string
   requester_principal_id: string
-  repo_name: string | null
-  task_type: 'review' | 'implement' | null
-  change_kind: 'fix' | 'feature' | null
-  visible: boolean | null
-  acceptance_criteria: string[] | null
-  test_command: string | null
-  approved_scope: string | null
-  extension_granted_by: string | null
   phase: AutonomousPhase
-  plan_version: number
-  plan_digest: string | null
-  plan: unknown
   cancel_requested_at: Date | null
   agent_preference: string | null
   account_key: string | null
   engine_session_id: string | null
-  worktree_path: string | null
-  findings: TaskFinding[]
-  progress_log: { at: string; text: string }[]
+  chat_session_id: string | null
+  chat_cwd: string | null
   pending_events: TaskEvent[]
   pending_notes: string[]
-  qa_checkouts: string[]
   files: TaskFile[]
-  review_rounds: number
   lease_owner: string | null
   lease_generation: string
   lease_expires_at: Date | null
@@ -140,30 +102,16 @@ function toTask(row: TaskRow): AutonomousTask {
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
     requesterPrincipalId: row.requester_principal_id,
-    repoName: row.repo_name,
-    taskType: row.task_type,
-    changeKind: row.change_kind,
-    visible: row.visible,
-    acceptanceCriteria: row.acceptance_criteria,
-    testCommand: row.test_command,
-    approvedScope: row.approved_scope,
-    extensionGrantedBy: row.extension_granted_by,
     phase: row.phase,
-    planVersion: row.plan_version,
-    planDigest: row.plan_digest,
-    plan: row.plan,
     cancelRequestedAt: row.cancel_requested_at,
     agentPreference: row.agent_preference,
     accountKey: row.account_key,
     engineSessionId: row.engine_session_id,
-    worktreePath: row.worktree_path,
-    findings: row.findings,
-    progressLog: row.progress_log,
+    chatSessionId: row.chat_session_id,
+    chatCwd: row.chat_cwd,
     pendingEvents: row.pending_events,
     pendingNotes: row.pending_notes,
-    qaCheckouts: row.qa_checkouts,
     files: row.files,
-    reviewRounds: row.review_rounds,
     leaseOwner: row.lease_owner,
     // bigint comes back from pg as a string.
     leaseGeneration: Number(row.lease_generation),
@@ -181,14 +129,16 @@ export type IntakeOutbox = {
 
 export type IntakeMentionParams = FindOrCreateSessionParams & {
   event: TaskEvent
-  /** The message the 👀 goes on. */
-  mentionRef: Required<Pick<ChatRef, 'channel' | 'message'>> & ChatRef
   /** The thread the task replies in. */
   replyRef: ChatRef
   files: TaskFile[]
   /** Turns the thread's governed, attached session into its autonomous task instead of refusing it. */
   adopt?: boolean
+  /** The folder a new task's chat runs in; a taken-over chat keeps its own. */
+  chatCwd?: string
 }
+
+type TakenOverChat = { sessionId: string; cwd: string }
 
 export type IntakeResult =
   | { kind: 'created'; task: AutonomousTask; session: Session }
@@ -197,22 +147,23 @@ export type IntakeResult =
 
 /**
  * Takes one mention or thread message into autonomous mode, atomically:
- *   - no active session in the thread: creates the session as autonomous,
- *     the task with this first event, and queues 👀;
+ *   - no active session in the thread: creates the session as autonomous
+ *     and the task with this first event (no reaction: the agent picks its
+ *     own first reply);
  *   - an active autonomous session: appends the event (once per event id)
  *     and any new files;
  *   - an active governed, direct or live-controlled session: changes nothing.
  */
-export async function intakeMention(pool: Pool, outbox: IntakeOutbox, params: IntakeMentionParams): Promise<IntakeResult> {
+export async function intakeMention(pool: Pool, params: IntakeMentionParams): Promise<IntakeResult> {
   return inTransaction(pool, async (client) => {
-    const createTask = async (session: Session): Promise<IntakeResult> => {
+    const createTask = async (session: Session, chat: TakenOverChat | null = null): Promise<IntakeResult> => {
       const { rows } = await client.query<TaskRow>(
-        `INSERT INTO autonomous_tasks (workspace_id, session_id, requester_principal_id, pending_events, files, seen_event_ids, next_wakeup_at)
-         VALUES ($1, $2, $3, $4, $5, ARRAY[$6], now())
+        `INSERT INTO autonomous_tasks (workspace_id, session_id, requester_principal_id, pending_events, files, seen_event_ids, next_wakeup_at,
+                                       chat_session_id, chat_cwd, engine_session_id)
+         VALUES ($1, $2, $3, $4, $5, ARRAY[$6], now(), $7, $8, $7)
          RETURNING *`,
-        [params.workspaceId, session.id, params.principalId, JSON.stringify([params.event]), JSON.stringify(params.files), params.event.id],
+        [params.workspaceId, session.id, params.principalId, JSON.stringify([params.event]), JSON.stringify(params.files), params.event.id, chat?.sessionId ?? null, chat?.cwd ?? params.chatCwd ?? null],
       )
-      await outbox.enqueue({ kind: 'react', ref: params.mentionRef, name: 'eyes' }, params.workspaceId, client)
       return { kind: 'created', task: toTask(requireRow(rows[0])), session }
     }
 
@@ -238,7 +189,15 @@ export async function intakeMention(pool: Pool, outbox: IntakeOutbox, params: In
         [active.id],
       )
       const existingTask = await client.query('SELECT 1 FROM autonomous_tasks WHERE session_id = $1', [active.id])
-      if (existingTask.rows.length === 0) return createTask(toSession({ ...active, mode: 'autonomous', engine_cwd: null, engine_session_id: null, courier_target: null }))
+      // The task carries the chat on, so its turns resume that same chat id in its folder.
+      const chat = active.engine_session_id !== null && active.engine_cwd !== null ? { sessionId: active.engine_session_id, cwd: active.engine_cwd } : null
+      if (existingTask.rows.length === 0) return createTask(toSession({ ...active, mode: 'autonomous', engine_cwd: null, engine_session_id: null, courier_target: null }), chat)
+      if (chat !== null) {
+        await client.query(
+          'UPDATE autonomous_tasks SET chat_session_id = $2, chat_cwd = $3, engine_session_id = $2, account_key = NULL, updated_at = now() WHERE session_id = $1',
+          [active.id, chat.sessionId, chat.cwd],
+        )
+      }
     }
 
     const appended = await appendEventInTransaction(client, active.id, params.event, params.files)
@@ -316,51 +275,17 @@ export async function releaseLease(pool: Pool, lease: Lease): Promise<boolean> {
 
 /** The columns a lease holder may change, by their task field names. */
 export type TaskUpdate = Partial<{
-  phase: AutonomousPhase
-  repoName: string | null
-  taskType: 'review' | 'implement' | null
-  changeKind: 'fix' | 'feature' | null
-  visible: boolean | null
-  acceptanceCriteria: string[] | null
-  testCommand: string | null
-  planVersion: number
-  planDigest: string | null
-  plan: unknown
-  approvedScope: string | null
-  agentPreference: string | null
-  extensionGrantedBy: string | null
   accountKey: string | null
   engineSessionId: string | null
-  worktreePath: string | null
-  findings: TaskFinding[]
-  pendingEvents: TaskEvent[]
   files: TaskFile[]
-  reviewRounds: number
   /** 'now' is the database's clock, so a wakeup is due at once whatever the host clock says. */
   nextWakeupAt: Date | 'now' | null
 }>
 
 const UPDATE_COLUMNS: { [K in keyof Required<TaskUpdate>]: { column: string; json: boolean } } = {
-  phase: { column: 'phase', json: false },
-  repoName: { column: 'repo_name', json: false },
-  taskType: { column: 'task_type', json: false },
-  changeKind: { column: 'change_kind', json: false },
-  visible: { column: 'visible', json: false },
-  acceptanceCriteria: { column: 'acceptance_criteria', json: true },
-  testCommand: { column: 'test_command', json: false },
-  planVersion: { column: 'plan_version', json: false },
-  planDigest: { column: 'plan_digest', json: false },
-  plan: { column: 'plan', json: true },
-  approvedScope: { column: 'approved_scope', json: false },
-  agentPreference: { column: 'agent_preference', json: false },
-  extensionGrantedBy: { column: 'extension_granted_by', json: false },
   accountKey: { column: 'account_key', json: false },
   engineSessionId: { column: 'engine_session_id', json: false },
-  worktreePath: { column: 'worktree_path', json: false },
-  findings: { column: 'findings', json: true },
-  pendingEvents: { column: 'pending_events', json: true },
   files: { column: 'files', json: true },
-  reviewRounds: { column: 'review_rounds', json: false },
   nextWakeupAt: { column: 'next_wakeup_at', json: false },
 }
 
@@ -395,16 +320,6 @@ export async function updateTask(
   return rows[0] ? toTask(rows[0]) : undefined
 }
 
-/** Appends to the progress log under the lease. */
-export async function appendProgress(pool: Pool, lease: Lease, text: string): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `UPDATE autonomous_tasks SET progress_log = progress_log || $4::jsonb, updated_at = now()
-     WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3`,
-    [lease.taskId, lease.owner, lease.generation, JSON.stringify([{ at: new Date().toISOString(), text }])],
-  )
-  return rowCount === 1
-}
-
 /** Recorded before the worker's start gate opens, so a dead daemon's survivor can always be found. */
 export async function recordWorker(pool: Pool, lease: Lease, pid: number, pgid: number): Promise<boolean> {
   const { rowCount } = await pool.query(
@@ -424,38 +339,9 @@ export async function clearWorker(pool: Pool, taskId: string, pgid: number): Pro
   )
 }
 
-/**
- * Inbound facts the router records outside any lease: the agent a mention
- * asked for, and who granted the extension. Neither changes the phase.
- */
-export async function recordInboundFacts(
-  pool: Pool | PoolClient,
-  taskId: string,
-  facts: { agentPreference?: string; extensionGrantedBy?: string },
-): Promise<void> {
-  await pool.query(
-    `UPDATE autonomous_tasks
-     SET agent_preference = COALESCE($2, agent_preference),
-         extension_granted_by = COALESCE($3, extension_granted_by),
-         updated_at = now()
-     WHERE id = $1`,
-    [taskId, facts.agentPreference ?? null, facts.extensionGrantedBy ?? null],
-  )
-}
-
-/** Removes the events a turn consumed, by id, so events appended during the turn stay pending. */
-export async function consumeEvents(pool: Pool | PoolClient, lease: Lease, eventIds: readonly string[]): Promise<boolean> {
-  if (eventIds.length === 0) return true
-  const { rowCount } = await pool.query(
-    `UPDATE autonomous_tasks
-     SET pending_events = COALESCE(
-           (SELECT jsonb_agg(event) FROM jsonb_array_elements(pending_events) AS event WHERE NOT (event->>'id' = ANY ($4))),
-           '[]'::jsonb),
-         updated_at = now()
-     WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3`,
-    [lease.taskId, lease.owner, lease.generation, eventIds],
-  )
-  return rowCount === 1
+/** The agent a mention asked for, recorded by the router outside any lease. */
+export async function recordAgentPreference(pool: Pool | PoolClient, taskId: string, agent: string): Promise<void> {
+  await pool.query('UPDATE autonomous_tasks SET agent_preference = $2, updated_at = now() WHERE id = $1', [taskId, agent])
 }
 
 /** Adds a note for the next turn and wakes the task, under the lease. */
@@ -468,27 +354,35 @@ export async function addNote(pool: Pool | PoolClient, lease: Lease, note: strin
   return rowCount === 1
 }
 
-/** Removes the first `count` notes: the ones a turn read. Notes added during the turn stay. */
-export async function consumeNotes(pool: Pool | PoolClient, lease: Lease, count: number): Promise<boolean> {
-  if (count === 0) return true
+/**
+ * Removes what a turn read, in one statement so a message or note added
+ * meanwhile is never lost: the events by id and the first `notesRead` notes.
+ * The task runs again at once when anything is left, keeps a wakeup set
+ * during the turn (later than `dueAt`, the one that started it, which pg
+ * holds to the microsecond and node to the millisecond), and otherwise sleeps.
+ */
+export async function consumeTurnInput(
+  pool: Pool | PoolClient,
+  lease: Lease,
+  input: { eventIds: readonly string[]; notesRead: number; dueAt: Date | null },
+): Promise<boolean> {
   const { rowCount } = await pool.query(
-    `UPDATE autonomous_tasks
-     SET pending_notes = COALESCE(
-           (SELECT jsonb_agg(note ORDER BY position) FROM jsonb_array_elements(pending_notes) WITH ORDINALITY AS t(note, position) WHERE position > $4),
-           '[]'::jsonb),
+    `UPDATE autonomous_tasks AS task
+     SET pending_events = left_over.events,
+         pending_notes = left_over.notes,
+         next_wakeup_at = CASE
+           WHEN jsonb_array_length(left_over.events) > 0 OR jsonb_array_length(left_over.notes) > 0 THEN now()
+           WHEN task.next_wakeup_at >= $5::timestamptz + interval '1 millisecond' THEN task.next_wakeup_at
+           ELSE NULL END,
          updated_at = now()
-     WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3`,
-    [lease.taskId, lease.owner, lease.generation, count],
-  )
-  return rowCount === 1
-}
-
-/** Registers a QA checkout relay created for the task; the guard allows its integration merge there only. */
-export async function registerQaCheckout(pool: Pool | PoolClient, lease: Lease, path: string): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `UPDATE autonomous_tasks SET qa_checkouts = array_append(qa_checkouts, $4), updated_at = now()
-     WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3 AND NOT ($4 = ANY (qa_checkouts))`,
-    [lease.taskId, lease.owner, lease.generation, path],
+     FROM (
+       SELECT id,
+         COALESCE((SELECT jsonb_agg(event) FROM jsonb_array_elements(pending_events) AS event WHERE NOT (event->>'id' = ANY ($4))), '[]'::jsonb) AS events,
+         COALESCE((SELECT jsonb_agg(note ORDER BY position) FROM jsonb_array_elements(pending_notes) WITH ORDINALITY AS t(note, position) WHERE position > $6), '[]'::jsonb) AS notes
+       FROM autonomous_tasks WHERE id = $1 FOR UPDATE
+     ) AS left_over
+     WHERE task.id = left_over.id AND task.id = $1 AND task.lease_owner = $2 AND task.lease_generation = $3`,
+    [lease.taskId, lease.owner, lease.generation, [...input.eventIds], input.dueAt ?? new Date(0), input.notesRead],
   )
   return rowCount === 1
 }

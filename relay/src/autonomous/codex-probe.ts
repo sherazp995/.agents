@@ -84,7 +84,7 @@ export async function probeCodexAccount(params: {
   })
   await bridge.start()
   const dir = await mkdtemp(join(tmpdir(), 'relay-codex-probe-'))
-  const token = bridge.issueToken({ workspaceId: 'probe', taskId: 'probe', invocationId: 'probe', leaseGeneration: 0 })
+  const token = bridge.issueToken({ workspaceId: 'probe', taskId: 'probe', runId: 'probe', leaseGeneration: 0 })
   const entry = (eligible: boolean, detail: string): CodexEligibilityEntry => ({ eligible, codexVersion: params.version, checkedAt: new Date().toISOString(), detail })
   try {
     let stdout = ''

@@ -80,6 +80,18 @@ class GitGuardTests(unittest.TestCase):
             self.assertEqual(verdict['decision'], 'deny', command)
             self.assertIn('leave the change uncommitted and tell the user', verdict['reason'])
 
+    def test_an_autonomous_task_branch_counts_only_its_own_commits(self):
+        self.commit(1)  # the base holds an unpushed commit, as a local main often does
+        self.git('checkout', '-q', '-b', 'autonomous/task')
+
+        self.assertIsNone(self.guard("git commit -m 'Task change'"))
+        self.commit(1)
+        verdict = self.verdict("git commit -m 'Second task change'")
+        self.assertEqual(verdict['decision'], 'deny')
+        self.assertIn('--amend', verdict['reason'])
+        self.git('checkout', '-q', '-b', 'feature')
+        self.assertIn('2 unpushed commits', self.guard("git commit -m 'x'"))
+
     def test_amending_a_pushed_commit_is_denied_with_a_new_commit_instead(self):
         self.commit(1)
         self.push_all()

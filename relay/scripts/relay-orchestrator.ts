@@ -26,10 +26,9 @@
  * watch for. This file only has to run correctly when asked; it does not
  * run itself as part of `pnpm test`.
  */
-import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assertAutonomousBudget, loadPolicy, loadRelayConfig } from '../src/config/load.js'
+import { loadPolicy, loadRelayConfig } from '../src/config/load.js'
 import type { RelayConfig } from '../src/config/schema.js'
 import { createDaemonSecretProvider } from '../src/secrets/daemon.js'
 import { resolveDatabaseUrl } from '../src/config/database-url.js'
@@ -220,25 +219,16 @@ export async function createDaemonLogger(config: RelayConfig): Promise<Logger> {
 /** What autonomous mode needs beyond the config, read only when it is enabled. */
 async function autonomousRuntimeOptions(config: RelayConfig, secrets: SecretProvider): Promise<StartOrchestratorOptions['autonomousRuntime']> {
   if (config.autonomous?.enabled !== true) return undefined
-  const gitConfig = (key: string): string => {
-    try {
-      return execFileSync('git', ['config', '--global', key], { encoding: 'utf8' }).trim()
-    } catch {
-      throw new Error(`autonomous mode needs git's global ${key} for the workers' commits; set it with \`git config --global ${key} ...\``)
-    }
-  }
   const receiptKeyHex = await secrets.get(APPROVAL_RECEIPT_KEY_SECRET)
   if (!/^(?:[0-9a-f]{2}){32,}$/i.test(receiptKeyHex)) throw new Error(`${APPROVAL_RECEIPT_KEY_SECRET} must be at least 32 bytes of hex; run \`relay secrets migrate\``)
-  const gitIdentity = { name: gitConfig('user.name'), email: gitConfig('user.email') }
   return {
     // Owned by the runtime, which closes it on stop.
     redis: createRedis(config.redis.url),
     relayHome: resolveRelayHome().path,
     receiptKey: Buffer.from(receiptKeyHex, 'hex'),
     repoRegistryPath: process.env.RELAY_REPOS_PATH ?? defaultReposPath(),
-    // This file runs as dist/scripts/relay-orchestrator.js; the hook and gateway entries sit beside it.
+    // This file runs as dist/scripts/relay-orchestrator.js; the hook entry sits beside it.
     distRoot: join(dirname(fileURLToPath(import.meta.url)), '..'),
-    gitIdentity,
   }
 }
 
@@ -252,7 +242,6 @@ async function main(): Promise<void> {
   // this is what makes "an invalid policy prevents startup" true of the
   // real binary, not only of a unit test.
   const policy = loadPolicy(POLICY_PATH)
-  assertAutonomousBudget(config, policy, POLICY_PATH)
   const log = await createDaemonLogger(config)
   const secrets = createDaemonSecretProvider(config, resolveRelayHome().path)
   const pool = createPool(await resolveDatabaseUrl(config, secrets))

@@ -23,6 +23,13 @@ function urlWithScheme(schemes: string[]): z.ZodEffects<z.ZodString, string, str
 }
 
 /** A non-empty, trimmed origin pattern: a bare domain ("chase.com") or a wildcard subdomain pattern ("*.chase.com"), per the requirements' §18.4 policy example. Shared by every origin list in the policy (hard-blocked, allow, deny) so all four accept and reject the same shapes. */
+const RETIRED_AUTONOMOUS_KEYS = ['per_turn_fallback_usd', 'codex_usd_per_mtok', 'review_codex_allowance_usd']
+
+function dropRetiredAutonomousKeys(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !RETIRED_AUTONOMOUS_KEYS.includes(key)))
+}
+
 const originPattern = z.string().trim().min(1)
 
 /**
@@ -229,19 +236,6 @@ export const policySchema = z
     // own comment means no principal may resolve an approval at any tier,
     // the same fail-closed default as an entirely missing tier entry.
     approvals: approvalPolicySchema.optional(),
-    // Autonomous tasks: what a worker may do remotely without a per-operation
-    // approval. MCP tools listed here are forwarded by the gateway; servers in
-    // proxy_enforced_mcp_servers are forwarded because the egress proxy only
-    // lets them read remote hosts; every other MCP call becomes an operation
-    // the requester approves. allowed_api_paths limits `api_write` requests.
-    remote_writes: z
-      .object({
-        read_only_mcp_tools: z.array(z.string().trim().min(1)).default([]),
-        proxy_enforced_mcp_servers: z.array(z.string().trim().min(1)).default([]),
-        allowed_api_paths: z.array(z.string().trim().min(1)).default([]),
-      })
-      .strict()
-      .optional(),
   })
   .strict()
 
@@ -308,28 +302,24 @@ export const relayConfigSchema = z
     // form treats this field's input and output as the same type, and a
     // `.default()` field otherwise leaves the input side optional while the
     // parsed output is required.
-    // Autonomous tasks (src/autonomous): a mention starts a task relay works
-    // through by itself after plan approval. Off unless enabled, and refused
-    // at startup without a policy `budget` section (assertAutonomousBudget).
-    autonomous: z
-      .object({
-        enabled: z.boolean(),
-        // Reserved per worker or QA invocation before it starts; also the
-        // charge when an invocation's real usage is unknown.
-        per_turn_fallback_usd: z.number().positive(),
-        // Codex reports tokens, not dollars; cost is estimated at this rate.
-        codex_usd_per_mtok: z.number().positive(),
-        // Fixed charge for general-review's nested Codex lens in review and
-        // visual QA invocations, whose real usage relay cannot see (user decision 11).
-        review_codex_allowance_usd: z.number().nonnegative(),
-        // launchd has no shell aliases or PATH, so the CLIs are named here.
-        claude_bin: z.string().trim().min(1).default(join(homedir(), '.local/bin/claude')),
-        codex_bin: z.string().trim().min(1).default('/opt/homebrew/bin/codex'),
-        turn_wall_clock_ms: z.number().int().positive().default(60 * 60 * 1000),
-        approval_timeout_ms: z.number().int().positive().default(24 * 60 * 60 * 1000),
-      })
-      .strict()
-      .optional(),
+    // Slack chats (src/autonomous): every Slack thread is one Claude Code
+    // chat. Off unless enabled.
+    // A config written before Slack chats dropped their budget still loads:
+    // its three cost keys are ignored, and any other unknown key still fails.
+    autonomous: z.preprocess(
+      dropRetiredAutonomousKeys,
+      z
+        .object({
+          enabled: z.boolean(),
+          // launchd has no shell aliases or PATH, so the CLIs are named here.
+          claude_bin: z.string().trim().min(1).default(join(homedir(), '.local/bin/claude')),
+          codex_bin: z.string().trim().min(1).default('/opt/homebrew/bin/codex'),
+          turn_wall_clock_ms: z.number().int().positive().default(60 * 60 * 1000),
+          approval_timeout_ms: z.number().int().positive().default(24 * 60 * 60 * 1000),
+        })
+        .strict()
+        .optional(),
+    ),
     secrets: z
       .object({ provider: z.enum(['keychain', 'libsecret']).default('keychain') })
       .strict() as z.ZodType<{

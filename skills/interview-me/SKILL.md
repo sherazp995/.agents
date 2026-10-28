@@ -66,7 +66,7 @@ These are not yes: "whatever you think" (offer two concrete options as a choice)
 
 ### 6. Hand off
 
-After the yes, the confirmed intent is the first section of the plan. In `doing-substantial-work`, write the plan from it and show it for approval as usual; copy the six lines into the plan file. Do not start building on the interview's yes alone: the plan still needs its own approval.
+After the yes, the confirmed intent is the plan's `## Confirmed intent` section (`writing-plans` sets where it sits). In `doing-substantial-work`, write the plan from it and show it for approval as usual; copy the six lines into the plan file. Do not start building on the interview's yes alone: the plan still needs its own approval.
 
 If you have asked about six questions and still cannot predict their answers, stop and say so: "Something foundational is missing. Want to step back?"
 

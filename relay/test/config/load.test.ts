@@ -3,8 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ConfigError } from '../../src/config/errors.js'
-import { assertAutonomousBudget, loadPolicy, loadRelayConfig } from '../../src/config/load.js'
-import type { Policy, RelayConfig } from '../../src/config/schema.js'
+import { loadPolicy, loadRelayConfig } from '../../src/config/load.js'
 
 function writeTemp(name: string, contents: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'relay-config-'))
@@ -233,6 +232,12 @@ describe('loadRelayConfig', () => {
     expect(config.logging.max_files).toBe(10)
   })
 
+  it('loads a config from before Slack chats dropped their budget, and still refuses another unknown autonomous key', () => {
+    const old = `${VALID_CONFIG}autonomous:\n  enabled: true\n  per_turn_fallback_usd: 1\n  codex_usd_per_mtok: 10\n  review_codex_allowance_usd: 2\n`
+    expect(loadRelayConfig(writeTemp('relay.config.yaml', old)).autonomous).toMatchObject({ enabled: true })
+    expect(() => loadRelayConfig(writeTemp('relay.config.yaml', `${VALID_CONFIG}autonomous:\n  enabled: true\n  budget_usd: 1\n`))).toThrow(/budget_usd/)
+  })
+
   it('refuses a blank logging.file rather than silently treating it as unset', () => {
     const yaml = VALID_CONFIG.replace('logging:\n  level: info', 'logging:\n  level: info\n  file: "   "')
     expect(() => loadRelayConfig(writeTemp('relay.config.yaml', yaml))).toThrow(/logging.file/)
@@ -297,21 +302,5 @@ describe('loadRelayConfig', () => {
     expect(() => {
       ;(config.database as { url: string }).url = 'postgres://tampered/db'
     }).toThrow(TypeError)
-  })
-})
-
-describe('assertAutonomousBudget', () => {
-  const policy = { version: 1, defaults: { unmatched: 'ask' }, hard_blocked_origins: ['*.bank.example'] } as unknown as Policy
-  const autonomous = { enabled: true, per_turn_fallback_usd: 2, codex_usd_per_mtok: 5, review_codex_allowance_usd: 3, claude_bin: 'c', codex_bin: 'x', turn_wall_clock_ms: 1, approval_timeout_ms: 1 }
-  const config = { autonomous } as unknown as RelayConfig
-
-  it('fails naming the missing budget section when autonomous is enabled without one', () => {
-    expect(() => assertAutonomousBudget(config, policy, 'policy.yaml')).toThrow(/budget/)
-  })
-
-  it('passes with a budget, or with autonomous off', () => {
-    const budgeted = { ...policy, budget: { run_cap_usd: 1, session_cap_usd: 1, principal_day_cap_usd: 1 } } as Policy
-    expect(() => assertAutonomousBudget(config, budgeted, 'policy.yaml')).not.toThrow()
-    expect(() => assertAutonomousBudget({ autonomous: { ...autonomous, enabled: false } } as unknown as RelayConfig, policy, 'policy.yaml')).not.toThrow()
   })
 })

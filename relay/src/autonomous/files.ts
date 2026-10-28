@@ -11,7 +11,8 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { ChatFile } from '../chat/contract.js'
-import type { TaskFile } from './store.js'
+import type { Pool } from 'pg'
+import { loadTask, updateTask, type AutonomousTask, type Lease, type TaskFile } from './store.js'
 
 export const SLACK_FILE_HOST = 'files.slack.com'
 export const DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -109,4 +110,16 @@ async function readCapped(body: AsyncIterable<Uint8Array> | null, maxBytes: numb
 /** One line per skipped file, for the thread. */
 export function describeSkipped(files: readonly TaskFile[]): string[] {
   return files.filter((file) => file.status === 'skipped').map((file) => `${file.name}: skipped (${file.reason ?? 'unknown reason'})`)
+}
+
+/** Downloads a task's pending files before a turn; returns one line per newly skipped file for the thread. */
+export async function downloadTaskFiles(pool: Pool, task: AutonomousTask, lease: Lease, deps: DownloadDeps): Promise<string[]> {
+  if (!task.files.some((file) => file.status === 'pending')) return []
+  const settled = await downloadPendingFiles(task.files, deps)
+  // Merged by id into the list as it is now, so a file a message added during the download is kept.
+  const byId = new Map(settled.map((file) => [file.slackFileId, file]))
+  const current = (await loadTask(pool, task.id))?.files ?? task.files
+  await updateTask(pool, lease, { files: current.map((file) => byId.get(file.slackFileId) ?? file) })
+  const before = new Set(task.files.filter((file) => file.status === 'skipped').map((file) => file.slackFileId))
+  return describeSkipped(settled.filter((file) => !before.has(file.slackFileId)))
 }

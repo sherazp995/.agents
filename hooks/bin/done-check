@@ -14,6 +14,15 @@ in the chat. At that next Stop the hook lets the turn end. Only a last line that
 checked again. OPEN, a malformed line or no line records it as open: that turn ends, and a later turn
 that says the same unchanged work is done gets a fresh check, so the check never loops within a turn.
 
+The checker also gets the turn's incidents, the possible mistakes to learn from (rule 58): prompts the
+user added after the turn's first one (possible corrections), shell commands whose result shows a
+non-zero exit or an error, and file edits made after a review result. A review result is any tool
+result or background task notification whose text says both "review" and "finding": a plain word
+signal, so the checker judges which incidents are real. It reports LESSONS, each real incident with the
+memory that holds its lesson or MISSING, and the agent saves a MISSING lesson before its DONE-CHECK
+line. When AGENTS_AUTONOMOUS_RUN names an autonomous run directory, the instructions add that run's
+disposition policy (fix only introduced, in-scope findings; record the rest in its report.md).
+
 State lives in tmp/done-check/ of this hub (git-ignored).
 """
 import hashlib
@@ -39,16 +48,20 @@ RESULT = re.compile(r'^DONE-CHECK:\s*(?:PASS|OPEN)\b.*$', re.M)
 PASSED = re.compile(r'DONE-CHECK: PASS[ \t]*')
 SHELL_TOOLS = ('Bash',)
 REQUEST_LIMIT = 2000
+INCIDENT_LIMIT = 300  # characters per incident
+INCIDENTS_MAX = 20  # incidents per kind
+REVIEW_RESULT = (re.compile(r'\breview', re.I), re.compile(r'\bfinding', re.I))
+EXIT_CODE = re.compile(r'^(?:Exit code:?|Process exited with code)\s*(-?\d+)', re.M)
 INTERRUPTED = '[Request interrupted by user'  # Claude logs an Esc as a user message
 
 
 def shell_commands(record):
-    """(command, workdir) for each shell command one transcript record ran: Claude Bash calls (no
-    workdir) and Codex exec calls, whose command may be an argv list and may name its own workdir."""
+    """(call id, command, workdir) for each shell command one transcript record ran: Claude Bash calls
+    (no workdir) and Codex exec calls, whose command may be an argv list and may name its own workdir."""
     content = (record.get('message') or {}).get('content')
     for block in content if isinstance(content, list) else []:
         if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name') in SHELL_TOOLS:
-            yield str((block.get('input') or {}).get('command') or ''), None
+            yield block.get('id'), str((block.get('input') or {}).get('command') or ''), None
     payload = record.get('payload')
     if isinstance(payload, dict) and payload.get('type') == 'function_call':
         try:
@@ -57,7 +70,42 @@ def shell_commands(record):
             arguments = {}
         arguments = arguments if isinstance(arguments, dict) else {}
         command = arguments.get('cmd', arguments.get('command', ''))
-        yield ' '.join(turns.strings(command)), arguments.get('workdir')
+        if command:
+            yield payload.get('call_id'), ' '.join(turns.strings(command)), arguments.get('workdir')
+
+
+def tool_results(record):
+    """(call id, text, failed) for each tool result one record holds: Claude tool_result blocks
+    (failed when marked is_error or the text starts with a non-zero `Exit code N`) and Codex
+    function_call_output records (failed on a non-zero `Exit code:` or `Process exited with code`).
+    A background task notification counts as a result with no call id."""
+    content = (record.get('message') or {}).get('content') if record.get('type') == 'user' else None
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get('type') == 'tool_result':
+            text = block.get('content')
+            if isinstance(text, list):
+                text = '\n'.join(part.get('text') or '' for part in text if isinstance(part, dict))
+            text = text if isinstance(text, str) else ''
+            yield block.get('tool_use_id'), text, bool(block.get('is_error')) or exit_failed(text)
+    if record.get('type') == 'user':
+        for text in turns.message_texts(record) or []:
+            if turns.is_notification(text):
+                yield None, text, False
+    payload = record.get('payload')
+    if isinstance(payload, dict) and payload.get('type') == 'function_call_output':
+        output = payload.get('output')
+        text = output if isinstance(output, str) else ' '.join(turns.strings(output))
+        yield payload.get('call_id'), text, exit_failed(text)
+
+
+def exit_failed(text):
+    code = EXIT_CODE.search(text or '')
+    return bool(code) and int(code.group(1)) != 0
+
+
+def cut(text):
+    text = ' '.join((text or '').split())
+    return text if len(text) <= INCIDENT_LIMIT else text[:INCIDENT_LIMIT] + '...'
 
 
 def claims_done(message):
@@ -107,13 +155,15 @@ def commit_dir(command, cwd):
 
 
 def read_turn(transcript_path, cwd):
-    """{'request', 'prompts', 'edited', 'committed', 'started', 'line', 'work_dir', 'last_message', 'pending'}
-    for the current turn, which starts at the last prompt the user typed, or None without a readable
+    """{'request', 'prompts', 'edited', 'committed', 'started', 'line', 'work_dir', 'last_message', 'pending',
+    'failed', 'after_review'} for the current turn, which starts at the last prompt the user typed, or None without a readable
     transcript. Prompts queued while the turn runs (straight after a tool call, its result or another
     queued prompt) join prompts and keep the turn's work; an interrupt ends the turn. request is the
     prompts joined. started is the turn's first prompt time in epoch seconds, or None. line is the
     transcript line of that first prompt, which tells two turns apart even with the same text. work_dir is where
-    the turn last committed, else the folder of the file it last edited, else None."""
+    the turn last committed, else the folder of the file it last edited, else None. failed lists the
+    turn's shell commands whose result shows an error, after_review the files it edited after a review
+    result (see the module docstring)."""
     turn, state = None, None
     launched, finished = {}, set()
     try:
@@ -135,7 +185,8 @@ def read_turn(transcript_path, cwd):
                     else:
                         turn = {'prompts': [prompt_text(record)], 'edited': False, 'committed': False,
                                 'last_message': '', 'commit_dir': None, 'edit_dir': None,
-                                'started': turns.record_time(record), 'line': number}
+                                'started': turns.record_time(record), 'line': number,
+                                'failed': [], 'after_review': [], 'reviewed': False, 'calls': {}}
                         launched = {}
                     state = 'prompt'
                     continue
@@ -143,8 +194,18 @@ def read_turn(transcript_path, cwd):
                     continue
                 for path in filter(None, turns.record_edits(record)):
                     turn['edited'], turn['edit_dir'] = True, (Path(cwd) / Path(path).expanduser()).parent
-                for folder in filter(None, (commit_dir(c, workdir or cwd) for c, workdir in shell_commands(record))):
-                    turn['committed'], turn['commit_dir'] = True, folder
+                    if turn['reviewed'] and path not in turn['after_review']:
+                        turn['after_review'].append(path)
+                for call, command, workdir in shell_commands(record):
+                    turn['calls'][call] = command
+                    folder = commit_dir(command, workdir or cwd)
+                    if folder:
+                        turn['committed'], turn['commit_dir'] = True, folder
+                for call, result, failed in tool_results(record):
+                    if failed and call in turn['calls']:
+                        turn['failed'].append(f'`{cut(turn["calls"][call])}` gave: {cut(result)}')
+                    if all(word.search(result) for word in REVIEW_RESULT):
+                        turn['reviewed'] = True
                 text = assistant_text(record)
                 if text:
                     turn['last_message'] = text
@@ -158,6 +219,8 @@ def read_turn(transcript_path, cwd):
         turn['pending'] = bool(turns.still_running(launched, finished))
         commit, edit = turn.pop('commit_dir'), turn.pop('edit_dir')
         turn['work_dir'] = commit or edit
+        for name in ('reviewed', 'calls'):
+            turn.pop(name)
     return turn
 
 
@@ -202,6 +265,22 @@ def save_state(file, data):
     partial.replace(file)
 
 
+def incidents_text(turn):
+    """The turn's incidents for the checker, each cut to INCIDENT_LIMIT, or '' when there are none."""
+    kinds = (('Prompts the user added after the first one (possible corrections)', turn['prompts'][1:]),
+             ('Shell commands whose result shows an error', turn['failed']),
+             ('Files edited after a review result', turn['after_review']))
+    parts = [f'{title}:\n' + '\n'.join(f'- {cut(item)}' for item in items[-INCIDENTS_MAX:])
+             for title, items in kinds if items]
+    return '\n\n'.join(parts)
+
+
+def autonomous_policy(run_dir):
+    return f'''
+
+This is an autonomous run (run directory {run_dir}). Disposition policy for every finding: fix only findings this change introduced that lie inside the plan's scope (blocker, high, medium). An introduced blocker, high or medium that needs work outside the plan's scope stops the task: end with DONE-CHECK: OPEN and the reason. Do not fix lows or any pre-existing or out-of-scope finding; record each in {Path(run_dir) / 'report.md'} instead.'''
+
+
 def check_instructions(turn, root, committed_head):
     change = f'`git diff HEAD` plus any new untracked files in {root}'
     if committed_head:
@@ -209,6 +288,21 @@ def check_instructions(turn, root, committed_head):
                   'there if anything is still uncommitted')
     # Each prompt is cut on its own, so a correction queued after a long request still reaches the checker.
     request = '\n\n'.join(prompt.strip()[:REQUEST_LIMIT] for prompt in turn['prompts'])
+    incidents = incidents_text(turn)
+    if incidents:
+        incident_item = f'''
+4. The turn's incidents, possible mistakes to learn from (each cut at {INCIDENT_LIMIT} characters):
+<<<
+{incidents}
+>>>'''
+        lessons_report = '''
+- LESSONS: each real incident (the user correcting the agent, a failure the agent caused, a fix after a review found its bug; not an expected failure such as a test run red before its fix) with the memory file that holds its lesson (under ~/.claude/projects/*/memory/ or ~/.agents/memory/), or MISSING.'''
+        lessons_fix = ' Save each MISSING lesson as a memory following rule 58 in ~/.agents/AGENTS-RULES.md, as you fix a MISSING request part, before the DONE-CHECK line.'
+    else:
+        incident_item = "\n4. The turn has no incidents (no later prompts, failed commands or edits after a review), so the checker skips LESSONS."
+        lessons_report = lessons_fix = ''
+    run_dir = os.environ.get('AGENTS_AUTONOMOUS_RUN')
+    policy = autonomous_policy(run_dir) if run_dir else ''
     return f'''DONE-CHECK: this task looks finished. Before it counts as done, verify it once with a fresh checker.
 
 Start one fresh subagent (Claude Code: the Agent tool, general-purpose; Codex: a new subagent, or if you have none, redo the check yourself from scratch). Give it only:
@@ -217,13 +311,13 @@ Start one fresh subagent (Claude Code: the Agent tool, general-purpose; Codex: a
 {request}
 >>>
 2. The change: {change}.
-3. The check commands from the plan (specs, linters, migrations), if any.
+3. The check commands from the plan (specs, linters, migrations), if any.{incident_item}
 
 The checker is read-only and reports:
 - COMPLETION: each part of the request as DONE or MISSING, with file:line evidence.
-- CORRECTNESS: each check command rerun with its exit code; bugs or wrong files in the full diff; any claim the diff contradicts; changes no request or plan covers.
+- CORRECTNESS: each check command rerun with its exit code; bugs or wrong files in the full diff; any claim the diff contradicts; changes no request or plan covers.{lessons_report}
 
-Then fix every MISSING item and every real correctness finding, rerun the affected checks, and keep the commit rules (amend when git-guard says so). If a fix needs the user's decision, do not guess: end with OPEN and name it.
+Then fix every MISSING item and every real correctness finding, rerun the affected checks, and keep the commit rules (amend when git-guard says so).{lessons_fix} If a fix needs the user's decision, do not guess: end with OPEN and name it.{policy}
 End your final message with exactly one line:
 DONE-CHECK: PASS
 or

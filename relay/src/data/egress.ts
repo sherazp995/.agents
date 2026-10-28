@@ -44,7 +44,6 @@ export const EGRESS_CATEGORIES = [
   'code_reviewer',
   'git_remote',
   'approved_action_target',
-  'autonomous_browser_read',
 ] as const
 export type EgressCategory = (typeof EGRESS_CATEGORIES)[number]
 
@@ -143,10 +142,10 @@ export const EGRESS_INVENTORY: readonly EgressDestination[] = [
     hosts: [],
     requiresOperatorAcknowledgement: false,
     wiredInThisBuild: true,
-    wiredBy: 'src/autonomous/remote-write.ts',
+    wiredBy: 'src/autonomous/guard.ts',
     knownGaps: [
-      'Reached by relay itself, never the worker: an approved autonomous remote write runs git and gh from ' +
-        'src/autonomous/remote-write.ts, with a relay-owned git config and one approval per operation.',
+      "Reached by a Slack chat's worker with the operator's own git and gh, one approved command at a time: " +
+        'src/autonomous/guard.ts holds a push or gh write until the requester approves that exact command in the thread.',
       'Genuinely dynamic: the destination is whichever remote the operator registered for that ' +
         'repository, reached by a direct git remote URL or by the gh CLI for PR operations. There is no single ' +
         'fixed host this inventory can name in advance, unlike the other entries above.',
@@ -175,27 +174,7 @@ export const EGRESS_INVENTORY: readonly EgressDestination[] = [
         'detects one afterwards, and this category is bounded by detection rather than by prevention there. Tier 3 ' +
         'has no driver in this build at all.',
     ],
-  },
-  {
-    name: 'Autonomous worker browsing (headless Playwright behind the egress proxy)',
-    category: 'autonomous_browser_read',
-    reason:
-      "An autonomous worker's headless Playwright browser reads remote pages for its task (plan decision 2). It " +
-      'launches through src/autonomous/egress-proxy.ts, which lets every method reach loopback and only GET and HEAD ' +
-      'reach any other host, terminating TLS with a per-task certificate authority so HTTPS methods are seen too.',
-    hosts: [],
-    requiresOperatorAcknowledgement: false,
-    wiredInThisBuild: true,
-    wiredBy: 'src/autonomous/egress-proxy.ts',
-    knownGaps: [
-      'Any host, by design: the proxy bounds the method, not the destination, so a remote GET with a side effect is ' +
-        'not stopped, and what a page sends in a GET query string is not inspected.',
-      'Checked structurally, by the proxy module being present under the scanned source; this file does not ' +
-        're-check that every worker browser is actually launched through it.',
-      'playwright-extension (the operator\'s own Chrome) cannot sit behind the proxy; it runs only on a per-task ' +
-        'grant and its interactions go through the MCP gateway\'s per-operation approval instead.',
-    ],
-  },
+  }
 ]
 
 // ---------------------------------------------------------------------------
@@ -221,9 +200,6 @@ export const LOCAL_ONLY_SPAWN_BINARIES: Readonly<Record<string, string>> = {
   'secret-tool':
     'the freedesktop Secret Service CLI (src/secrets/libsecret.ts), the Linux counterpart of the Keychain entry ' +
     'above; reads local keystore items over D-Bus, no network call',
-  openssl:
-    'generates the egress proxy\'s per-task certificate authority and leaf certificates on disk ' +
-    '(src/autonomous/egress-proxy.ts); no network call',
 }
 
 /**
@@ -279,14 +255,6 @@ export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
   'src/cli/secrets.ts':
     'Runs <RELAY_HOME>/bin/relay-secrets (native/relay-secrets) and /usr/bin/security to create, read and delete ' +
     'relay\'s own Keychain items; both are local Keychain calls with no network call.',
-  'src/autonomous/remote-write.ts':
-    'runTool\'s `bin` is git or gh (deps.gitBin, deps.ghBin), run by relay for an approved remote write to the ' +
-    'operation\'s registered remote; the "Registered git remotes" entry above.',
-  'src/autonomous/mcp-gateway.ts':
-    'Starts the MCP server a worker\'s gateway entry fronts, from the command in ~/.agents/mcp/servers.json. Where ' +
-    'that server goes is its own business; every call a worker makes to it is gated by the gateway (read-only tools ' +
-    'in policy, proxy-enforced servers, or a per-operation approval), and the headless Playwright server runs ' +
-    'behind the egress proxy.',
   'src/sessions/liveness.ts':
     'A generic execFile wrapper\'s own `file` parameter (defaultExecFile), not a fixed destination by itself; the ' +
     'real invocation (`ps`, a local process listing) is made through an injected function this text scan does not ' +

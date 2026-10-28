@@ -66,6 +66,7 @@ import {
   waitForClaim,
 } from './live/control.js'
 import { deliverViaCourier } from './live/courier.js'
+import { findOpenSessionName } from './live/open-session.js'
 import { KillSwitchEngagedError, PostgresKillSwitchStore, createKillSwitch } from './killswitch.js'
 import type { KillSwitch } from './killswitch.js'
 import { createRun, finishRun, findActiveRunForSession } from './runs/store.js'
@@ -863,11 +864,8 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     })
     log.info({ workspaceId: event.workspaceId, sessionId: session.id }, 'parked an event for a live-controlled session')
 
-    // Acknowledged with 👀 only, before anything slow starts: the attached
-    // chat does the talking.
-    if (event.ref.message !== undefined) {
-      await dispatcher.perform({ kind: 'react', ref: { ...event.ref, message: event.ref.message }, name: 'eyes' })
-    }
+    // No acknowledgement from Relay: the open chat chooses its own first
+    // reply (a short ack, a reaction, or just the answer).
 
     // Parking is only correct if something actually collects it. A live
     // process in the folder means a session is OPEN, not that it has a
@@ -884,8 +882,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     // and a pool connection, for the whole grace period. At 20 seconds that
     // was merely wasteful; at three minutes it would serialise every other
     // inbound event behind one parked message and risk exceeding platform
-    // request timeouts. The operator has already been acknowledged above, so
-    // nothing downstream is waiting on this either.
+    // request timeouts. Nothing downstream is waiting on this either.
     void (async () => {
       try {
         /**
@@ -904,12 +901,16 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
          * The park happened before any of this, so a push that fails costs
          * a delay rather than the message.
          */
+        // The chat that is open on this thread's session, found by its id:
+        // a chat open in the terminal gets the message and answers it.
+        const openName = session.engineSessionId !== null ? await findOpenSessionName(session.engineSessionId) : null
         const courierOutcome =
           session.engineCwd !== null
             ? await deliverViaCourier(
                 {
                   targetCwd: session.engineCwd,
                   ...(session.courierTarget !== null ? { targetPeer: session.courierTarget } : {}),
+                  ...(openName !== null ? { targetName: openName } : {}),
                   body: unwrapForAudit(event.text),
                   // The SAME builder `relay live drain` uses, so the command
                   // a pushed session is told to run cannot differ from the
@@ -1190,7 +1191,7 @@ export type StartOrchestratorOptions = {
   /** The runtime config's `autonomous` section; enables thread mentions and requires the kill switch store. */
   autonomous?: RelayConfig['autonomous']
   /** What autonomous mode needs beyond the config; required when `autonomous.enabled`. */
-  autonomousRuntime?: Omit<AutonomousRuntimeOptions, 'pool' | 'workspaceId' | 'dispatcher' | 'log' | 'config' | 'policy' | 'killSwitch' | 'secrets'>
+  autonomousRuntime?: Omit<AutonomousRuntimeOptions, 'pool' | 'workspaceId' | 'dispatcher' | 'log' | 'config' | 'killSwitch' | 'secrets'>
   /** Task 4's approval seam; see OrchestratorDeps.requestApproval's own doc comment. */
   requestApproval?: RequestApproval
   capabilities?: Readonly<Record<string, Capability>>
@@ -1285,7 +1286,6 @@ export async function startOrchestrator(
       dispatcher,
       log,
       config: options.autonomous,
-      policy: options.policy,
       killSwitch,
       secrets,
     })

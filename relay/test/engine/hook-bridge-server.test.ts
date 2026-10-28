@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Policy } from '../../src/config/schema.js'
 import { HookBridgeServer } from '../../src/engine/hook-bridge.js'
 import type { HookDecisionRequest } from '../../src/engine/hook-bridge.js'
-import { MCP_CALL_PATH, MCP_RESULT_PATH } from '../../src/autonomous/mcp-protocol.js'
 
 function buildPolicy(overrides: Partial<Policy> = {}): Policy {
   return {
@@ -153,7 +152,7 @@ describe('HookBridgeServer: SELF-ATTACK: the auth guard must be provably real', 
 })
 
 describe('HookBridgeServer: injected decide and per-invocation tokens', () => {
-  const context = { workspaceId: 'w1', taskId: 't1', invocationId: 'i1', leaseGeneration: 3 }
+  const context = { workspaceId: 'w1', taskId: 't1', runId: 'r1', leaseGeneration: 3 }
 
   async function startWith(options: ConstructorParameters<typeof HookBridgeServer>[0]): Promise<HookBridgeServer> {
     const server = new HookBridgeServer(options)
@@ -222,139 +221,13 @@ describe('HookBridgeServer: injected decide and per-invocation tokens', () => {
   })
 })
 
-describe('HookBridgeServer: MCP endpoints', () => {
-  const context = { workspaceId: 'w1', taskId: 't1', invocationId: 'i1', leaseGeneration: 3 }
-  const call = { server: 'github', tool: 'create_comment', args: { body: 'hi' } }
-
-  async function postTo(server: HookBridgeServer, path: string, body: unknown, token: string): Promise<{ status: number; body: unknown }> {
-    const response = await fetch(new URL(path, server.url), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-    })
-    return { status: response.status, body: await response.json() }
-  }
-
-  it('answers a call with the injected decision and the token’s context', async () => {
-    const seen: unknown[] = []
-    const server = new HookBridgeServer({
-      policy: buildPolicy(),
-      decideMcpCall: async (request, ctx) => {
-        seen.push([request, ctx])
-        return { decision: 'pending', operationId: 'op-1', message: 'waiting' }
-      },
-    })
-    await server.start()
-    activeServer = server
-    const token = server.issueToken(context)
-    expect((await postTo(server, MCP_CALL_PATH, call, token)).body).toEqual({ decision: 'pending', operationId: 'op-1', message: 'waiting' })
-    expect(seen).toEqual([[call, context]])
-  })
-
-  it('denies when the injected function throws, is slow, is absent, or the call is malformed', async () => {
-    const throwing = new HookBridgeServer({
-      policy: buildPolicy(),
-      decideMcpCall: async () => {
-        throw new Error('db down')
-      },
-    })
-    const slow = new HookBridgeServer({
-      policy: buildPolicy(),
-      deadlineMs: 50,
-      decideMcpCall: () => new Promise((resolve) => setTimeout(() => resolve({ decision: 'allow' }), 1_000)),
-    })
-    const absent = new HookBridgeServer({ policy: buildPolicy() })
-    try {
-      for (const server of [throwing, slow, absent]) {
-        await server.start()
-        expect((await postTo(server, MCP_CALL_PATH, call, server.token)).body).toMatchObject({ decision: 'deny' })
-      }
-      expect((await postTo(throwing, MCP_CALL_PATH, { server: 'x' }, throwing.token)).body).toMatchObject({ decision: 'deny' })
-      expect((await postTo(throwing, MCP_CALL_PATH, call, 'wrong')).status).toBe(401)
-    } finally {
-      await Promise.all([throwing.stop(), slow.stop(), absent.stop()])
-    }
-  })
-
-  it('records a result, and fails closed when recording throws or is absent', async () => {
-    const recorded: unknown[] = []
-    const server = new HookBridgeServer({
-      policy: buildPolicy(),
-      recordMcpResult: async (result, ctx) => {
-        recorded.push([result, ctx])
-      },
-    })
-    const failing = new HookBridgeServer({
-      policy: buildPolicy(),
-      recordMcpResult: async () => {
-        throw new Error('db down')
-      },
-    })
-    const absent = new HookBridgeServer({ policy: buildPolicy() })
-    const result = { operationId: 'op-1', ok: true, result: { content: [] } }
-    try {
-      for (const each of [server, failing, absent]) await each.start()
-      const token = server.issueToken(context)
-      expect(await postTo(server, MCP_RESULT_PATH, result, token)).toEqual({ status: 200, body: { ok: true } })
-      expect(recorded).toEqual([[result, context]])
-      expect((await postTo(failing, MCP_RESULT_PATH, result, failing.token)).status).toBe(500)
-      expect((await postTo(absent, MCP_RESULT_PATH, result, absent.token)).status).toBe(404)
-      expect((await postTo(server, MCP_RESULT_PATH, { operationId: 'op-1' }, token)).status).toBe(400)
-    } finally {
-      await Promise.all([server.stop(), failing.stop(), absent.stop()])
-    }
-  })
-})
-
 describe('HookBridgeServer: lens regressions', () => {
-  const call = { server: 'github', tool: 'create_comment', args: { body: 'hi' } }
-
   async function started(options: ConstructorParameters<typeof HookBridgeServer>[0]): Promise<HookBridgeServer> {
     const server = new HookBridgeServer(options)
     await server.start()
     activeServer = server
     return server
   }
-
-  async function mcpCall(server: HookBridgeServer): Promise<unknown> {
-    const response = await fetch(new URL(MCP_CALL_PATH, server.url), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${server.token}` },
-      body: JSON.stringify(call),
-    })
-    return response.json()
-  }
-
-  it('denies an MCP decision that is not a valid McpCallDecision', async () => {
-    for (const bad of [
-      { decision: 'maybe' },
-      { decision: 'execute', args: {} },
-      { decision: 'execute', operationId: 'op', args: 'not an object' },
-      { decision: 'pending', operationId: 'op' },
-      { decision: 'allow', extra: true },
-    ]) {
-      const server = await started({ policy: buildPolicy(), decideMcpCall: async () => bad as never })
-      expect(await mcpCall(server), JSON.stringify(bad)).toMatchObject({ decision: 'deny' })
-      await server.stop()
-      activeServer = undefined
-    }
-    const ok = await started({ policy: buildPolicy(), decideMcpCall: async () => ({ decision: 'execute', operationId: 'op', args: { a: 1 } }) })
-    expect(await mcpCall(ok)).toEqual({ decision: 'execute', operationId: 'op', args: { a: 1 } })
-  })
-
-  it('aborts the signal it gave decideMcpCall when the deadline answers', async () => {
-    let signal: AbortSignal | undefined
-    const server = await started({
-      policy: buildPolicy(),
-      deadlineMs: 50,
-      decideMcpCall: (_call, _context, given) => {
-        signal = given
-        return new Promise((resolve) => setTimeout(() => resolve({ decision: 'allow' }), 300))
-      },
-    })
-    expect(await mcpCall(server)).toMatchObject({ decision: 'deny' })
-    expect(signal?.aborted).toBe(true)
-  })
 
   it('answers 500 and logs when the answer cannot be serialized', async () => {
     const errors: unknown[] = []

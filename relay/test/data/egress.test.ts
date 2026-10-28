@@ -32,14 +32,11 @@ describe('EGRESS_INVENTORY, FR-DATA-2 and FR-DATA-14', () => {
     expect(codex?.requiresOperatorAcknowledgement).toBe(true)
   })
 
-  it('declares codex wired, Slack file intake, and the autonomous browser behind the egress proxy', () => {
+  it('declares codex wired and Slack file intake', () => {
     const codex = EGRESS_INVENTORY.find((entry) => entry.category === 'code_reviewer')
     expect(codex?.wiredInThisBuild).toBe(true)
     expect(codex?.knownGaps.join(' ')).not.toMatch(/not yet wired/i)
     expect(EGRESS_INVENTORY.find((entry) => entry.name === 'Slack')?.hosts).toContain('files.slack.com')
-    const browser = EGRESS_INVENTORY.find((entry) => entry.category === 'autonomous_browser_read')
-    expect(browser?.wiredBy).toBe('src/autonomous/egress-proxy.ts')
-    expect(browser?.reason).toMatch(/only GET and HEAD/)
   })
 
   it('every entry names at least one reason, and every gap is stated rather than silent', () => {
@@ -240,22 +237,22 @@ describe('launcher spawns and wiredBy evidence', () => {
   })
 
   it('confirms a dynamic destination by its wiredBy file, and flags it when the file is gone', () => {
-    const browser: EgressDestination = {
-      name: 'Browser',
-      category: 'autonomous_browser_read',
+    const remote: EgressDestination = {
+      name: 'Git remote',
+      category: 'git_remote',
       reason: 'a test fixture',
       hosts: [],
       requiresOperatorAcknowledgement: false,
       wiredInThisBuild: true,
-      wiredBy: 'src/autonomous/egress-proxy.ts',
+      wiredBy: 'src/autonomous/guard.ts',
       knownGaps: ['any host'],
     }
-    const present = compareEgressToSource([browser], { ...EMPTY_EVIDENCE, scannedFiles: ['src/autonomous/egress-proxy.ts'] }, [])
+    const present = compareEgressToSource([remote], { ...EMPTY_EVIDENCE, scannedFiles: ['src/autonomous/guard.ts'] }, [])
     expect(present.findings).toEqual([
-      { kind: 'confirmed', destination: 'Browser', evidence: 'src/autonomous/egress-proxy.ts is present under the scanned source' },
+      { kind: 'confirmed', destination: 'Git remote', evidence: 'src/autonomous/guard.ts is present under the scanned source' },
     ])
-    expect(compareEgressToSource([browser], EMPTY_EVIDENCE, []).findings).toEqual([
-      { kind: 'inconsistent', destination: 'Browser', detail: 'wiredInThisBuild is true, but src/autonomous/egress-proxy.ts is not under the scanned source' },
+    expect(compareEgressToSource([remote], EMPTY_EVIDENCE, []).findings).toEqual([
+      { kind: 'inconsistent', destination: 'Git remote', detail: 'wiredInThisBuild is true, but src/autonomous/guard.ts is not under the scanned source' },
     ])
   })
 })
