@@ -90,6 +90,8 @@ export type CourierRequest = {
 export type CourierDependencies = {
   readonly timeoutMs?: number
   readonly spawnCourier?: (prompt: string, timeoutMs: number) => Promise<{ readonly stdout: string; readonly stderr: string }>
+  /** Added to the default courier's environment, e.g. an account's CLAUDE_CONFIG_DIR. */
+  readonly env?: Readonly<Record<string, string>>
   readonly log?: Logger
 }
 
@@ -169,14 +171,14 @@ export function buildCourierPrompt(request: CourierRequest): string {
           'To answer, run this command. Do NOT reply to whoever sent you this message: that sender is a courier process that has already exited, and a reply to it reaches nobody.',
           request.replyCommand,
           '',
-          'Before work that takes more than about a minute, first post one short ack in your own words (what you understood and what you will do) with that command. For a quick question, just answer. Your final reply is the report.',
+          'Before work that takes more than about a minute, first post one short ack in your own words (what you understood and what you will do) with that command. For a quick question, just answer. Your final reply is the report. Write standard Markdown (**bold**, nested "- " lists, [text](url) links); Relay renders it in Slack.',
         ].join('\n'),
       ),
     ),
   ].join('\n')
 }
 
-function defaultSpawnCourier(prompt: string, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
+function defaultSpawnCourier(prompt: string, timeoutMs: number, env: Readonly<Record<string, string>> = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       CLAUDE_BINARY,
@@ -189,7 +191,7 @@ function defaultSpawnCourier(prompt: string, timeoutMs: number): Promise<{ stdou
         '--allowedTools',
         'ListAgents SendMessage',
       ],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
+      { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } },
     )
 
     let stdout = ''
@@ -254,7 +256,7 @@ export async function deliverViaCourier(
   deps: CourierDependencies = {},
 ): Promise<CourierOutcome> {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_COURIER_TIMEOUT_MS
-  const spawnCourier = deps.spawnCourier ?? defaultSpawnCourier
+  const spawnCourier = deps.spawnCourier ?? ((prompt: string, timeout: number) => defaultSpawnCourier(prompt, timeout, deps.env))
 
   let result: { readonly stdout: string; readonly stderr: string }
   try {

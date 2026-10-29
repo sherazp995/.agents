@@ -87,6 +87,8 @@ export interface SchedulerEffects {
   sweep(): Promise<void>
   /** The thread's messages before `beforeTs`, rendered for the worker; null when there are none or they cannot be read. */
   threadHistory?(task: AutonomousTask, beforeTs: string | null): Promise<string | null>
+  /** Sends `text` into a terminal chat open on the task's session; false when none is open or it was not delivered. */
+  deliverToOpenChat?(task: AutonomousTask, text: string): Promise<boolean>
 }
 
 export type SchedulerDeps = {
@@ -246,7 +248,23 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       await consumeTurnInput(deps.pool, lease, { eventIds: [], notesRead: 0, dueAt })
       return
     }
+    if (await deliveredToOpenChat(fresh, lease, dueAt)) return
     await runTurn(fresh, lease, dueAt, signal, isLost)
+  }
+
+  /**
+   * A chat open in a terminal on this task's session gets the new messages
+   * and answers them itself, so no headless worker runs on the same
+   * transcript. Relay's notes stay pending for a headless turn: they are
+   * about that worker's own requests.
+   */
+  async function deliveredToOpenChat(task: AutonomousTask, lease: Lease, dueAt: Date | null): Promise<boolean> {
+    if (!deps.effects.deliverToOpenChat || task.pendingEvents.length === 0) return false
+    const fileOf = new Map(task.files.map((file) => [file.slackFileId, file]))
+    const files = task.pendingEvents.flatMap((event) => event.fileIds.flatMap((id) => fileOf.get(id) ?? []))
+    if (!(await deps.effects.deliverToOpenChat(task, renderNewMessages(task.pendingEvents, files)))) return false
+    await consumeTurnInput(deps.pool, lease, { eventIds: task.pendingEvents.map((event) => event.id), notesRead: 0, dueAt })
+    return true
   }
 
   async function runTurn(task: AutonomousTask, lease: Lease, dueAt: Date | null, signal: AbortSignal, isLost: () => boolean): Promise<void> {
@@ -363,7 +381,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     await inTransaction(deps.pool, async (client) => {
       if (Object.keys(update).length > 0 && !(await updateTask(client, lease, update))) return
       if (!(await consumeTurnInput(client, lease, input))) return
-      if (text.trim() !== '') await deps.post({ kind: 'post', ref, text: scrubSecrets(text) }, client)
+      if (text.trim() !== '') await deps.post({ kind: 'post', ref, text: scrubSecrets(text), markdown: true }, client)
     })
   }
 

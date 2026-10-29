@@ -64,11 +64,13 @@ describe('autonomous scheduler', () => {
     effects: SchedulerEffects
     turns: TurnRequestContext[]
     posts: string[]
+    /** Whether each post was sent as agent Markdown. */
+    markdown: boolean[]
     cleaned: string[]
   }
 
   function harness(turns: ((context: TurnRequestContext) => Promise<TurnResult>)[], overrides: Partial<SchedulerEffects> = {}): Harness {
-    const h: Harness = { turns: [], posts: [], cleaned: [], effects: undefined as never }
+    const h: Harness = { turns: [], posts: [], markdown: [], cleaned: [], effects: undefined as never }
     h.effects = {
       async runTurn(context) {
         h.turns.push(context)
@@ -94,6 +96,7 @@ describe('autonomous scheduler', () => {
       owner: `test-${randomUUID()}`,
       post: async (action) => {
         if (action.kind === 'post') h.posts.push(action.text)
+        if (action.kind === 'post') h.markdown.push(action.markdown === true)
       },
       replyRef: async () => ({ channel: 'C1', thread: '1.1' }),
       isKillSwitchEngaged: async () => options.engaged?.() ?? false,
@@ -112,7 +115,32 @@ describe('autonomous scheduler', () => {
 
     expect(h.turns[0]?.prompt).toContain('fix the login bug')
     expect(h.posts).toEqual(['Fixed it, *tests pass*.'])
+    expect(h.markdown).toEqual([true])
     expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [], nextWakeupAt: null, engineSessionId: 'sess-1', accountKey: 'claude' })
+  })
+
+  it('sends the new message into an open terminal chat and starts no headless turn', async () => {
+    const { workspaceId, task } = await newTask('check the deploy')
+    const h = harness([async () => reply('should not run')])
+    const delivered: string[] = []
+    h.effects.deliverToOpenChat = async (_task, text) => delivered.push(text) > 0
+
+    await scheduler(workspaceId, h).tick()
+
+    expect(h.turns).toHaveLength(0)
+    expect(delivered[0]).toContain('check the deploy')
+    expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [], nextWakeupAt: null })
+  })
+
+  it('runs the headless turn when no open chat took the message', async () => {
+    const { workspaceId, task } = await newTask('check the deploy')
+    const h = harness([async () => reply('Deploy is green.')])
+    h.effects.deliverToOpenChat = async () => false
+
+    await scheduler(workspaceId, h).tick()
+
+    expect(h.posts).toEqual(['Deploy is green.'])
+    expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [] })
   })
 
   it('sends a message that arrives mid-turn into the running turn, once, and reads it with that turn', async () => {

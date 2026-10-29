@@ -48,7 +48,7 @@ describe('relay notify', () => {
 
     expect(await runNotify(pool, { workspaceId, text: ` Done, token ${secret} ` })).toEqual([{ userId: operator, attached: false, fileQueued: false }])
     const [action] = await queued(workspaceId)
-    expect(action).toMatchObject({ kind: 'post', ref: { channel: operator } })
+    expect(action).toMatchObject({ kind: 'post', ref: { channel: operator }, markdown: true })
     expect(JSON.stringify(action)).not.toContain(secret)
   })
 

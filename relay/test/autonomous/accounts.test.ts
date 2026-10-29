@@ -67,6 +67,10 @@ describe('account pool', () => {
 
   it('classifies blocked exits by stderr and a missing binary, and an ordinary failure as not blocked', () => {
     expect(classifyBlocked({ exitCode: 1, stderr: 'Claude usage limit reached' })).toBe('usage_limit')
+    expect(classifyBlocked({ exitCode: 1, stderr: "You've hit your monthly spend limit" })).toBe('usage_limit')
+    expect(classifyBlocked({ exitCode: 1, stderr: "You've hit your session limit" })).toBe('usage_limit')
+    expect(classifyBlocked({ exitCode: 1, stderr: "You've hit your rate limit" })).toBe('rate_limit')
+    expect(classifyBlocked({ exitCode: 1, stderr: 'the test hit your branch and the old file size limit' })).toBeNull()
     expect(classifyBlocked({ exitCode: 1, stderr: 'HTTP 429 Too Many Requests' })).toBe('rate_limit')
     expect(classifyBlocked({ exitCode: 1, stderr: 'Not logged in. Please run /login' })).toBe('auth')
     expect(classifyBlocked({ exitCode: null, stderr: '', spawnErrorCode: 'ENOENT' })).toBe('missing_cli')

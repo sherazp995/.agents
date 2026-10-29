@@ -62,7 +62,7 @@ export async function runNotify(pool: Pool, params: NotifyParams): Promise<Notif
   for (const userId of recipients) {
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, $2, $3, now()) RETURNING id`,
-      [workspaceId, PLATFORM, { kind: 'post', ref: { channel: userId }, text }],
+      [workspaceId, PLATFORM, { kind: 'post', ref: { channel: userId }, text, markdown: true }],
     )
     queued.push({ userId, outboxId: rows[0]?.id ?? '' })
   }

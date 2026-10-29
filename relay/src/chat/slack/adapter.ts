@@ -59,6 +59,9 @@ import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from '.
 import type { EngineSession } from '../../sessions/discovery.js'
 import { DIRECT_SLASH_COMMAND } from '../../live/session-mode.js'
 
+/** Slack's cumulative limit for markdown blocks in one message; a longer agent post goes out as plain text. */
+export const MARKDOWN_BLOCK_MAX_CHARS = 12_000
+
 /** Keychain item names, per Task 1. Exported so the smoke script and tests can name them without repeating the literal. */
 export const SLACK_BOT_TOKEN_SECRET = 'relay-slack-bot-token'
 export const SLACK_APP_TOKEN_SECRET = 'relay-slack-app-token'
@@ -1072,6 +1075,9 @@ export class SlackAdapter implements ChatAdapter {
           text: action.text,
           ...(action.ref.thread !== undefined ? { thread: action.ref.thread } : {}),
           ...(action.kind === 'post_approval_card' ? { blocks: action.blocks } : {}),
+          ...(action.kind === 'post' && action.markdown === true && action.text.length <= MARKDOWN_BLOCK_MAX_CHARS
+            ? { blocks: [{ type: 'markdown', text: action.text }] }
+            : {}),
         }),
       )
       const ref: ChatRef = { channel: result.channel ?? action.ref.channel, message: result.ts }

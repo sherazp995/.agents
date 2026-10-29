@@ -193,6 +193,14 @@ describe('runWorkerTurn', () => {
     expect(await runWorkerTurn(turn({ bin: claude, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'usage_limit' })
   })
 
+  it("reads claude's real spend-limit and logged-out results as blocked accounts", async () => {
+    const errorResult = (text: string) => `echo '${JSON.stringify({ type: 'result', subtype: 'success', session_id: 's1', is_error: true, result: text })}'; exit 1`
+    const spent = script(tempDir(), 'claude', errorResult('You have hit your monthly spend limit · raise it at https://claude.ai/settings/usage · your weekly limit resets 3am'))
+    expect(await runWorkerTurn(turn({ bin: spent, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'usage_limit' })
+    const loggedOut = script(tempDir(), 'claude', errorResult('Not logged in · Please run /login'))
+    expect(await runWorkerTurn(turn({ bin: loggedOut, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'auth' })
+  })
+
   it('reads a turn with its answer as a reply even when stderr mentions a limit', async () => {
     const bin = script(tempDir(), 'claude', `${claudeResult('ok')}; echo "test: rate limit 429 handled" >&2; exit 1`)
     expect((await runWorkerTurn(turn({ bin, account: CLAUDE }))).kind).toBe('reply')

@@ -90,14 +90,16 @@ export async function probeCodexAccount(params: {
     let stdout = ''
     try {
       const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', ...buildCodexHookOverrides({ hookCommand: params.hookCommand }).flatMap((override) => ['-c', override]), PROBE_PROMPT]
-      const ran = await execFileAsync(params.codexBin, args, {
+      const running = execFileAsync(params.codexBin, args, {
         cwd: dir,
         encoding: 'utf8',
         timeout: params.timeoutMs ?? PROBE_TIMEOUT_MS,
         maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...params.account.env, CODEX_HOME: params.codexHome, RELAY_HOOK_URL: bridge.url, RELAY_HOOK_TOKEN: token },
       })
-      stdout = ran.stdout
+      // codex exec reads a piped stdin to its end before starting, so an open pipe would hang it until the timeout.
+      running.child.stdin?.end()
+      stdout = (await running).stdout
     } catch (error) {
       stdout = String((error as { stdout?: unknown }).stdout ?? '')
       if (stdout === '') return entry(false, `codex exec failed: ${(error as Error).message.split('\n')[0]}`)

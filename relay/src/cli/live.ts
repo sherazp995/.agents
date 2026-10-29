@@ -226,7 +226,7 @@ export async function runLiveSay(params: LiveSayParams): Promise<string> {
   const file = params.file !== undefined ? await readUploadFile(params.file) : undefined
   const ref = { channel: params.channel, thread: params.thread }
   if (text !== '') {
-    await params.pool.query(`INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, 'slack', $2, now())`, [params.workspaceId, { kind: 'post', ref, text }])
+    await params.pool.query(`INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, 'slack', $2, now())`, [params.workspaceId, { kind: 'post', ref, text, markdown: true }])
   }
   if (file) await queueUpload(params.pool, params.workspaceId, ref, file)
   return `queued for ${composeThreadRef(params.channel, params.thread)}; the relay daemon posts it.`

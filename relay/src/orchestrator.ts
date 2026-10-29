@@ -840,7 +840,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     // The scrubber only knows values Relay itself brokered, so this narrows
     // the exposure rather than closing it, and that limit is why a direct
     // thread is labelled unmediated at creation.
-    await dispatcher.perform({ kind: 'post', ref: replyRef, text: scrubSecrets(reply.text) })
+    await dispatcher.perform({ kind: 'post', ref: replyRef, text: scrubSecrets(reply.text), markdown: true })
     log.info({ workspaceId: event.workspaceId, sessionId: session.id }, 'answered from a direct Claude Code session')
     return
   }

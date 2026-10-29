@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { unwrapForAudit } from '../../../src/agent/untrusted.js'
 import type { AdapterCapabilities, ChatAction, ChatActionResult, ChatEvent } from '../../../src/chat/contract.js'
 import { IntakeFailedError, sessionRefFor } from '../../../src/chat/contract.js'
-import { SlackAdapter, composeThreadRef } from '../../../src/chat/slack/adapter.js'
+import { MARKDOWN_BLOCK_MAX_CHARS, SlackAdapter, composeThreadRef } from '../../../src/chat/slack/adapter.js'
 import type {
   ApprovalInteractionRequest,
   SlackAdapterCreateOptions,
@@ -1620,6 +1620,26 @@ describe('SlackAdapter perform', () => {
 
     await adapter.perform({ kind: 'edit', ref: { channel: 'C1', message }, text: 'edited' })
     expect(apiClient.updated).toEqual([{ channel: 'C1', ts: '1.000001', text: 'edited' }])
+  })
+
+  it('posts agent Markdown as a markdown block with the text as fallback, and plain posts and long Markdown as text only', async () => {
+    const apiClient = new StubSlackApiClient()
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      boltApp: new StubBoltApp(),
+      apiClient,
+      sleep: instantSleep,
+    })
+    await adapter.start(async () => {})
+
+    await adapter.perform({ kind: 'post', ref: { channel: 'C1' }, text: '**Merged:** yes\n- CI\n  - CI-341', markdown: true })
+    await adapter.perform({ kind: 'post', ref: { channel: 'C1' }, text: 'Stopped.' })
+    const long = 'x'.repeat(MARKDOWN_BLOCK_MAX_CHARS + 1)
+    await adapter.perform({ kind: 'post', ref: { channel: 'C1' }, text: long, markdown: true })
+
+    expect(apiClient.posted[0]).toMatchObject({ text: '**Merged:** yes\n- CI\n  - CI-341', blocks: [{ type: 'markdown', text: '**Merged:** yes\n- CI\n  - CI-341' }] })
+    expect(apiClient.posted[1]?.blocks).toBeUndefined()
+    expect(apiClient.posted[2]).toMatchObject({ text: long })
+    expect(apiClient.posted[2]?.blocks).toBeUndefined()
   })
 
   it('post_approval_card posts its text with its blocks', async () => {

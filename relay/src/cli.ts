@@ -623,7 +623,7 @@ principalsCommand
 program
   .command('notify')
   .description('Message the user in Slack by DM (the operators by default); the running daemon sends it')
-  .argument('[text]', 'a short Slack mrkdwn message; read from stdin when left out')
+  .argument('[text]', 'a short message in standard Markdown; read from stdin when left out')
   .option('--to <slack user id>', 'a mapped Slack user to message instead of the operators')
   .option('--workspace-id <uuid>', 'the workspace, when more than one Slack workspace exists')
   .option('--no-attach', 'do not route replies back to the Claude Code chat running this command')

@@ -35,7 +35,7 @@ describe('relay live say', () => {
     await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '1.1', text: ' Done. ' })
 
     const { rows } = await pool.query<{ action: unknown }>('SELECT action FROM outbox WHERE workspace_id = $1', [workspaceId])
-    expect(rows.map((row) => row.action)).toEqual([{ kind: 'post', ref: { channel: 'D1', thread: '1.1' }, text: 'Done.' }])
+    expect(rows.map((row) => row.action)).toEqual([{ kind: 'post', ref: { channel: 'D1', thread: '1.1' }, text: 'Done.', markdown: true }])
   })
 
   it('attaches a file after the text, and refuses one over the size limit', async () => {

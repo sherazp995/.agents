@@ -11,6 +11,7 @@ import { buildReplyCommand } from '../live/control.js'
 import type { AutonomousTask, TaskEvent, TaskFile } from './store.js'
 
 export const WORKER_BRIEF = `This chat runs from a Slack thread through Relay. Your final message each turn is posted in the thread as the report, as you write it. Relay adds nothing and does not acknowledge messages for you.
+This turn is a headless run (\`claude -p\` or \`codex exec\`) that resumes the chat's transcript; a terminal window open on the same chat does not show it. Never say you are that open window.
 
 Replying in the thread:
 - Before work that takes more than about a minute, first post one short ack in your own words (what you understood and what you will do) with the message's say command.
@@ -23,7 +24,7 @@ Replying in the thread:
 
 Writing for Slack:
 - Write the way the human-conversation skill says: a colleague in chat, conversational, short and precise, answer first.
-- Use Slack mrkdwn: *bold* (single asterisks), _italic_, \`code\`, <https://example.com|link text>, and short "- " bullets. No # headings, no tables, no **double asterisks**.
+- Write standard Markdown; Relay posts it as a Slack markdown block: **bold**, \`code\`, [link text](https://example.com), "- " bullets with nested "  - " items, and a "### " heading or a small table only when a long reply needs the structure. Not Slack mrkdwn: no *single asterisks* for bold and no <https://url|text> links.
 - No labels or status lines such as "Answer:", "Status:", "Summary:", cost or duration.`
 
 /** The prompt for one turn: relay's notes first, then the earlier thread (fresh sessions only), the new messages and attached files as untrusted data. */

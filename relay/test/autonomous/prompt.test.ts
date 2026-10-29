@@ -3,11 +3,17 @@ import { buildTurnPrompt, renderNewMessages, WORKER_BRIEF } from '../../src/auto
 import type { TaskEvent, TaskFile } from '../../src/autonomous/store.js'
 
 describe('WORKER_BRIEF', () => {
-  it('tells the worker to write short Slack mrkdwn with no report labels', () => {
+  it('tells the worker to write short standard Markdown with no report labels', () => {
     expect(WORKER_BRIEF).toContain('the way the human-conversation skill says')
-    expect(WORKER_BRIEF).toContain('Use Slack mrkdwn: *bold* (single asterisks)')
-    expect(WORKER_BRIEF).toContain('`code`, <https://example.com|link text>')
+    expect(WORKER_BRIEF).toContain('Write standard Markdown; Relay posts it as a Slack markdown block: **bold**')
+    expect(WORKER_BRIEF).toContain('[link text](https://example.com)')
+    expect(WORKER_BRIEF).toContain('Not Slack mrkdwn')
     expect(WORKER_BRIEF).toContain('No labels or status lines such as "Answer:"')
+  })
+
+  it('tells the worker it is a headless turn, not the open window', () => {
+    expect(WORKER_BRIEF).toContain('This turn is a headless run (`claude -p` or `codex exec`)')
+    expect(WORKER_BRIEF).toContain('Never say you are that open window.')
   })
 
   it('says a remote write waits for approval in the thread, and asks for nothing else', () => {

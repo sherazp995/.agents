@@ -32,4 +32,16 @@ describe('codex eligibility', () => {
 
     expect(entry).toMatchObject({ eligible: false, codexVersion: 'fake 1', detail: expect.stringContaining('did not gate') })
   })
+
+  it('closes stdin so a codex that reads it does not hang the probe', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-fake-codex-'))
+    const fake = join(dir, 'codex')
+    // codex exec reads stdin to its end when stdin is a pipe ("Reading additional input from stdin...").
+    writeFileSync(fake, '#!/bin/sh\ncat >/dev/null\necho \'{"type":"turn.completed","usage":{"input_tokens":1}}\'\n')
+    chmodSync(fake, 0o755)
+
+    const entry = await probeCodexAccount({ account: ACCOUNT, codexBin: fake, version: 'fake 1', hookCommand: 'true', codexHome: dir, timeoutMs: 5_000 })
+
+    expect(entry.detail).toContain('did not gate')
+  })
 })

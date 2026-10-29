@@ -25,6 +25,9 @@ import { downloadTaskFiles } from './files.js'
 import { chatFolder } from './folder.js'
 import { createAutonomousGuard, killSwitchCheck } from './guard.js'
 import { cancelTaskWork, requestShellWrite, settleTaskOperations, sweepExpiredApprovals, threadChatRef } from './operations.js'
+import { buildReplyCommand } from '../live/control.js'
+import { deliverViaCourier } from '../live/courier.js'
+import { findOpenSessionName } from '../live/open-session.js'
 import { WORKER_BRIEF } from './prompt.js'
 import { routeAutonomousEvent } from './router.js'
 import { createScheduler, stopAutonomousTask, type Scheduler } from './scheduler.js'
@@ -147,6 +150,24 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
           log.warn({ err: error, taskId: task.id }, 'could not read the Slack thread for a fresh session')
           return null
         }
+      },
+      async deliverToOpenChat(task, text) {
+        const sessionId = task.engineSessionId ?? task.chatSessionId
+        if (sessionId === null || task.chatCwd === null) return false
+        const name = await findOpenSessionName(sessionId)
+        if (name === null) return false
+        const replyCommand = buildReplyCommand(await replyRef(task))
+        // The courier is itself a short `claude -p`, so it takes the first Claude login that is not cooling down.
+        for (const account of (await turnDeps.readAccounts()).filter((entry) => entry.client === 'claude')) {
+          if (((await turnDeps.cooldowns.cooldownUntil(account.key)) ?? 0) > Date.now()) continue
+          const outcome = await deliverViaCourier({ targetCwd: task.chatCwd, targetName: name, body: text, replyCommand, senderLabel: 'your operator' }, { env: account.env, log })
+          if (outcome.outcome === 'delivered') {
+            log.info({ taskId: task.id, peer: outcome.peer, accountKey: account.key }, 'sent the thread\'s messages into the open chat')
+            return true
+          }
+          log.warn({ taskId: task.id, accountKey: account.key, reason: outcome.reason }, 'could not send into the open chat with this account')
+        }
+        return false
       },
       settleApprovals: (_task, lease) => settleTaskOperations(pool, lease),
       cleanupStopped,

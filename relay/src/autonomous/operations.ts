@@ -203,8 +203,8 @@ export async function offerApprovalInTransaction(
     escalationReason: 'Every remote write from a Slack chat is approved one command at a time.',
     requiredRoles: ['operator'],
     timeoutMs: deps.approvalTimeoutMs,
+    // Only an operator approves a push or a GitHub write, never whoever started the thread.
     kind: 'remote_write',
-    allowedPrincipalIds: [thread.requesterPrincipalId],
     operationId: operation.id,
   })
   const { rowCount } = await client.query(

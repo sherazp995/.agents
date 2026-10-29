@@ -156,7 +156,8 @@ export function isStopInstruction(text: Untrusted<string>): boolean {
 
 /** Outbound activity a caller wants an adapter to perform. */
 export type ChatAction =
-  | { kind: 'post'; ref: ChatRef; text: string }
+  /** `markdown`: the text is standard Markdown an agent wrote; Slack renders it as a markdown block, with `text` as the fallback. */
+  | { kind: 'post'; ref: ChatRef; text: string; markdown?: true }
   | {
       kind: 'edit'
       ref: Required<Pick<ChatRef, 'channel' | 'message'>> & ChatRef

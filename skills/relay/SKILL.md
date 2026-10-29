@@ -40,7 +40,7 @@ Do not send progress ticks, and do not send what you are already saying in the t
 - Anything long goes as a `.md` file with one short line of text: plans to review, reports, findings lists. The user reviews files, not walls of Slack text.
 
 - Keep it short: one or two sentences, answer first, the way `human-conversation` says.
-- Use Slack mrkdwn: `*bold*` (single asterisks), `` `code` ``, `<https://url|text>`, and short `- ` bullets when you need them. No headings, no "Status:" or "Summary:" labels.
+- Write standard Markdown, which Relay posts as a Slack markdown block: `**bold**`, `` `code` ``, `[text](https://url)`, and short `- ` bullets when you need them. Not Slack mrkdwn (`*bold*`, `<https://url|text>`). No headings, no "Status:" or "Summary:" labels.
 - Never include tokens, passwords, keys or other secrets. Relay scrubs the secrets it knows about, but that is a backstop, not permission.
 
 ## Replies

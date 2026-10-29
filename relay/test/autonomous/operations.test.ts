@@ -37,6 +37,7 @@ describe('remote-write approvals', () => {
   async function newTask() {
     const workspaceId = await resolveWorkspaceId(pool, 'slack', `T_${randomUUID()}`)
     const principalId = await provisionPrincipal(pool, workspaceId, 'slack', `U_${randomUUID()}`, 'Requester', ['member'])
+    const operatorId = await provisionPrincipal(pool, workspaceId, 'slack', `U_${randomUUID()}`, 'Operator', ['operator'])
     const result = await intakeMention(pool, {
       workspaceId,
       principalId,
@@ -52,10 +53,10 @@ describe('remote-write approvals', () => {
     if (!lease) throw new Error('expected a lease')
     const run = await createRun(pool, { workspaceId, sessionId: task.sessionId, principalId })
     const context = { workspaceId, taskId: task.id, runId: run.id, leaseGeneration: lease.generation }
-    return { task, lease, context, principalId }
+    return { task, lease, context, principalId, operatorId }
   }
 
-  /** The requester's click in Slack. */
+  /** A click in Slack on the approval card. */
   async function decide(context: { workspaceId: string; taskId: string }, principalId: string, option: 'approve' | 'deny'): Promise<void> {
     const { rows } = await pool.query<{ approval_id: string }>('SELECT approval_id FROM autonomous_operations WHERE task_id = $1', [context.taskId])
     for (const { approval_id } of rows) {
@@ -65,14 +66,14 @@ describe('remote-write approvals', () => {
   }
 
   it('asks once per command, tells the next turn once about the approval, and lets that command run once', async () => {
-    const { task, lease, context, principalId } = await newTask()
+    const { task, lease, context, operatorId } = await newTask()
     const write = { command: 'git push origin main', cwd: '/repo' }
     expect(await requestShellWrite(pool, deps, context, write)).toEqual({ kind: 'pending' })
     expect(await requestShellWrite(pool, deps, context, write)).toEqual({ kind: 'pending' })
     const { rows } = await pool.query('SELECT id FROM autonomous_operations WHERE task_id = $1', [task.id])
     expect(rows).toHaveLength(1)
 
-    await decide(context, principalId, 'approve')
+    await decide(context, operatorId, 'approve')
     await settleTaskOperations(pool, lease)
     await settleTaskOperations(pool, lease)
     expect((await loadTask(pool, task.id))?.pendingNotes).toEqual(['Approved. Run it again now, exactly as before, in /repo:\ngit push origin main'])
@@ -85,13 +86,21 @@ describe('remote-write approvals', () => {
   })
 
   it('tells the next turn once not to run a denied command, and closes it', async () => {
-    const { task, lease, context, principalId } = await newTask()
+    const { task, lease, context, operatorId } = await newTask()
     await requestShellWrite(pool, deps, context, { command: 'gh pr create', cwd: '/repo' })
-    await decide(context, principalId, 'deny')
+    await decide(context, operatorId, 'deny')
     await settleTaskOperations(pool, lease)
     await settleTaskOperations(pool, lease)
     expect((await loadTask(pool, task.id))?.pendingNotes).toEqual(['Not approved, so do not run it: gh pr create\nThe user did not approve it.'])
     const { rows } = await pool.query('SELECT state FROM autonomous_operations WHERE task_id = $1', [task.id])
     expect(rows).toEqual([{ state: 'skipped' }])
+  })
+
+  it('lets only an operator approve a remote write, not the member who started the thread', async () => {
+    const { context, principalId } = await newTask()
+    await requestShellWrite(pool, deps, context, { command: 'git push origin main', cwd: '/repo' })
+    const { rows } = await pool.query<{ approval_id: string }>('SELECT approval_id FROM autonomous_operations WHERE task_id = $1', [context.taskId])
+    const result = await resolveApproval(pool, { workspaceId: context.workspaceId, approvalId: rows[0]!.approval_id, option: 'approve', resolverPrincipalId: principalId, receiptKey: deps.receiptKey })
+    expect(result.outcome).toBe('unauthorized')
   })
 })
