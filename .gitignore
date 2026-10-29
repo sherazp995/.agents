@@ -22,3 +22,6 @@ skills/archify/
 # Machine-local links to project commands (point into client repos; never commit).
 commands/dev-pin-typescript.md
 commands/release-pin-typescript.md
+
+# Relay's cached codex check (machine-local runtime state).
+relay/codex-eligibility.json
