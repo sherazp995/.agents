@@ -19,7 +19,7 @@ import type { KillSwitch } from '../killswitch.js'
 import type { Logger } from '../obs/logger.js'
 import { closeRedis, type Redis } from '../redis/client.js'
 import type { SecretProvider } from '../secrets/provider.js'
-import { readAccountPool, RedisCooldownStore, type Account } from './accounts.js'
+import { classifyBlocked, COOLDOWN_MS, readAccountPool, RedisCooldownStore, type Account } from './accounts.js'
 import { codexVersion, isProvenEligible, readCodexEligibility } from './codex-probe.js'
 import { downloadTaskFiles } from './files.js'
 import { chatFolder } from './folder.js'
@@ -158,6 +158,7 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
         if (name === null) return false
         const replyCommand = buildReplyCommand(await replyRef(task))
         // The courier is itself a short `claude -p`, so it takes the first Claude login that is not cooling down.
+        // Only a blocked login moves on to the next one: any other failure may have sent the message already, and retrying would send it twice.
         for (const account of (await turnDeps.readAccounts()).filter((entry) => entry.client === 'claude')) {
           if (((await turnDeps.cooldowns.cooldownUntil(account.key)) ?? 0) > Date.now()) continue
           const outcome = await deliverViaCourier({ targetCwd: task.chatCwd, targetName: name, body: text, replyCommand, senderLabel: 'your operator' }, { env: account.env, log })
@@ -166,6 +167,9 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
             return true
           }
           log.warn({ taskId: task.id, accountKey: account.key, reason: outcome.reason }, 'could not send into the open chat with this account')
+          const blocked = classifyBlocked({ exitCode: 1, stderr: outcome.reason })
+          if (blocked === null) return false
+          await turnDeps.cooldowns.coolDown(account.key, Date.now() + COOLDOWN_MS[blocked])
         }
         return false
       },

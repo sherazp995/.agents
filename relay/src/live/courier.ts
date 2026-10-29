@@ -274,8 +274,9 @@ export async function deliverViaCourier(
   // stderr carried into the reason rather than dropped. When the token is
   // missing, whatever the courier complained about is the only evidence of
   // why, and this reason is what reaches the operator's log.
-  const detail = result.stderr.trim()
-  return detail.length === 0 ? outcome : { outcome: 'not_delivered', reason: `${outcome.reason} (stderr: ${detail.slice(0, 400)})` }
+  // stdout too: `claude -p` prints a login or limit failure there, which is how a caller tells a blocked account from any other failure.
+  const detail = [result.stderr.trim() && `stderr: ${result.stderr.trim().slice(0, 400)}`, result.stdout.trim() && `output: ${result.stdout.trim().slice(-400)}`].filter(Boolean).join('; ')
+  return detail.length === 0 ? outcome : { outcome: 'not_delivered', reason: `${outcome.reason} (${detail})` }
 }
 
 /**

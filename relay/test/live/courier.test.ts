@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { classifyBlocked } from '../../src/autonomous/accounts.js'
 import { UNTRUSTED_DATA_TAG } from '../../src/agent/untrusted.js'
 import {
   COURIER_DELIVERED,
@@ -200,6 +201,16 @@ describe('deliverViaCourier', () => {
     expect(outcome.outcome).toBe('not_delivered')
     if (outcome.outcome !== 'not_delivered') return
     expect(outcome.reason).toContain('command not found')
+  })
+
+  it("carries a login or limit failure from the courier's stdout into the reason, so a caller can classify it", async () => {
+    const outcome = await deliverViaCourier(request(), {
+      spawnCourier: async () => ({ stdout: "You've hit your monthly spend limit", stderr: 'exit 1: ' }),
+    })
+
+    expect(outcome.outcome).toBe('not_delivered')
+    if (outcome.outcome !== 'not_delivered') return
+    expect(classifyBlocked({ exitCode: 1, stderr: outcome.reason })).toBe('usage_limit')
   })
 
   it('carries the courier\'s stderr into the reason when no token was printed', async () => {
