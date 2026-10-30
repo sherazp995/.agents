@@ -38,6 +38,10 @@ class Paths:
         return self.memory / '.lock'
 
     @property
+    def workstreams(self):
+        return self.hub / 'workstreams'
+
+    @property
     def chats(self):
         return self.hub / 'chats'
 

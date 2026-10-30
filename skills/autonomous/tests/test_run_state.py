@@ -1,5 +1,7 @@
 """run-state.py: stages per task, each tied to the tree it ran on, through the CLI the run prompt calls."""
+from importlib.machinery import SourceFileLoader
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -129,6 +131,24 @@ class RunStateTests(unittest.TestCase):
         self.assertIn('unfinished, at worktree', report)
         self.assertIn('--resume r1', report)
         self.assertIn('- **Status:** stopped at qa-visual', report)
+
+    def test_a_here_run_is_owned_by_its_chat_and_goes_on_group_by_group(self):
+        other = make_repo(self.root / 'other')
+        one, two = write_plan(self.root / 'one.md', self.repo), write_plan(self.root / 'two.md', other)
+        refused = self.rs('init', '--mode', 'here', '--session', 's1', '--owner-pid', '1',
+                          '--slack-channel', 'C1', '--slack-thread', '1.1', str(one), ok=False)
+        self.assertIn('never from Slack', refused.stderr)
+        self.assertIn('owning chat', self.rs('init', '--mode', 'here', str(one), ok=False).stderr)
+        self.rs('init', '--mode', 'here', '--session', 's1', '--owner-pid', str(os.getpid()), str(one), str(two))
+        run_state = SourceFileLoader('run_state', str(SCRIPT)).load_module()
+        runs = self.run_dir.parent
+        self.assertEqual(run_state.here_run_for('s1', runs), str(self.run_dir))
+        self.assertIsNone(run_state.here_run_for('s2', runs))
+        self.rs('stop', 'one', 'QA unavailable: no browser')
+        self.assertEqual(self.rs('group-done', '0').stdout.strip(), 'next')
+        self.rs('stop', 'two', 'QA unavailable: no browser')
+        self.assertEqual(self.rs('group-done', '1').stdout.strip(), 'last')
+        self.assertIsNone(run_state.here_run_for('s1', runs), 'an ended run no longer binds its chat')
 
 
 if __name__ == '__main__':

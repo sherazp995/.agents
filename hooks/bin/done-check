@@ -20,8 +20,9 @@ non-zero exit or an error, and file edits made after a review result. A review r
 result or background task notification whose text says both "review" and "finding": a plain word
 signal, so the checker judges which incidents are real. It reports LESSONS, each real incident with the
 memory that holds its lesson or MISSING, and the agent saves a MISSING lesson before its DONE-CHECK
-line. When AGENTS_AUTONOMOUS_RUN names an autonomous run directory, the instructions add that run's
-disposition policy (fix only introduced, in-scope findings; record the rest in its report.md).
+line. In an autonomous run (AGENTS_AUTONOMOUS_RUN names its directory, or the session owns a live here
+run), the instructions add that run's disposition policy (fix only introduced, in-scope findings; record
+the rest in its report.md; the user's mid-run messages are follow-ups, not requests).
 
 State lives in tmp/done-check/ of this hub (git-ignored).
 """
@@ -37,6 +38,8 @@ HUB = Path(__file__).resolve().parents[2]
 STATE = HUB / 'tmp' / 'done-check'
 # Reused for its transcript readers, which understand both Claude and Codex records.
 turns = SourceFileLoader('related_tests', str(Path(__file__).with_name('related-tests'))).load_module()
+# The headless run's directory, or the live here run this session owns (one lookup for both hooks).
+autonomous_run = SourceFileLoader('no_remote_writes', str(Path(__file__).with_name('no-remote-writes'))).load_module().autonomous_run
 
 COMMIT = re.compile(r'\bgit\s+(?:-c\s+\S+\s+)*commit\b')
 CD = re.compile(r'(?:^|&&|;|\|\|)\s*cd\s+("[^"]*"|\'[^\']*\'|[^\s;&|]+)')
@@ -278,10 +281,10 @@ def incidents_text(turn):
 def autonomous_policy(run_dir):
     return f'''
 
-This is an autonomous run (run directory {run_dir}). Disposition policy for every finding: fix only findings this change introduced that lie inside the plan's scope (blocker, high, medium). An introduced blocker, high or medium that needs work outside the plan's scope stops the task: end with DONE-CHECK: OPEN and the reason. Do not fix lows or any pre-existing or out-of-scope finding; record each in {Path(run_dir) / 'report.md'} instead.'''
+This is an autonomous run (run directory {run_dir}). Disposition policy for every finding: fix only findings this change introduced that lie inside the plan's scope (blocker, high, medium). An introduced blocker, high or medium that needs work outside the plan's scope stops the task: end with DONE-CHECK: OPEN and the reason. Do not fix lows or any pre-existing or out-of-scope finding; record each in {Path(run_dir) / 'report.md'} instead. Messages the user sent during the run are questions or follow-ups, not parts of the request: a change they ask for is recorded under Follow-ups in the task report and is never MISSING.'''
 
 
-def check_instructions(turn, root, committed_head):
+def check_instructions(turn, root, committed_head, session_id=None):
     change = f'`git diff HEAD` plus any new untracked files in {root}'
     if committed_head:
         change = (f'`git show {committed_head}` in {root}, plus `git diff HEAD` and any new untracked files '
@@ -301,7 +304,7 @@ def check_instructions(turn, root, committed_head):
     else:
         incident_item = "\n4. The turn has no incidents (no later prompts, failed commands or edits after a review), so the checker skips LESSONS."
         lessons_report = lessons_fix = ''
-    run_dir = os.environ.get('AGENTS_AUTONOMOUS_RUN')
+    run_dir = autonomous_run(session_id)
     policy = autonomous_policy(run_dir) if run_dir else ''
     return f'''DONE-CHECK: this task looks finished. Before it counts as done, verify it once with a fresh checker.
 
@@ -370,7 +373,7 @@ def verdict(event):
     # A pending check from an earlier prompt was abandoned (the user interrupted): it is simply replaced.
     save_state(file, {'pending': key, 'request': request, 'head': committed_head, 'root': str(root),
                       'passed': passed})
-    return {'decision': 'deny', 'reason': check_instructions(turn, root, committed_head)}
+    return {'decision': 'deny', 'reason': check_instructions(turn, root, committed_head, event['session_id'])}
 
 
 if __name__ == '__main__':

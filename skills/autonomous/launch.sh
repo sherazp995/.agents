@@ -2,6 +2,7 @@
 # Start an autonomous run: build approved plans unattended, one headless session per repo.
 #
 #   launch.sh [--slack-channel C --slack-thread T] [<plan>...]
+#   launch.sh --here [<plan>...]
 #   launch.sh --resume <run id>
 #
 # Every plan must pass `plan-approval.py verify`; one that does not is recorded as stopped with the
@@ -16,6 +17,10 @@
 # else, when claude is not installed, `codex exec` with the same hook wired through -c overrides.
 # AUTONOMOUS_ENGINE=claude|codex picks one. The session gets AGENTS_AUTONOMOUS_RUN=<run dir>.
 # AGENTS_AUTONOMOUS_ROOT and AGENTS_PLANS_DIR move the run and plan folders (tests use them).
+#
+# --here: verify and record the run the same way, start no session, and print each group's prompt
+# file; the user's own chat then follows those prompts one after another (run-prompt.md, "Here").
+# Never from Slack: relay ends a turn after an hour.
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -26,7 +31,7 @@ state_py="$here/run-state.py"
 adapter="$agents/hooks/adapters/run.py"
 
 usage() {
-  echo "Usage: $0 [--slack-channel C --slack-thread T] [<plan>...] | --resume <run id>" >&2
+  echo "Usage: $0 [--slack-channel C --slack-thread T | --here] [<plan>...] | --resume <run id>" >&2
   exit 2
 }
 
@@ -116,18 +121,52 @@ print("hooks.state={%s={trusted_hash=%s}}" % (json.dumps(key), json.dumps("sha25
   return "$status"
 }
 
+# The chat this launcher runs in, for a here run: "<engine> <session id> <host pid>". Claude Code sets
+# CLAUDE_CODE_SESSION_ID and CLAUDE_PID; Codex sets CODEX_THREAD_ID, and its host is the nearest codex
+# process above this shell. The hooks match a tool call to its run by that session id.
+host_chat() {
+  if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" && -n "${CLAUDE_PID:-}" ]]; then
+    echo "claude $CLAUDE_CODE_SESSION_ID $CLAUDE_PID"
+  elif [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+    local pid=$PPID name
+    while [[ "$pid" -gt 1 ]]; do
+      name=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+      if [[ "$(basename "$name")" == codex ]]; then echo "codex $CODEX_THREAD_ID $pid"; return 0; fi
+      pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || break
+    done
+    return 1
+  else
+    return 1
+  fi
+}
+
+# The prompt a group follows: a headless session gets it as its prompt, a here run reads it.
+write_prompt() {
+  local run_dir=$1 group=$2 repo tasks who env_note=" (also in \$AGENTS_AUTONOMOUS_RUN)"
+  repo=$(state_get "$run_dir" "s['groups'][$group]['repo']")
+  tasks=$(state_get "$run_dir" "', '.join(s['groups'][$group]['tasks'])")
+  if [[ "$(state_get "$run_dir" 's.get("mode", "headless")')" == here ]]; then
+    who="You are running autonomous run $(basename "$run_dir"), group $group, in the user's own chat (run-prompt.md, \"Here\")."
+    env_note=
+  else
+    who="You are the headless session of autonomous run $(basename "$run_dir"), group $group."
+  fi
+  cat > "$run_dir/group-$group.prompt.txt" <<EOF
+$who
+Read $here/run-prompt.md and follow it exactly.
+Run directory: $run_dir$env_note.
+Group: $group. Repo: $repo.
+Tasks in order: $tasks.
+EOF
+  echo "group $group: $repo ($tasks), prompt $run_dir/group-$group.prompt.txt"
+}
+
 # Start one group's session detached and record it.
 spawn() {
   local run_dir=$1 group=$2 repo tasks log pid
   repo=$(state_get "$run_dir" "s['groups'][$group]['repo']")
   tasks=$(state_get "$run_dir" "', '.join(s['groups'][$group]['tasks'])")
-  cat > "$run_dir/group-$group.prompt.txt" <<EOF
-You are the headless session of autonomous run $(basename "$run_dir"), group $group.
-Read $here/run-prompt.md and follow it exactly.
-Run directory: $run_dir (also in \$AGENTS_AUTONOMOUS_RUN).
-Group: $group. Repo: $repo.
-Tasks in order: $tasks.
-EOF
+  write_prompt "$run_dir" "$group" > /dev/null
   log="$run_dir/group-$group.log"
   pid=$(python3 -c '
 import subprocess, sys
@@ -170,26 +209,51 @@ fi
 channel=
 thread=
 resume=
+here_mode=
 plans=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slack-channel) [[ $# -ge 2 ]] || usage; channel=$2; shift 2 ;;
     --slack-thread) [[ $# -ge 2 ]] || usage; thread=$2; shift 2 ;;
     --resume) [[ $# -ge 2 ]] || usage; resume=$2; shift 2 ;;
+    --here) here_mode=1; shift ;;
     -h|--help) usage ;;
     -*) echo "autonomous: unknown option $1" >&2; usage ;;
     *) plans+=("$1"); shift ;;
   esac
 done
+if [[ -n "$here_mode" && -n "$channel$thread" ]]; then
+  echo "autonomous: --here runs in your own chat, never from Slack (relay ends a turn after an hour)" >&2
+  exit 2
+fi
 if [[ -n "$channel" && -z "$thread" || -z "$channel" && -n "$thread" ]]; then
   echo "autonomous: --slack-channel and --slack-thread go together" >&2
   exit 2
+fi
+chat=
+if [[ -n "$here_mode" ]] || { [[ -n "$resume" && -f "$root/$resume/state.json" ]] &&
+    [[ "$(state_get "$root/$resume" 's.get("mode", "headless")')" == here ]]; }; then
+  chat=$(host_chat) || {
+    echo "autonomous: a here run runs inside a Claude Code or Codex chat; run it from one (no chat session found)" >&2
+    exit 2
+  }
+  read -r chat_engine chat_session chat_pid <<< "$chat"
 fi
 
 if [[ -n "$resume" ]]; then
   [[ ${#plans[@]} -eq 0 && -z "$channel" ]] || usage
   run_dir="$root/$resume"
   [[ -f "$run_dir/state.json" ]] || { echo "autonomous: no run $resume under $root" >&2; exit 1; }
+  if [[ -n "$chat" ]]; then
+    groups=$(state claim "$run_dir" --session "$chat_session" --owner-pid "$chat_pid") || exit 1
+    if [[ -z "$groups" ]]; then
+      echo "autonomous: run $resume has nothing to resume (every task ended)"
+      exit 0
+    fi
+    for group in $groups; do write_prompt "$run_dir" "$group" || exit 1; done
+    echo "run $resume ready to run here again: follow each prompt above in this chat, one after another"
+    exit 0
+  fi
   engine=$(state_get "$run_dir" 's["engine"]')
   AUTONOMOUS_ENGINE=$engine pick_engine > /dev/null || exit 1
   groups=$(state resume "$run_dir") || exit 1
@@ -202,7 +266,11 @@ if [[ -n "$resume" ]]; then
   exit 0
 fi
 
-engine=$(pick_engine) || exit 1
+if [[ -n "$chat" ]]; then
+  engine=$chat_engine
+else
+  engine=$(pick_engine) || exit 1
+fi
 if [[ ${#plans[@]} -eq 0 ]]; then
   while IFS= read -r plan; do plans+=("$plan"); done < <(discover)
   if [[ ${#plans[@]} -eq 0 ]]; then
@@ -216,7 +284,9 @@ run_dir="$root/$run_id"
 mkdir -p "$root" || exit 1
 slack_args=()
 [[ -z "$channel" ]] || slack_args=(--slack-channel "$channel" --slack-thread "$thread")
-summary=$(state init "$run_dir" --engine "$engine" ${slack_args[@]+"${slack_args[@]}"} "${plans[@]}") || exit 1
+mode_args=()
+[[ -z "$here_mode" ]] || mode_args=(--mode here --session "$chat_session" --owner-pid "$chat_pid")
+summary=$(state init "$run_dir" --engine "$engine" ${slack_args[@]+"${slack_args[@]}"} ${mode_args[@]+"${mode_args[@]}"} "${plans[@]}") || exit 1
 python3 -c 'import json,sys
 for s in json.loads(sys.argv[1])["stopped"]:
     print("stopped %s (%s): %s" % (s["task"], s["plan"], s["reason"]))' "$summary"
@@ -224,6 +294,11 @@ groups=$(python3 -c 'import json,sys; print(" ".join(str(g["group"]) for g in js
 if [[ -z "$groups" ]]; then
   echo "run $run_id: no plan verified, nothing started ($run_dir)"
   exit 1
+fi
+if [[ -n "$here_mode" ]]; then
+  for group in $groups; do write_prompt "$run_dir" "$group" || exit 1; done
+  echo "run $run_id ready to run here ($run_dir): follow each prompt above in this chat, one after another"
+  exit 0
 fi
 for group in $groups; do spawn "$run_dir" "$group" || exit 1; done
 echo "run $run_id started ($run_dir)"

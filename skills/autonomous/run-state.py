@@ -19,7 +19,8 @@ A finished stage counts only for what it ran on:
 - commit: the commit made; the task is then done.
 
 Commands (each prints one line or JSON; a refusal exits 1 with the reason on stderr):
-  init <run dir> [--engine E] [--slack-channel C --slack-thread T] <plan>...   JSON: groups, stopped plans
+  init <run dir> [--engine E] [--mode here --session S --owner-pid P | --slack-channel C --slack-thread T] <plan>...
+                                   JSON: groups, stopped plans
   next <run dir> <task>            the stage to run now, `done`, or `stopped: <reason>`
   start <run dir> <task> <stage>   marks the stage running (only the stage `next` names)
   finish <run dir> <task> <stage> [--worktree PATH] [--commit SHA] [--skipped REASON] [--result TEXT]
@@ -28,9 +29,16 @@ Commands (each prints one line or JSON; a refusal exits 1 with the reason on std
   show <run dir>                   state.json
   report <run dir>                 writes report.md from state.json and tasks/*.md, prints its path
   group-started <run dir> <group> <pid> <log>
-  group-done <run dir> <group>     the session finished its group: `last` (write and send the report) or `wait`
+  group-done <run dir> <group>     the session finished its group: `last` (write and send the report), `wait`,
+                                   or in a here run `next` (go on with the next group's prompt)
   group-exit <run dir> <group> <exit code>   the runner saw the session exit: `ok`, `crashed` or `crashed last`
   resume <run dir>                 groups to start again (unfinished tasks, no live session), one per line
+  claim <run dir> --session S --owner-pid P   a here run's new owning chat; refused while another live
+                                   chat owns it; then prints the groups still to run, like resume
+
+A here run (launch.sh --here) runs in the user's own chat. Its owner (that chat's session id and its
+host process) is recorded in state.json and in <runs root>/here-sessions/<session>, so the hooks
+(no-remote-writes, done-check) find the run from the session id alone: here_run_for(session).
 """
 import contextlib
 import datetime
@@ -126,12 +134,16 @@ def task_ids(plans):
     return ids
 
 
-def init(run_dir, plans, engine='claude', slack=None):
+def init(run_dir, plans, engine='claude', slack=None, mode='headless', owner=None):
     run_dir = Path(run_dir).resolve()
     if (run_dir / 'state.json').exists():
         raise Refusal(f'{run_dir} already holds a run')
     if not plans:
         raise Refusal('no plans to run')
+    if mode == 'here' and slack:
+        raise Refusal('a here run runs in your own chat, never from Slack')
+    if mode == 'here' and not owner:
+        raise Refusal('a here run needs its owning chat (--session and --owner-pid)')
     (run_dir / 'plans').mkdir(parents=True, exist_ok=True)
     (run_dir / 'tasks').mkdir(exist_ok=True)
     tasks, groups, stopped = {}, [], []
@@ -157,8 +169,10 @@ def init(run_dir, plans, engine='claude', slack=None):
             entry['group'] = group
         tasks[task] = entry
     with locked(run_dir, create=True) as state:
-        state.update(run_id=run_dir.name, run_dir=str(run_dir), created=now(), engine=engine,
-                     slack=slack, report_claimed=False, order=list(tasks), groups=groups, tasks=tasks)
+        state.update(run_id=run_dir.name, run_dir=str(run_dir), created=now(), engine=engine, mode=mode,
+                     slack=slack, owner=owner, report_claimed=False, order=list(tasks), groups=groups, tasks=tasks)
+    if owner:
+        bind(run_dir, owner['session'])
     return {'run_id': run_dir.name, 'run_dir': str(run_dir),
             'groups': [{'group': i, 'repo': g['repo'], 'tasks': g['tasks']} for i, g in enumerate(groups)],
             'stopped': stopped}
@@ -279,6 +293,53 @@ def claim_report(state):
     return False
 
 
+def binding(root, session):
+    return Path(root) / 'here-sessions' / re.sub(r'[^A-Za-z0-9_.-]', '_', str(session))
+
+
+def bind(run_dir, session):
+    file = binding(Path(run_dir).parent, session)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(str(run_dir))
+
+
+def claim(state, session, pid):
+    """A here run's new owner: refused while a different chat that owns it is still alive."""
+    if state.get('mode') != 'here':
+        raise Refusal('only a here run is claimed; resume a headless run with launch.sh --resume')
+    if state.get('slack'):
+        raise Refusal('a here run never has a Slack thread')
+    owner = state.get('owner') or {}
+    if owner.get('session') != session and pid_alive(owner.get('pid')):
+        raise Refusal(f'chat {owner.get("session")} (pid {owner.get("pid")}) still owns this run; '
+                      'finish it there, or close that chat first')
+    if owner.get('session') and owner['session'] != session:
+        binding(Path(state['run_dir']).parent, owner['session']).unlink(missing_ok=True)
+    state['owner'] = {'session': session, 'pid': pid}
+    bind(state['run_dir'], session)
+
+
+def runs_root():
+    return Path(os.environ.get('AGENTS_AUTONOMOUS_ROOT') or Path.home() / '.agents/tmp/autonomous')
+
+
+def here_run_for(session, root=None):
+    """The run directory of the live here run this session owns, or None."""
+    if not session:
+        return None
+    try:
+        run_dir = Path(binding(root or runs_root(), session).read_text().strip())
+        state = json.loads((run_dir / 'state.json').read_text())
+    except (OSError, ValueError):
+        return None
+    owner = state.get('owner') or {}
+    if state.get('mode') != 'here' or owner.get('session') != session or not pid_alive(owner.get('pid')):
+        return None
+    if state.get('report_claimed') and all(g['status'] in ('finished', 'crashed') for g in state['groups']):
+        return None
+    return str(run_dir)
+
+
 def pid_alive(pid):
     if not pid:
         return False
@@ -336,11 +397,16 @@ def main(argv):
     try:
         if command == 'init':
             engine = option(args, '--engine', 'claude')
+            mode = option(args, '--mode', 'headless')
+            if mode not in ('headless', 'here'):
+                raise Refusal('--mode is headless or here')
             channel, thread = option(args, '--slack-channel'), option(args, '--slack-thread')
             if bool(channel) != bool(thread):
                 raise Refusal('--slack-channel and --slack-thread go together')
             slack = {'channel': channel, 'thread': thread} if channel else None
-            print(json.dumps(init(run_dir, args, engine, slack)))
+            session, pid = option(args, '--session'), option(args, '--owner-pid')
+            owner = {'session': session, 'pid': int(pid)} if session and pid and pid.isdigit() else None
+            print(json.dumps(init(run_dir, args, engine, slack, mode, owner)))
         elif command == 'show':
             print(json.dumps(read_state(run_dir), indent=2))
         elif command == 'report':
@@ -349,6 +415,17 @@ def main(argv):
             with locked(run_dir) as state:
                 for i, group in enumerate(state['groups']):
                     if queue(state, i) and not pid_alive(group.get('pid')):
+                        group.update(status='pending', pid=None, exit=None)
+                        state['report_claimed'] = False
+                        print(i)
+        elif command == 'claim':
+            session, pid = option(args, '--session'), option(args, '--owner-pid')
+            if not session or not (pid or '').isdigit() or args:
+                raise Refusal('claim needs --session S --owner-pid P')
+            with locked(run_dir) as state:
+                claim(state, session, int(pid))
+                for i, group in enumerate(state['groups']):
+                    if queue(state, i):
                         group.update(status='pending', pid=None, exit=None)
                         state['report_claimed'] = False
                         print(i)
@@ -383,7 +460,13 @@ def main(argv):
                     entry.update(status='running', pid=int(args[1]), log=args[2], exit=None)
                 elif command == 'group-done':
                     entry['status'] = 'finished'
-                    print('last' if claim_report(state) else 'wait')
+                    if claim_report(state):
+                        print('last')
+                    elif state.get('mode') == 'here':
+                        # One chat runs every group, so nobody else will send the report.
+                        print('next')
+                    else:
+                        print('wait')
                 elif command == 'group-exit' and len(args) == 2:
                     entry['exit'] = int(args[1])
                     if entry['status'] == 'finished':

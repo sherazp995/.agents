@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sys
 
-from . import accounts, handoff, index, learn, memory, scope
+from . import accounts, handoff, index, learn, memory, scope, workstreams
 from .paths import Paths
 
 
@@ -72,6 +72,56 @@ def cmd_memory_doctor(paths, args):
         print(line)
     if problems and not args.fix:
         sys.exit(1)
+
+
+def _caller(args):
+    return (args.author or workstreams.author_from_env(), args.session or workstreams.session_from_env())
+
+
+def cmd_workstream_new(paths, args):
+    author, session = _caller(args)
+    record = workstreams.create(paths, args.id, args.title, args.repo or [str(_cwd(args))], args.keyword or [],
+                                author, session)
+    print(f"created {record['id']} (revision 1), linked to {', '.join(record['repos'])}")
+
+
+def cmd_workstream_list(paths, args):
+    found = workstreams.records(paths) if args.all else workstreams.matching(paths, _cwd(args))
+    print('\n'.join(workstreams.summary_line(r) for r in found) if found else '(no workstreams)')
+
+
+def cmd_workstream_show(paths, args):
+    record = workstreams.load(paths, args.id)
+    print(workstreams.render(record, args.log), end='')
+    workstreams.add_receipt(paths, args.session or workstreams.session_from_env(), 'show', args.id,
+                            record['revision'])
+
+
+def _read_state(source):
+    if source is None:
+        return None
+    return sys.stdin.read() if source == '-' else Path(source).read_text()
+
+
+def cmd_workstream_update(paths, args):
+    author, session = _caller(args)
+    record = workstreams.update(paths, args.id, args.revision, args.note, args.source, args.verified, author,
+                                session, state=_read_state(args.state_file))
+    workstreams.add_receipt(paths, session, 'update', args.id, record['revision'])
+    print(f"{args.id} is now at revision {record['revision']}")
+
+
+def cmd_workstream_link(paths, args):
+    author, session = _caller(args)
+    record = workstreams.link(paths, args.id, args.revision, args.repo, author, session)
+    print(f"{args.id} is now at revision {record['revision']}, linked to {', '.join(record['repos'])}")
+
+
+def cmd_workstream_skip(paths, args):
+    author, session = _caller(args)
+    record = workstreams.skip(paths, args.id, args.reason, author, session)
+    workstreams.add_receipt(paths, session, 'skip', args.id, record['revision'])
+    print(f'{args.id}: recorded nothing new')
 
 
 def cmd_learn_candidates(paths, args):
@@ -201,6 +251,42 @@ def parser():
     doctor.add_argument('--fix', action='store_true')
     doctor.set_defaults(run=cmd_memory_doctor)
 
+    ws = command(sub, 'workstream', 'Shared status record per multi-session workstream').add_subparsers(
+        dest='action', required=True)
+    new = command(ws, 'new', 'Create a workstream linked to one or more repos')
+    new.add_argument('id', help='lowercase-with-dashes')
+    new.add_argument('--title', required=True)
+    new.add_argument('--repo', action='append', help='Repo path (repeatable; default: this repo)')
+    new.add_argument('--keyword', action='append', help='Ticket id, alias or topic (repeatable)')
+    new.set_defaults(run=cmd_workstream_new)
+    listing = command(ws, 'list', 'Workstreams linked to this repo')
+    listing.add_argument('--all', action='store_true', help='Every workstream')
+    listing.set_defaults(run=cmd_workstream_list)
+    show = command(ws, 'show', 'Print state, revision and recent log')
+    show.add_argument('id')
+    show.add_argument('--log', type=int, default=workstreams.SHOW_LOG, help='Recent log entries to print')
+    show.set_defaults(run=cmd_workstream_show)
+    upd = command(ws, 'update', 'Record what you learned; refused if --revision is stale')
+    upd.add_argument('id')
+    upd.add_argument('--revision', type=int, required=True, help='The revision `show` printed')
+    upd.add_argument('--note', required=True, help='What changed, one line')
+    upd.add_argument('--source', required=True, help='Where it came from: gh pr view 3812, Slack Anh 10-30, ...')
+    upd.add_argument('--verified', action='store_true', help='You checked it live (else it is reported)')
+    upd.add_argument('--state-file', help="New state markdown (whole body), or '-' for stdin")
+    upd.set_defaults(run=cmd_workstream_update)
+    lnk = command(ws, 'link', 'Link another repo')
+    lnk.add_argument('id')
+    lnk.add_argument('--repo', required=True)
+    lnk.add_argument('--revision', type=int, required=True)
+    lnk.set_defaults(run=cmd_workstream_link)
+    skp = command(ws, 'skip', 'Record that this session learned nothing new')
+    skp.add_argument('id')
+    skp.add_argument('--reason', required=True)
+    skp.set_defaults(run=cmd_workstream_skip)
+    for parsed in (new, show, upd, lnk, skp):
+        parsed.add_argument('--author', help='Default: claude or codex, from the environment')
+        parsed.add_argument('--session', help='Default: the session id from the environment')
+
     learning = command(sub, 'learn', 'Turn recurring memories into shared skills').add_subparsers(
         dest='action', required=True)
     command(learning, 'candidates', 'List feedback/user memories not yet in a skill').set_defaults(
@@ -261,5 +347,8 @@ def main(argv=None):
     paths = Paths.from_env()
     try:
         args.run(paths, args)
-    except (accounts.AccountError, memory.MemoryError, scope.ScopeError, LookupError, FileNotFoundError) as error:
+    except workstreams.StaleRevision as error:
+        print(f'agents-hub: {error}', file=sys.stderr)
+        sys.exit(3)
+    except (workstreams.WorkstreamError, accounts.AccountError, memory.MemoryError, scope.ScopeError, LookupError, FileNotFoundError) as error:
         sys.exit(f'agents-hub: {error}')

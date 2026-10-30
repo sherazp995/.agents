@@ -59,6 +59,7 @@ Start it when the task starts and keep it current, so a crash still leaves what 
 - **Review:** verdict, rounds, what was fixed.
 - **QA:** the `index.html` and `report-embedded.html` paths, the video paths and verdict; or "QA skipped: why" or "QA unavailable: why".
 - **Recorded findings:** each finding not fixed: severity, origin, `file:line`, one line.
+- **Follow-ups:** in a here run, each change the user asked for mid-run, not built.
 - **Learned:** each lesson saved (memory name) and each rule, skill or test changed by rule 58.
 
 ## End of your group
@@ -71,3 +72,12 @@ After your last task, run `RS group-done $RUN <group>`.
   - Started from the terminal: one `relay notify --file $RUN/report.md "<summary>"`.
 
   The summary is one or two sentences in plain words: how many tasks are done and committed, which stopped and why in a few words, where the report is. End the turn with the same summary.
+
+## Here: the run happens in the user's own chat
+
+When your prompt says the run is "in the user's own chat" (`launch.sh --here`), you are that chat, not a headless session. The launcher recorded this chat as the run's owner, so no-remote-writes and done-check apply the autonomous rules to this chat until the run ends. Everything above holds, with these exceptions only:
+
+- Before the first stage, make sure nothing will stop for approval: Claude Code in auto or bypass-permissions mode, Codex with approvals off and a sandbox that lets you write the sibling worktree. If not, say so in one line, start no stage, and tell the user how to switch. Once a stage starts, still no question to the user and no waiting for one: a decision the plan does not settle stops the task as above.
+- The user may write while the run goes on. Answer in one or two lines (progress from `RS show $RUN`, what you are on, anything they ask), then carry on with the stage you were in. A requested change to a plan is not built: record it under "Follow-ups" in that task's report and say so.
+- The groups run one after another in this chat, in the order the launcher printed them. `RS group-done $RUN <group>` prints `next` while another group has work: read that group's prompt file and go on, without ending the turn. `last` sends the report as above.
+- If the chat is summarized mid-run, re-read `$RUN/state.json` and the task reports, then go on with `RS next`. If the chat ends, `launch.sh --resume <run id>` from a new chat makes that chat the owner (refused while this one is still open) and prints the prompts again.

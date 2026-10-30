@@ -1,6 +1,7 @@
 """The done-check Stop hook: a finished task is checked once by a fresh checker."""
 from importlib.machinery import SourceFileLoader
 import json
+import os
 import shutil
 from pathlib import Path
 import subprocess
@@ -251,6 +252,21 @@ class DoneCheckTest(unittest.TestCase):
         with unittest.mock.patch.dict('os.environ', {'AGENTS_AUTONOMOUS_RUN': '/runs/r1'}):
             reason = self.edit_and_claim()['reason']
         for words in ('autonomous run', 'fix only findings this change introduced', '/runs/r1/report.md'):
+            self.assertIn(words, reason)
+
+    def test_the_chat_that_owns_a_here_run_gets_the_policy(self):
+        runs = self.dir / 'runs'
+        run_dir = runs / 'r2'
+        run_dir.mkdir(parents=True)
+        (run_dir / 'state.json').write_text(json.dumps({
+            'mode': 'here', 'owner': {'session': 's1', 'pid': os.getpid()}, 'report_claimed': False,
+            'groups': [{'status': 'pending'}]}))
+        (runs / 'here-sessions').mkdir()
+        (runs / 'here-sessions' / 's1').write_text(str(run_dir))
+        with unittest.mock.patch.dict('os.environ', {'AGENTS_AUTONOMOUS_ROOT': str(runs)}):
+            os.environ.pop('AGENTS_AUTONOMOUS_RUN', None)
+            reason = self.edit_and_claim()['reason']
+        for words in ('autonomous run', str(run_dir / 'report.md'), 'never MISSING'):
             self.assertIn(words, reason)
 
     def state(self):

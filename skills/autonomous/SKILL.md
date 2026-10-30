@@ -7,15 +7,16 @@ description: "Build plans the user already approved, unattended (for example ove
 
 Builds approved plans with nobody watching and reports in the morning. A plan counts as approved only when it carries the stamp doing-substantial-work writes at its approval gate and that stamp still matches (`plan-approval.py verify`). The run happens in detached headless sessions, so it does not depend on the chat that started it (relay ends a Slack turn after an hour).
 
-## Start it (the starting chat does only this)
+## Start it (the starting chat does only this, except a here run)
 
 1. Run the launcher and return. No interview, no plan, no waiting.
    - Terminal: `~/.agents/skills/autonomous/launch.sh <plan paths...>`.
    - Slack thread (a relay task): the same, plus `--slack-channel <channel> --slack-thread <thread ts>` of that thread, as relay gives them for `relay live say`. The final report then goes to that thread.
    - "autonomous" or `/autonomous` with no paths: `launch.sh` with no paths takes every plan under `~/.agents/tmp/plans` that verifies and still has an unticked step, and prints each plan it skipped with the reason.
+   - Here, in this chat ("autonomous here" or `/autonomous --here <plan paths>`, terminal only): `launch.sh --here <plan paths...>` verifies and records the run the same way but starts no session; it prints each group's prompt file, and this chat then follows them one after another as [run-prompt.md](run-prompt.md) "Here" says. It still never asks you anything once the plans are approved; you can ask it about progress at any time and it answers and carries on. The chat is recorded as the run's owner, so no-remote-writes and done-check hold it to the run's rules; run it in auto mode (Claude) or with approvals off (Codex, after trusting the hub hooks with `/hooks`), or a tool prompt would pause it. Not from Slack (relay ends a turn after an hour), so Slack runs stay headless.
 2. Reply with the run id it printed, plus each plan it printed as stopped or skipped and why, in one short message. In Slack, answer in the thread as relay says.
 
-Resume after a crash or a reboot: `launch.sh --resume <run id>`. It restarts only the groups with unfinished tasks and no live session; finished stages are skipped.
+Resume after a crash or a reboot: `launch.sh --resume <run id>`. It restarts only the groups with unfinished tasks and no live session; finished stages are skipped. For a here run it starts nothing: the chat that runs it becomes the run's owner (refused while the first chat is still open) and gets the prompts again.
 
 Status at any time: `python3 ~/.agents/skills/autonomous/run-state.py show ~/.agents/tmp/autonomous/<run id>`, or that folder's `report.md` once the run ends.
 
@@ -44,7 +45,7 @@ It writes `Approved: <date> <words>`, `Repo: <git toplevel>` and `Approved-sha25
 
 ## Guard
 
-The headless session runs with `--permission-mode bypassPermissions` (Claude) or `--dangerously-bypass-approvals-and-sandbox` (Codex, used only when claude is not installed), so it never stalls on a prompt. `hooks/bin/no-remote-writes` is its guard: a PreToolUse hook, run with `--fail-closed`, active only when `AGENTS_AUTONOMOUS_RUN` is set. It blocks git push, gh writes, write requests to remote hosts, publishing, ssh and remote copies, posting MCP tools and Artifact publishing, and allows read-only gh, local git, `relay notify` and `relay live say` to the run's own thread. Scripts that make their own HTTP calls are not caught; the run prompt forbids them.
+The headless session runs with `--permission-mode bypassPermissions` (Claude) or `--dangerously-bypass-approvals-and-sandbox` (Codex, used only when claude is not installed), so it never stalls on a prompt. `hooks/bin/no-remote-writes` is its guard: a PreToolUse hook, run with `--fail-closed`, active only when `AGENTS_AUTONOMOUS_RUN` is set. The hub also registers it for every Claude and Codex session, where it acts only for the chat that owns a live here run. It blocks git push, gh writes, write requests to remote hosts, publishing, ssh and remote copies, posting MCP tools and Artifact publishing, and allows read-only gh, local git, `relay notify` and `relay live say` to the run's own thread. Scripts that make their own HTTP calls are not caught; the run prompt forbids them.
 
 ## Files
 

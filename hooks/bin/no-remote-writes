@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Block remote writes in an autonomous run, before the tool call runs.
 
-Active only when AGENTS_AUTONOMOUS_RUN names the run directory (skills/autonomous/launch.sh sets it
-for the headless session and wires this hook with --fail-closed); any other session passes untouched.
+Active only in an autonomous run: when AGENTS_AUTONOMOUS_RUN names the run directory
+(skills/autonomous/launch.sh sets it for the headless session and wires this hook with --fail-closed),
+or when the event's session owns a live here run (launch.sh --here, run-state.py here_run_for). The
+hub registers it for every session for that second case; any other session passes untouched.
 
 Blocked in a shell command, including each part of a chain (`git status && git push`), command
 substitutions and `bash -c` or `eval` strings:
@@ -33,6 +35,7 @@ import re
 import sys
 
 guard = SourceFileLoader('git_guard', str(Path(__file__).with_name('git-guard'))).load_module()
+RUN_STATE = Path(__file__).resolve().parents[2] / 'skills' / 'autonomous' / 'run-state.py'
 
 SHELLS = {'bash', 'sh', 'zsh', 'dash', 'ksh'}
 WRAPPERS = guard.WRAPPERS | {'xargs', 'nice', 'caffeinate'}
@@ -207,10 +210,23 @@ def check_remote_copy(name, args):
     return None
 
 
+def autonomous_run(session_id):
+    """The run directory this session works for: the headless run's, or a live here run it owns."""
+    if os.environ.get('AGENTS_AUTONOMOUS_RUN'):
+        return os.environ['AGENTS_AUTONOMOUS_RUN']
+    root = Path(os.environ.get('AGENTS_AUTONOMOUS_ROOT') or Path.home() / '.agents/tmp/autonomous')
+    if not session_id or not (root / 'here-sessions').is_dir() or not RUN_STATE.is_file():
+        return None
+    return SourceFileLoader('run_state', str(RUN_STATE)).load_module().here_run_for(session_id, root)
+
+
+RUN_DIR = None
+
+
 def slack_thread():
     try:
-        state = json.loads((Path(os.environ['AGENTS_AUTONOMOUS_RUN']) / 'state.json').read_text())
-    except (OSError, ValueError, KeyError):
+        state = json.loads((Path(RUN_DIR) / 'state.json').read_text())
+    except (OSError, ValueError, TypeError):
         return None
     slack = state.get('slack') if isinstance(state, dict) else None
     return slack if isinstance(slack, dict) else None
@@ -301,7 +317,9 @@ def check_tool(tool):
 
 
 def verdict(event):
-    if not os.environ.get('AGENTS_AUTONOMOUS_RUN'):
+    global RUN_DIR
+    RUN_DIR = autonomous_run(event.get('session_id'))
+    if not RUN_DIR:
         return None
     tool = event.get('tool') or ''
     command = (event.get('input') or {}).get('command')

@@ -80,9 +80,11 @@ class NoRemoteWritesTests(unittest.TestCase):
     def slack(self, thread):
         (self.run_dir / 'state.json').write_text(json.dumps({'slack': thread}))
 
-    def verdict(self, command=None, tool='Bash', run=True):
-        event = {'event': 'before_tool', 'tool': tool, 'input': {'command': command} if command else {}}
-        env = {k: v for k, v in os.environ.items() if k != 'AGENTS_AUTONOMOUS_RUN'}
+    def verdict(self, command=None, tool='Bash', run=True, session=None, root=None):
+        event = {'event': 'before_tool', 'tool': tool, 'session_id': session,
+                 'input': {'command': command} if command else {}}
+        env = {k: v for k, v in os.environ.items() if k not in ('AGENTS_AUTONOMOUS_RUN', 'AGENTS_AUTONOMOUS_ROOT')}
+        env['AGENTS_AUTONOMOUS_ROOT'] = str(root or self.run_dir / 'no-runs')
         if run:
             env['AGENTS_AUTONOMOUS_RUN'] = str(self.run_dir)
         result = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(event), capture_output=True,
@@ -106,6 +108,23 @@ class NoRemoteWritesTests(unittest.TestCase):
     def test_inactive_outside_an_autonomous_run(self):
         self.assertIsNone(self.verdict('git push', run=False))
         self.assertIsNone(self.verdict(tool='mcp__claude_ai_Slack__slack_send_message', run=False))
+
+    def test_a_here_run_guards_only_the_chat_that_owns_it(self):
+        runs = self.run_dir / 'runs'
+        run_dir = runs / 'r1'
+        run_dir.mkdir(parents=True)
+        (run_dir / 'state.json').write_text(json.dumps({
+            'mode': 'here', 'slack': None, 'owner': {'session': 'chat-1', 'pid': os.getpid()},
+            'report_claimed': False, 'groups': [{'status': 'pending'}]}))
+        (runs / 'here-sessions').mkdir()
+        (runs / 'here-sessions' / 'chat-1').write_text(str(run_dir))
+        self.assertEqual(self.verdict('git push', run=False, session='chat-1', root=runs)['decision'], 'deny')
+        self.assertIsNone(self.verdict('relay notify "run done"', run=False, session='chat-1', root=runs))
+        self.assertIsNone(self.verdict('git push', run=False, session='chat-2', root=runs))
+        state = json.loads((run_dir / 'state.json').read_text())
+        state['owner']['pid'] = 999999  # the owning chat has closed
+        (run_dir / 'state.json').write_text(json.dumps(state))
+        self.assertIsNone(self.verdict('git push', run=False, session='chat-1', root=runs))
 
     def test_relay_live_say_only_in_the_runs_own_thread(self):
         say = 'relay live say --channel C1 --thread 17.5 --text done --file report.md'

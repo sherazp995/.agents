@@ -44,6 +44,7 @@ Plain characters only, so a chart looks the same in the chat, a terminal, an edi
 - Tag each box that differs. In the after chart: `NEW:` or `CHANGED:` at the start of the box text. In the today chart: `BUG:` on the box that goes wrong, `REMOVED:` on a box that will go away.
 - Keep charts narrow (about 72 characters) and short (about 12 boxes). Split a longer flow into several charts, each with a one-line caption.
 - Skip the charts only for a change with no flow at all (a copy fix, a config value). Say so in one line under the heading.
+- When the `archify` skill is installed (`~/.agents/skills/archify`), every plan also gets an archify diagram: of the same flows, today and after, or for a plan with no flow, of what it changes, made with that skill (run with `ARCHIFY_UPDATE_CHECK_DISABLED=1`) in `~/.agents/tmp/plans/.archify/`. Link its HTML from the Appendix under `### Diagram` and give the link when the plan is shown. The text charts stay: they read in any terminal and are what the plan is checked against.
 
 Example:
 

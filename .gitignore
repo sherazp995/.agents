@@ -3,6 +3,7 @@ backup/
 chats/
 handoffs/
 memory/
+workstreams/
 tmp/
 __pycache__/
 skills/synced/

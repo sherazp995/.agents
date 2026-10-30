@@ -73,8 +73,11 @@ hooks = [
   { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 75 },
   { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
+  { name = "no-remote-writes", event = "PreToolUse", kind = "command", matcher = "Bash|Monitor|mcp__.*|Artifact.*" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
   { name = "plan-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
+  { name = "workstream-context", event = "SessionStart", kind = "command", matcher = "", timeout = 10 },
+  { name = "workstream-check", event = "Stop", kind = "command", matcher = "", timeout = 10 },
 ]
 
 [[clients]]
@@ -101,8 +104,11 @@ hooks = [
   { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 75 },
   { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
+  { name = "no-remote-writes", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
   { name = "plan-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
+  { name = "workstream-context", event = "SessionStart", kind = "command", matcher = "", timeout = 10 },
+  { name = "workstream-check", event = "Stop", kind = "command", matcher = "", timeout = 10 },
 ]
 
 [[clients]]

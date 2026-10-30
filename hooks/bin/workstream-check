@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Stop: remind the agent once when it opened a workstream and recorded nothing since.
+
+Reads the normalized hook event (see ../adapters/run.py). The agents-hub CLI writes a receipt
+for each successful `workstream show`, `update` and `skip`, keyed by session; a refused update
+writes none. A workstream shown after its last update or skip is pending. The hook reminds about
+pending workstreams once per receipt position, never while a Stop hook already sent the agent
+back, and allows on any error.
+"""
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'hub'))
+
+from agents_hub import workstreams  # noqa: E402
+from agents_hub.paths import Paths  # noqa: E402
+
+
+def pending(receipts):
+    """Ids whose latest receipt is a show."""
+    latest = {}
+    for receipt in receipts:
+        latest[receipt['id']] = receipt['kind']
+    return sorted(i for i, kind in latest.items() if kind == 'show')
+
+
+def verdict(event, paths):
+    session = event.get('session_id')
+    if not session or event.get('stop_hook_active'):
+        return None
+    receipts = workstreams.receipts(paths, session)
+    ids = pending(receipts)
+    marker = paths.workstreams / '.hook-state' / workstreams.session_file_name(session)
+    if not ids or (marker.is_file() and marker.read_text().strip() == str(len(receipts))):
+        return None
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(len(receipts)))
+    names = ', '.join(ids)
+    return {'decision': 'deny', 'reason': (
+        f'You opened workstream {names} and recorded nothing since. If this session learned something '
+        '(a decision, a scope change, a PR or ticket state, a blocker), record it: `agents-hub workstream '
+        'update <id> --revision <N> --note ... --source ...`, with --verified only for facts you checked '
+        'live, and --state-file to replace stale lines in the state. If nothing changed, run '
+        '`agents-hub workstream skip <id> --reason ...`. Then finish.')}
+
+
+if __name__ == '__main__':
+    try:
+        result = verdict(json.loads(sys.stdin.read() or '{}'), Paths.from_env())
+    except Exception as error:  # a broken reminder never blocks a turn
+        print(f'workstream-check: {error}', file=sys.stderr)
+        result = None
+    if result:
+        print(json.dumps(result))

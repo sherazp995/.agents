@@ -40,7 +40,10 @@ class LaunchTests(unittest.TestCase):
         self.other = make_repo(self.root / 'other')
         self.env = dict(os.environ, PATH=f'{self.bin}:/usr/bin:/bin', FAKE_LOG=str(self.log),
                         AGENTS_AUTONOMOUS_ROOT=str(self.runs), AGENTS_PLANS_DIR=str(self.root / 'plans'))
-        self.env.pop('AUTONOMOUS_ENGINE', None)
+        for name in ('AUTONOMOUS_ENGINE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID', 'CODEX_THREAD_ID'):
+            self.env.pop(name, None)
+        # The chat a here run runs in: this test process stands in for the live Claude host.
+        self.chat = {'CLAUDE_CODE_SESSION_ID': 'chat-1', 'CLAUDE_PID': str(os.getpid())}
         self.addCleanup(self.kill_sessions)
 
     def fakes(self, *names):
@@ -169,6 +172,78 @@ class LaunchTests(unittest.TestCase):
         self.assertIn(f'run {run_dir.name} resumed', resumed.stdout)
         self.records('claude', 2)
 
+
+    def test_here_records_the_run_and_its_prompts_and_starts_no_session(self):
+        self.fakes('claude', 'relay')
+        result, _ = self.launch('--here', *self.plans(), **self.chat)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_dir = self.run_dir(result)
+        self.assertIn('ready to run here', result.stdout)
+        self.assertRegex(result.stdout, r'stopped bad \(.*bad\.md\): approval')
+        time.sleep(0.5)
+        self.assertEqual(list(self.log.glob('claude-*')), [])
+        state = json.loads((run_dir / 'state.json').read_text())
+        self.assertEqual(state['mode'], 'here')
+        self.assertEqual(state['engine'], 'claude')
+        self.assertEqual(state['owner'], {'session': 'chat-1', 'pid': os.getpid()})
+        self.assertEqual((self.runs / 'here-sessions' / 'chat-1').read_text(), str(run_dir))
+        self.assertTrue(all(g['pid'] is None for g in state['groups']))
+        prompt = (run_dir / 'group-0.prompt.txt').read_text()
+        self.assertIn('in the user\'s own chat', prompt)
+        self.assertIn('Tasks in order: a, c.', prompt)
+        self.assertIn(str(run_dir / 'group-0.prompt.txt'), result.stdout)
+
+    def test_here_runs_resume_here_and_refuse_slack(self):
+        self.fakes('claude', 'relay')
+        result, _ = self.launch('--here', write_plan(self.root / 'a.md', self.repo), **self.chat)
+        run_dir = self.run_dir(result)
+        resumed, _ = self.launch('--resume', run_dir.name, **self.chat)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn(str(run_dir / 'group-0.prompt.txt'), resumed.stdout)
+        time.sleep(0.5)
+        self.assertEqual(list(self.log.glob('claude-*')), [])
+        refused, _ = self.launch('--here', '--slack-channel', 'C1', '--slack-thread', '1.1',
+                                 write_plan(self.root / 'b.md', self.repo), **self.chat)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn('Slack', refused.stderr)
+
+    def test_here_needs_a_chat_and_no_headless_engine(self):
+        plan = write_plan(self.root / 'a.md', self.repo)
+        outside, _ = self.launch('--here', plan)
+        self.assertEqual(outside.returncode, 2)
+        self.assertIn('chat', outside.stderr)
+        self.assertFalse(self.runs.exists() and any(self.runs.glob('*/state.json')))
+        # No claude or codex on PATH: a here run never starts one, so it still launches.
+        result, _ = self.launch('--here', plan, **self.chat)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_codex_chat_owns_its_here_run_through_its_codex_process(self):
+        codex = self.root / 'host' / 'codex'  # a process named codex above the launcher, like the Codex host
+        codex.parent.mkdir()
+        codex.symlink_to(sys.executable)
+        script = 'import subprocess, sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)'
+        result = subprocess.run([str(codex), '-c', script, '/bin/bash', str(LAUNCHER), '--here',
+                                 str(write_plan(self.root / 'a.md', self.repo))], capture_output=True, text=True,
+                                env=dict(self.env, CODEX_THREAD_ID='thread-1'), timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = json.loads((self.run_dir(result) / 'state.json').read_text())
+        self.assertEqual(state['engine'], 'codex')
+        self.assertEqual(state['owner']['session'], 'thread-1')
+
+    def test_another_live_chat_cannot_take_a_here_run(self):
+        result, _ = self.launch('--here', write_plan(self.root / 'a.md', self.repo), **self.chat)
+        run_dir = self.run_dir(result)
+        taken, _ = self.launch('--resume', run_dir.name, CLAUDE_CODE_SESSION_ID='chat-2', CLAUDE_PID=str(os.getpid()))
+        self.assertEqual(taken.returncode, 1)
+        self.assertIn('still owns this run', taken.stderr)
+        state = json.loads((run_dir / 'state.json').read_text())
+        state['owner']['pid'] = 999999  # the first chat has closed
+        (run_dir / 'state.json').write_text(json.dumps(state))
+        moved, _ = self.launch('--resume', run_dir.name, CLAUDE_CODE_SESSION_ID='chat-2', CLAUDE_PID=str(os.getpid()))
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertEqual(json.loads((run_dir / 'state.json').read_text())['owner']['session'], 'chat-2')
+        self.assertFalse((self.runs / 'here-sessions' / 'chat-1').exists())
+        self.assertTrue((self.runs / 'here-sessions' / 'chat-2').exists())
 
 if __name__ == '__main__':
     unittest.main()
