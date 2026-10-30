@@ -76,6 +76,7 @@ hooks = [
   { name = "no-remote-writes", event = "PreToolUse", kind = "command", matcher = "Bash|Monitor|mcp__.*|Artifact.*" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
   { name = "plan-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
+  { name = "agents-sync", event = "SessionStart", kind = "command", matcher = "", timeout = 15 },
   { name = "workstream-context", event = "SessionStart", kind = "command", matcher = "", timeout = 10 },
   { name = "workstream-check", event = "Stop", kind = "command", matcher = "", timeout = 10 },
 ]
@@ -107,6 +108,7 @@ hooks = [
   { name = "no-remote-writes", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
   { name = "plan-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
+  { name = "agents-sync", event = "SessionStart", kind = "command", matcher = "", timeout = 15 },
   { name = "workstream-context", event = "SessionStart", kind = "command", matcher = "", timeout = 10 },
   { name = "workstream-check", event = "Stop", kind = "command", matcher = "", timeout = 10 },
 ]

@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""SessionStart: bring the agents repo (this checkout) up to date with origin/main.
+
+Reads the normalized hook event (see ../adapters/run.py) but needs nothing from it. Fetches
+origin, then fast forwards only when that is safe: on main, behind, no unpushed commits, and no
+local edit the update would overwrite. It never pushes, merges, rebases or stashes, whatever merge.autoStash says, and never overwrites an ignored file. One fetch a
+minute at most, guarded by a lock, so many sessions starting together fetch once. Prints
+{"context": ...} with one line when the repo moved or could not move; nothing when current.
+Any error prints nothing: a start hook must never get in the way of a session.
+
+AGENTS_SYNC_REPO overrides the checkout (tests).
+"""
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+REPO = Path(os.environ.get('AGENTS_SYNC_REPO') or Path(__file__).resolve().parents[2])
+FETCH_TIMEOUT = 8
+THROTTLE_SECONDS = 60
+# An update touching these changes what install.py writes into the clients.
+SETUP_PATHS = ('registry.toml', 'install.py', 'hooks/')
+
+
+def git(*args, timeout=10):
+    return subprocess.run(['git', *args], cwd=REPO, capture_output=True, text=True, timeout=timeout)
+
+
+def fetch():
+    """True when origin/main was fetched. The process group is killed at the time limit."""
+    env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+    process = subprocess.Popen(['git', 'fetch', '--quiet', 'origin', 'main'], cwd=REPO, env=env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        return process.wait(timeout=FETCH_TIMEOUT) == 0
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        return False
+
+
+def claim(git_dir):
+    """True when this start should fetch: no fetch in the last minute and no other start fetching."""
+    stamp, lock = git_dir / 'agents-sync.stamp', git_dir / 'agents-sync.lock'
+    if stamp.exists() and time.time() - stamp.stat().st_mtime < THROTTLE_SECONDS:
+        return False
+    if lock.exists() and time.time() - lock.stat().st_mtime > THROTTLE_SECONDS:
+        lock.unlink(missing_ok=True)  # left by a start that was killed
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL))
+    except FileExistsError:
+        return False
+    return True
+
+
+def count(revisions):
+    return int(git('rev-list', '--count', revisions).stdout.strip() or 0)
+
+
+def sync():
+    """The one line for the agent, or None."""
+    found = git('rev-parse', '--absolute-git-dir')
+    if found.returncode != 0:
+        return None
+    git_dir = Path(found.stdout.strip())
+    if not claim(git_dir):
+        return None
+    try:
+        fetched = fetch()
+        (git_dir / 'agents-sync.stamp').touch()
+    finally:
+        (git_dir / 'agents-sync.lock').unlink(missing_ok=True)
+    if not fetched:
+        return None
+    behind = count('HEAD..origin/main')
+    if behind == 0:
+        return None
+    branch = git('symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
+    if branch != 'main':
+        return f'~/.agents is on {branch or "a detached HEAD"}, not main, so it was not updated ({behind} new commits on origin/main).'
+    ahead = count('origin/main..HEAD')
+    if ahead:
+        return (f'~/.agents was not updated: it has {ahead} unpushed commit(s) and origin/main has {behind} new one(s). '
+                'Never push from here unless the user asks.')
+    before = git('rev-parse', '--short', 'HEAD').stdout.strip()
+    merged = git('merge', '--ff-only', '--no-autostash', '--no-overwrite-ignore', '--quiet', 'origin/main')
+    if merged.returncode != 0:
+        reason = (merged.stderr.strip().splitlines() or ['the fast forward failed'])[0]
+        return f'~/.agents was not updated ({behind} new commits on origin/main): {reason}'
+    after = git('rev-parse', '--short', 'HEAD').stdout.strip()
+    changed = git('diff', '--name-only', before, after).stdout.splitlines()
+    line = f'~/.agents was updated from {before} to {after} ({behind} commits).'
+    if any(path == setup or path.startswith(setup) for path in changed for setup in SETUP_PATHS):
+        line += ' Its client setup changed: run `python3 ~/.agents/install.py`.'
+    return line
+
+
+def main():
+    sys.stdin.read()
+    line = sync()
+    if line:
+        print(json.dumps({'context': line}))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as error:  # never block a session start
+        print(f'agents-sync: {error}', file=sys.stderr)
