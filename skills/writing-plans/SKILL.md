@@ -7,6 +7,8 @@ description: The one format for every implementation plan, written so the user o
 
 A plan is read by people before it is read by agents. The user, or a junior developer who has never seen the ticket, must be able to answer three questions from the first screen: what is wrong or missing, what will be different afterwards, and what do I need to decide. Proof for reviewers and builders goes lower down, in the appendix.
 
+Write every plan to its plan file (`~/.agents/tmp/plans/`, or plan mode's own plans folder) and show the user its summary, decisions and path, never a plan only in chat. The `plan-guard` hook delivers this skill the first time a session writes a plan and sends back missing or out-of-order sections.
+
 This skill sets the shape only. How a plan is made (interview, advisor opinions, approval, the plan file path) stays with `doing-substantial-work`, `rethink` and `interview-me`.
 
 ## The sections, in order

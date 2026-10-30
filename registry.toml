@@ -74,6 +74,7 @@ hooks = [
   { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
+  { name = "plan-guard", event = "PostToolUse", kind = "command", matcher = "Write|Edit|MultiEdit" },
 ]
 
 [[clients]]
@@ -101,6 +102,7 @@ hooks = [
   { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "spec-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
+  { name = "plan-guard", event = "PostToolUse", kind = "command", matcher = "apply_patch" },
 ]
 
 [[clients]]

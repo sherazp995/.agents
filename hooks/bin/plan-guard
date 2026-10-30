@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Enforce the writing-plans skill when an agent writes a plan.
+
+Reads the normalized hook event (see ../adapters/run.py) for a file-editing tool. A plan is a
+Markdown file in a plan folder: ~/.agents/tmp/plans/, or a client's own plans/ folder such as
+~/.claude/plans/, where Claude's plan mode writes its plan before ExitPlanMode. For a plan it:
+  * delivers the writing-plans skill the first time a session writes one (answer: {"context": ...});
+  * checks the whole plan, not just the edit, for the title, the Status: line and the required
+    sections in order, and reports what is missing (answer: {"decision": "deny", "reason": ...}).
+Judgment (plain wording, what the charts show, step quality) stays with the skill.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import time
+
+HUB = Path(__file__).resolve().parents[2]
+SKILL = HUB / 'skills' / 'writing-plans' / 'SKILL.md'
+SEEN = HUB / 'chats' / 'plan-guard-sessions'  # machine-local, git-ignored
+PLAN_FOLDERS = (HUB / 'tmp' / 'plans',)
+CLIENT_DIR = re.compile(r'^\.(claude|codex)\w*$')
+
+# The writing-plans sections that every plan has, in this order (references/template.md).
+REQUIRED = ['In short', 'Decisions for you', 'How it works today', 'How it will work', 'What changes',
+            'Confirmed intent', 'Steps', 'Tests', 'Checks', 'Risks and not doing']
+
+
+def is_plan_path(path, cwd):
+    full = Path(cwd, path).expanduser().resolve()
+    if full.suffix != '.md':
+        return False
+    if any(full.parent == folder.resolve() for folder in PLAN_FOLDERS):
+        return True
+    return full.parent.name == 'plans' and bool(CLIENT_DIR.match(full.parent.parent.name))
+
+
+def edited_paths(data):
+    if data.get('file_path'):
+        return [data['file_path']]
+    patch = data.get('input') or data.get('patch') or data.get('command') or ''
+    if isinstance(patch, list):
+        patch = '\n'.join(map(str, patch))
+    return [m.group(1).strip() for m in re.finditer(r'^\*\*\* (?:Add|Update) File: (.+)$', str(patch), re.M)]
+
+
+def problems_in(text):
+    """What the plan lacks against the writing-plans shape; [] when it has it all."""
+    lines = text.splitlines()
+    problems = []
+    if not lines or not lines[0].startswith('# '):
+        problems.append('the first line is not a "# <ticket>: <what changes>" title')
+    if not any(re.match(r'^-?\s*Status:', line) for line in lines[:15]):
+        problems.append('no "Status:" line under the title')
+    headings = [line[3:].strip() for line in lines if line.startswith('## ')]
+    missing = [name for name in REQUIRED if name not in headings]
+    if missing:
+        problems.append('missing sections: ' + ', '.join(f'"## {name}"' for name in missing))
+    present = [name for name in headings if name in REQUIRED]
+    expected = [name for name in REQUIRED if name in present]
+    if present != expected:
+        problems.append('sections out of order: ' + ' > '.join(present) + '; the order is ' + ' > '.join(expected))
+    return problems
+
+
+def first_time_in_session(session_id):
+    if not session_id:
+        return True
+    marker = SEEN / re.sub(r'[^A-Za-z0-9_.-]', '_', str(session_id))
+    if marker.exists():
+        return False
+    SEEN.mkdir(parents=True, exist_ok=True)
+    week_ago = time.time() - 7 * 86400
+    for old in SEEN.iterdir():  # one marker per session; old sessions are done
+        if old.stat().st_mtime < week_ago:
+            old.unlink(missing_ok=True)
+    marker.touch()
+    return True
+
+
+def plans_in(event):
+    """{path: text} for every plan file this event wrote."""
+    data = event.get('input') or {}
+    cwd = event.get('cwd') or os.getcwd()
+    plans = {}
+    for path in edited_paths(data):
+        full = Path(cwd, path).expanduser()
+        if is_plan_path(path, cwd) and full.is_file():  # the edit already ran: check the whole file
+            plans[str(path)] = full.read_text(errors='replace')
+    return plans
+
+
+def verdict(event):
+    plans = plans_in(event)
+    if not plans:
+        return None
+    result = {}
+    if first_time_in_session(event.get('session_id')) and SKILL.is_file():
+        result['context'] = ('You are writing a plan. Every plan uses this format (the writing-plans skill); '
+                             'write it to the plan file and show its summary and path for approval:\n\n'
+                             + SKILL.read_text())
+    problems = [f'{label}: {problem}' for label, text in plans.items() for problem in problems_in(text)]
+    if problems:
+        result.update(decision='deny', reason='Plan format (writing-plans skill): ' + '; '.join(problems)
+                      + '. Fix the plan before you show it or build from it.')
+    return result or None
+
+
+if __name__ == '__main__':
+    result = verdict(json.loads(sys.stdin.read() or '{}'))
+    if result:
+        print(json.dumps(result))
