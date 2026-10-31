@@ -7,7 +7,9 @@ exploration, work in progress, and turns with a background agent or workflow sti
 
 On a finished turn the hook blocks the Stop once and tells the agent to start a fresh checker with no
 context. The checker reports COMPLETION (every part of the user's request done) and CORRECTNESS (the
-check commands pass, the diff does what was claimed, nothing out of scope). The agent fixes what it
+check commands pass, the diff does what was claimed, nothing out of scope), RULES (rules 59 and 60: a
+change with no check that proves it, an ambiguous request built one way without saying so) and MEMORY
+(each saved memory that applies, followed or broken). The agent fixes what it
 reports and ends with `DONE-CHECK: PASS` or `DONE-CHECK: OPEN: <what is open>`, which the user reads
 in the chat. At that next Stop the hook lets the turn end. Only a last line that is exactly
 `DONE-CHECK: PASS` records the change (HEAD plus working tree) as passed, and a passed change is never
@@ -318,9 +320,11 @@ Start one fresh subagent (Claude Code: the Agent tool, general-purpose; Codex: a
 
 The checker is read-only and reports:
 - COMPLETION: each part of the request as DONE or MISSING, with file:line evidence.
-- CORRECTNESS: each check command rerun with its exit code; bugs or wrong files in the full diff; any claim the diff contradicts; changes no request or plan covers.{lessons_report}
+- CORRECTNESS: each check command rerun with its exit code; bugs or wrong files in the full diff; any claim the diff contradicts; changes no request or plan covers.
+- RULES (59 and 60 in ~/.agents/AGENTS-RULES.md): a code change with behaviour and no test or command that proves it, unless the final message says no check was possible and what was verified instead; a request part open to more than one reading that was built one way while the final message never names the reading taken.
+- MEMORY: run `agents-hub memory show --cwd {root}` and read only the memories whose one-line hook touches this request or change; each one that applies, FOLLOWED or BROKEN with file:line evidence.{lessons_report}
 
-Then fix every MISSING item and every real correctness finding, rerun the affected checks, and keep the commit rules (amend when git-guard says so).{lessons_fix} If a fix needs the user's decision, do not guess: end with OPEN and name it.{policy}
+Then fix every MISSING item, every real correctness finding, every RULES finding (add the missing check and run it, or name the reading taken) and every BROKEN memory, rerun the affected checks, and keep the commit rules (amend when git-guard says so).{lessons_fix} If a fix needs the user's decision, do not guess: end with OPEN and name it.{policy}
 End your final message with exactly one line:
 DONE-CHECK: PASS
 or

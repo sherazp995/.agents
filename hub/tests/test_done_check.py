@@ -89,7 +89,8 @@ class DoneCheckTest(unittest.TestCase):
     def test_a_done_claim_asks_for_one_completion_and_correctness_check_with_the_request(self):
         result = self.edit_and_claim()
         self.assertEqual(result['decision'], 'deny')
-        for words in ('COMPLETION', 'CORRECTNESS', 'add the export button', '`git diff HEAD`', 'DONE-CHECK: PASS'):
+        for words in ('COMPLETION', 'CORRECTNESS', 'RULES (59 and 60', f'memory show --cwd {self.repo.resolve()}',
+                      'add the export button', '`git diff HEAD`', 'DONE-CHECK: PASS'):
             self.assertIn(words, result['reason'])
 
     def test_a_commit_triggers_the_check_on_that_commit_even_without_a_claim(self):

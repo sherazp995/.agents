@@ -124,7 +124,30 @@ to use it.
   `hooks/prompts/<name>.md`. The installer replaces only hooks it wrote and
   lists any others it left alone.
 - **Learning:** the `learn` skill promotes recurring memories into skills.
+- **Workstreams:** `agents-hub workstream` keeps one shared, revision-checked
+  record per piece of work that spans many sessions or repos; the
+  `workstream-context` and `workstream-check` hooks show it at session start and
+  ask for an update at stop.
 - **Workflow:** substantial work follows the `doing-substantial-work` skill.
+
+### What the hooks do
+
+These run in Claude and Codex (Codex lacks `related-tests-snapshot`). When an
+agent stops or is blocked unexpectedly, one of these is usually why.
+
+| Hook | When | What it does |
+|---|---|---|
+| `agents-sync` | session start | fetches `~/.agents` and fast forwards `main` when it is safe; says so when it cannot. Commit local edits to this repo, or they block the update |
+| `git-guard` | before a shell command | enforces rules 43, 48 and 54: git run inside the repo (`cd`, not `git -C`), one-line commit messages, one unpushed commit per branch; a denial says what to run instead |
+| `no-remote-writes` | before a tool call | in an autonomous run only, blocks remote writes (`git push`, `gh` writes and the like); other sessions pass untouched |
+| `spec-guard` | after a test edit | delivers the `writing-specs` skill once and reports breaks a script can find |
+| `plan-guard` | after a plan file edit | delivers `writing-plans` and lists missing plan sections |
+| `related-tests` | at stop | runs only the tests for files changed this turn; a failure blocks the stop once |
+| `done-check` | at stop, when a task says it is done | makes the agent run a fresh checker for completion, correctness, rules 59 and 60, and saved memories, ending with `DONE-CHECK: PASS` or `OPEN` |
+| `workstream-context`, `workstream-check` | start and stop | show and update shared workstreams |
+
+Details for each are in `AGENTS-CONFIG.md` and at the top of its script in
+`hooks/bin/`.
 
 `memory/`, `history/`, `chats/`, `handoffs/`, `backup/`, `plans/` and
 `accounts.toml` are machine-local and never committed. `history/` and `memory/`
@@ -162,6 +185,20 @@ stay in Time Machine backups; the rebuildable `chats/` index does not.
   `config.toml` keys that are not listed (`projects` trust, `hooks.state`, the
   rest of `tui`), and download caches (`plugins/`). MCP servers stay with
   `mcp/servers.json`, written into each login's own config.
+
+## Optional pieces
+
+None of these is needed for the rules, skills and hooks to work.
+
+- **Third-party skills:** `brag`, `brag-slim` and `archify` are git-ignored, so
+  a fresh clone lacks them; `check.py` skips a missing one. `AGENTS.md` ("Third-party skills") says where each comes
+  from and how to install it.
+- **Relay:** a daemon that lets you message your local Claude Code sessions from
+  Slack and get notified by them (`relay notify`). It needs Postgres, Redis and
+  a Slack app; setup is in `relay/README.md`.
+- **Autonomous runs:** build plans you already approved, unattended, with
+  `skills/autonomous/launch.sh <plan paths>` (or `--here` in the current chat).
+  See `skills/autonomous/SKILL.md`.
 
 ## Per-project opt-ins
 

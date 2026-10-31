@@ -14,7 +14,7 @@ Your global rules are split across focused files to save context. Load each when
 
 **Testing (Rules 30–34, 49–53):** rules in the `writing-specs` skill, which the `spec-guard` hook delivers on the first test edit; the hook also reports the breaks a script can detect. → [`AGENTS-RULES.md#testing`](~/.agents/AGENTS-RULES.md#testing)
 
-**General (Rules 35–37, 55–56, 58):** delete dead code your change leaves, tickets for TODOs, explicit over clever, minimal surgical changes, official docs before unfamiliar APIs, save the lesson from every mistake and fix the instruction when it repeats. → [`AGENTS-RULES.md#general`](~/.agents/AGENTS-RULES.md#general)
+**General (Rules 35–37, 55–56, 58–60):** delete dead code your change leaves, tickets for TODOs, explicit over clever, minimal surgical changes, official docs before unfamiliar APIs, save the lesson from every mistake and fix the instruction when it repeats, say your assumptions instead of picking a reading silently, turn every task into a pass or fail check before coding. → [`AGENTS-RULES.md#general`](~/.agents/AGENTS-RULES.md#general)
 
 **Forms & Turbo (Rules 38–40):** default Turbo, one form + buttons, gate analytics. → [`AGENTS-RULES.md#forms--turbo-rails--hotwire`](~/.agents/AGENTS-RULES.md#forms--turbo-rails--hotwire)
 

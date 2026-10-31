@@ -210,6 +210,20 @@ A mistake is any of: the user corrects you, a review finds a bug you introduced,
 
 **Don't:** Apologise for pushing to the wrong branch and move on | **Do:** Save the lesson; if it happened before, add the check to the rule that should have caught it.
 
+### 59. Say your assumptions; never pick a reading silently
+This applies mid-task as well as at planning time (`interview-me`). When a request, a code path or a result can be read more than one way, name the readings and either ask or say which one you took and why. State the assumptions the change rests on in the report. When something does not add up (code that contradicts the request, a result you cannot explain), stop and name it instead of working around it. When a simpler approach than the one asked for exists, say so before building.
+
+**Why:** A wrong assumption carried silently through a task costs more than a question, and the user cannot correct a choice they never saw. (From Karpathy's "Think Before Coding", github.com/multica-ai/andrej-karpathy-skills.)
+
+**Don't:** Read "add validation" as server side only and ship it without a word | **Do:** "I took this as server side validation on `email`; say if you also want it in the form."
+
+### 60. Turn the task into a check before writing code
+Every task, small ones included, gets a pass or fail check chosen before the code: a bug gets a test that reproduces it, a feature gets the test or command that proves it, a refactor keeps the same tests passing before and after. For more than one step, pair each step with its check (`1. step → check: command`). The task is done when the check passes, not when the code looks right. When no check is possible, say so and name what you verified instead.
+
+**Why:** A clear check lets the work loop to done without asking; "make it work" needs the user to judge every attempt. (From Karpathy's "Goal-Driven Execution", same source as rule 59.)
+
+**Don't:** Edit the date formatter and report it fixed | **Do:** Add the failing spec for the reported date first, watch it fail, fix, watch it pass.
+
 ## Forms & Turbo (Rails + Hotwire)
 
 ### 38. Default to Turbo + `form_with` for state-changing actions
