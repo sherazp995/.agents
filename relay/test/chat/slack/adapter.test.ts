@@ -5,14 +5,13 @@ import type { AdapterCapabilities, ChatAction, ChatActionResult, ChatEvent } fro
 import { IntakeFailedError, sessionRefFor } from '../../../src/chat/contract.js'
 import { MARKDOWN_BLOCK_MAX_CHARS, SlackAdapter, composeThreadRef } from '../../../src/chat/slack/adapter.js'
 import type {
+  DirectCommandRequest,
   ApprovalInteractionRequest,
   SlackAdapterCreateOptions,
   SlackApiClient,
   SlackAuthIdentity,
   SlackBlockActionEnvelope,
   SlackBoltApp,
-  SlackCommandEnvelope,
-  SlackCommandListener,
   SlackEventEnvelope,
   SlackEventListener,
   SlackActionListener,
@@ -45,6 +44,7 @@ import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from '.
 import type { EngineSession } from '../../../src/sessions/discovery.js'
 import type { ConformanceAdapter } from '../conformance.js'
 import { runChatAdapterConformance } from '../conformance.js'
+import { OWNER_ONLY_REPLY } from '../../../src/tenancy/access.js'
 
 const BOT_USER_ID = 'UBOTLIVE'
 const WORKSPACE_ID = 'TRELAYWORKSPACE'
@@ -124,16 +124,6 @@ class StubBoltApp implements SlackBoltApp {
     this.listenersByActionId.set(actionId, listener)
   }
 
-  readonly commands = new Map<string, SlackCommandListener>()
-  command(commandName: string, listener: SlackCommandListener): void {
-    this.commands.set(commandName, listener)
-  }
-  /** Drives one registered slash command the way Slack itself would. */
-  async dispatchCommand(commandName: string, envelope: SlackCommandEnvelope): Promise<void> {
-    const listener = this.commands.get(commandName)
-    if (!listener) throw new Error(`no listener registered for command ${commandName}`)
-    await listener(envelope)
-  }
 
   view(callbackId: string, listener: SlackViewListener): void {
     this.listenersByCallbackId.set(callbackId, listener)
@@ -1642,6 +1632,24 @@ describe('SlackAdapter perform', () => {
     expect(apiClient.posted[2]?.blocks).toBeUndefined()
   })
 
+  it('a Markdown edit replaces the markdown block too, and a plain edit sends text only', async () => {
+    const apiClient = new StubSlackApiClient()
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      boltApp: new StubBoltApp(),
+      apiClient,
+      sleep: instantSleep,
+    })
+    await adapter.start(async () => {})
+
+    await adapter.perform({ kind: 'edit', ref: { channel: 'C1', message: '1.1' }, text: '**Step 2 of 3**', markdown: true })
+    await adapter.perform({ kind: 'edit', ref: { channel: 'C1', message: '1.1' }, text: 'Working (step 3)' })
+
+    expect(apiClient.updated).toEqual([
+      { channel: 'C1', ts: '1.1', text: '**Step 2 of 3**', blocks: [{ type: 'markdown', text: '**Step 2 of 3**' }] },
+      { channel: 'C1', ts: '1.1', text: 'Working (step 3)' },
+    ])
+  })
+
   it('post_approval_card posts its text with its blocks', async () => {
     const apiClient = new StubSlackApiClient()
     const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
@@ -2598,6 +2606,39 @@ describe('SlackAdapter approval interactions', () => {
  * failure-reporting wiring against stubs.
  */
 describe('SlackAdapter session attach (FR-ATT-5)', () => {
+  /** The session tools are owner-only, so these tests run as the owner UOPERATOR unless they say otherwise. */
+  const createOwnerAdapter: typeof createTestAdapter = (secrets, options) =>
+    createTestAdapter(secrets, { isOwner: async (platformUserId) => platformUserId === 'UOPERATOR', ...options })
+
+  it('refuses the "sessions" message and Attach from someone who is not an owner, listing and attaching nothing', async () => {
+    const boltApp = new StubBoltApp()
+    const apiClient = new StubSlackApiClient()
+    const attach = fakeAttach({ relaySessionId: 'relay-sess-1' })
+    let listed = 0
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
+      boltApp,
+      apiClient,
+      sleep: instantSleep,
+      resolvePrincipalId: async () => 'prn_member',
+      listRecentSessions: async () => {
+        listed += 1
+        return [buildSession()]
+      },
+      attachThreadToSession: attach.fn,
+    })
+    await adapter.start(async () => {})
+
+    await boltApp.dispatch('message', { ...sessionsCommandEnvelope(), event: { ...sessionsCommandEnvelope().event, user: 'UMEMBER' } })
+    await boltApp.dispatchAction(
+      SESSION_ATTACH_ACTION_ID,
+      sessionAttachButtonEnvelope({ engineSessionId: 'sess-1', engineCwd: '/x', channel: 'D1SESS', thread: '1.1' }, { user: { id: 'UMEMBER' } }),
+    )
+
+    expect(listed).toBe(0)
+    expect(attach.calls).toEqual([])
+    expect(apiClient.posted.map((post) => post.text)).toEqual([OWNER_ONLY_REPLY, OWNER_ONLY_REPLY])
+    await adapter.stop()
+  })
   function sessionsCommandEnvelope(overrides: Partial<{ channel: string; ts: string; threadTs: string }> = {}) {
     return {
       event: {
@@ -2682,7 +2723,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
   it('the "sessions" command, dispatched through the real listener, posts the rendered list into the same thread', async () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2707,7 +2748,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
   it('is case-insensitive and trims surrounding whitespace, matching isStopInstruction\'s own matching style', async () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2728,7 +2769,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
     const events: ChatEvent[] = []
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2751,7 +2792,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
   it('reports an honest "no sessions found" when listRecentSessions is left unwired (the default)', async () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), { boltApp, apiClient, sleep: instantSleep })
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), { boltApp, apiClient, sleep: instantSleep })
     await adapter.start(async () => {})
 
     await boltApp.dispatch('message', sessionsCommandEnvelope())
@@ -2764,7 +2805,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
   it('a listRecentSessions failure is reported into the thread, not only logged', async () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2781,38 +2822,11 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
     await adapter.stop()
   })
 
-  it('/sessions, dispatched as a real slash command, posts the picker at top level', async () => {
-    const boltApp = new StubBoltApp()
-    const apiClient = new StubSlackApiClient()
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
-      boltApp,
-      apiClient,
-      sleep: instantSleep,
-      listRecentSessions: async () => [buildSession()],
-    })
-    await adapter.start(async () => {})
-
-    await boltApp.dispatchCommand('/sessions', {
-      channel_id: 'D1SESS',
-      user_id: 'UOPERATOR',
-      text: '',
-    })
-
-    expect(apiClient.posted).toHaveLength(1)
-    // Top level, with no thread: a slash command has no thread of its own,
-    // and the card's own ts becomes the root the Attach click then reads
-    // off its envelope.
-    expect(apiClient.posted[0]?.channel).toBe('D1SESS')
-    expect(apiClient.posted[0]?.thread).toBeUndefined()
-    expect(JSON.stringify(apiClient.posted[0]?.blocks ?? [])).toContain('/Users/operator/project-a')
-    await adapter.stop()
-  })
-
   it('clicking Attach, dispatched through the real listener, calls attachThreadToSession with the decoded session and the resolved principal', async () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
     const attach = fakeAttach({ relaySessionId: 'relay-sess-1' })
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2851,7 +2865,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
     const attach = fakeAttach({ relaySessionId: 'relay-sess-2' })
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2885,7 +2899,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
     async () => {
       const boltApp = new StubBoltApp()
       const apiClient = new StubSlackApiClient()
-      const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
         boltApp,
         apiClient,
         sleep: instantSleep,
@@ -2920,7 +2934,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
     const attach = fakeAttach({ relaySessionId: 'relay-sess-1' })
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2956,7 +2970,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
   it('reports failure into the thread when attachThreadToSession is left unwired (the default)', async () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -2983,7 +2997,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
   it('reports failure into the thread when attachThreadToSession throws', async () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -3014,7 +3028,7 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
     const boltApp = new StubBoltApp()
     const apiClient = new StubSlackApiClient()
     const attach = fakeAttach({ relaySessionId: 'relay-sess-1' })
-    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
       boltApp,
       apiClient,
       sleep: instantSleep,
@@ -3037,3 +3051,96 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
   })
 })
 
+
+describe('SlackAdapter "direct" and "sessions" messages', () => {
+  function messageEnvelope(text: string, overrides: Partial<{ channel: string; threadTs: string }> = {}) {
+    return {
+      event: {
+        type: 'message',
+        channel: overrides.channel ?? 'D1DIRECT',
+        user: 'UOPERATOR',
+        text,
+        ts: '5000.000001',
+        ...(overrides.threadTs !== undefined ? { thread_ts: overrides.threadTs } : {}),
+      },
+      body: {},
+    }
+  }
+
+  async function startAdapter() {
+    const boltApp = new StubBoltApp()
+    const apiClient = new StubSlackApiClient()
+    const requests: DirectCommandRequest[] = []
+    const delivered: ChatEvent[] = []
+    let listed = 0
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      boltApp,
+      apiClient,
+      sleep: instantSleep,
+      isOwner: async () => true,
+      acceptThreadMentions: true,
+      listRecentSessions: async () => {
+        listed += 1
+        return []
+      },
+      onDirectCommand: async (request) => {
+        requests.push(request)
+        await request.post('started')
+      },
+    })
+    await adapter.start(async (event) => {
+      delivered.push(event)
+    })
+    return { boltApp, apiClient, requests, delivered, adapter, listedCount: () => listed }
+  }
+
+  it('starts a direct session from a DM, in that message\'s own thread', async () => {
+    const { boltApp, apiClient, requests, delivered, adapter } = await startAdapter()
+
+    await boltApp.dispatch('message', messageEnvelope('direct ~/project fix the build'))
+
+    expect(requests.map(({ channelId, userId, text, thread }) => ({ channelId, userId, text, thread }))).toEqual([
+      { channelId: 'D1DIRECT', userId: 'UOPERATOR', text: '~/project fix the build', thread: '5000.000001' },
+    ])
+    expect(apiClient.posted.map(({ channel, thread, text }) => ({ channel, thread, text }))).toEqual([
+      { channel: 'D1DIRECT', thread: '5000.000001', text: 'started' },
+    ])
+    expect(delivered).toEqual([])
+    await adapter.stop()
+  })
+
+  it('reads "@Relay direct" and "@Relay sessions" in a channel the way it reads them in a DM', async () => {
+    const { boltApp, requests, adapter, listedCount } = await startAdapter()
+
+    await boltApp.dispatch('app_mention', { event: { type: 'app_mention', channel: 'C1DIRECT', user: 'UOPERATOR', text: `<@${BOT_USER_ID}> direct`, ts: '5000.000001' }, body: {} })
+    await boltApp.dispatch('app_mention', { event: { type: 'app_mention', channel: 'C1DIRECT', user: 'UOPERATOR', text: `<@${BOT_USER_ID}> sessions`, ts: '5000.000002' }, body: {} })
+
+    expect(requests.map((request) => request.text)).toEqual([''])
+    expect(listedCount()).toBe(1)
+    await adapter.stop()
+  })
+
+  it('says direct sessions are not set up when no handler is wired, rather than ignoring the message', async () => {
+    const boltApp = new StubBoltApp()
+    const apiClient = new StubSlackApiClient()
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), { boltApp, apiClient, sleep: instantSleep })
+    await adapter.start(async () => {})
+
+    await boltApp.dispatch('message', messageEnvelope('direct'))
+
+    expect(apiClient.posted.map(({ thread, text }) => ({ thread, text }))).toEqual([
+      { thread: '5000.000001', text: 'Direct sessions are not configured on this Relay installation.' },
+    ])
+    await adapter.stop()
+  })
+
+  it('leaves "direct ..." inside an existing thread to that thread\'s task', async () => {
+    const { boltApp, requests, delivered, adapter } = await startAdapter()
+
+    await boltApp.dispatch('message', messageEnvelope('direct is fine, carry on', { threadTs: '4000.000001' }))
+
+    expect(requests).toEqual([])
+    expect(delivered).toHaveLength(1)
+    await adapter.stop()
+  })
+})

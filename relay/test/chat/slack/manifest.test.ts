@@ -92,7 +92,7 @@ describe('buildAppManifest', () => {
   })
 
   it('still requests exactly SLACK_BOT_SCOPES when other options are overridden, so an operator customising branding cannot accidentally widen scopes', () => {
-    const manifest = buildAppManifest({ appName: 'Custom', slashCommand: '/custom' }) as {
+    const manifest = buildAppManifest({ appName: 'Custom', description: 'Custom bot' }) as {
       oauth_config: { scopes: { bot: string[] } }
     }
     expect(manifest.oauth_config.scopes.bot).toEqual([...SLACK_BOT_SCOPES])

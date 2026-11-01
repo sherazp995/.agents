@@ -23,6 +23,7 @@ FETCH_TIMEOUT = 8
 THROTTLE_SECONDS = 60
 # An update touching these changes what install.py writes into the clients.
 SETUP_PATHS = ('registry.toml', 'install.py', 'hooks/')
+RELAY = REPO / 'relay'
 
 
 def git(*args, timeout=10):
@@ -96,14 +97,39 @@ def sync():
     line = f'~/.agents was updated from {before} to {after} ({behind} commits).'
     if any(path == setup or path.startswith(setup) for path in changed for setup in SETUP_PATHS):
         line += ' Its client setup changed: run `python3 ~/.agents/install.py`.'
+    if any(path.startswith('relay/') for path in changed) and rebuild_relay():
+        line += f' Relay changed, so it is rebuilding in the background (log: {RELAY / "tmp" / "update.log"}).'
     return line
+
+
+def rebuild_relay():
+    """Start relay-update detached, only where relay was installed (its packages exist); the
+    build takes minutes and a session start must not wait for it."""
+    update = RELAY / 'bin' / 'relay-update'
+    if not (RELAY / 'node_modules').is_dir() or not update.exists():
+        return False
+    subprocess.Popen([str(update)], cwd=RELAY, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    return True
+
+
+def relay_rebuild_failure():
+    """The line for a failed relay rebuild, said at every start until one passes, or None."""
+    try:
+        status = (RELAY / 'tmp' / 'update.status').read_text().strip()
+    except OSError:
+        return None
+    if not status.startswith('failed'):
+        return None
+    return (f'Relay\'s last rebuild failed ({status.removeprefix("failed ")}). The old build is still in use. See '
+            f'{RELAY / "tmp" / "update.log"}, fix it, then run `relay update`.')
 
 
 def main():
     sys.stdin.read()
-    line = sync()
-    if line:
-        print(json.dumps({'context': line}))
+    lines = [line for line in (sync(), relay_rebuild_failure()) if line]
+    if lines:
+        print(json.dumps({'context': ' '.join(lines)}))
 
 
 if __name__ == '__main__':

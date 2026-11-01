@@ -11,7 +11,7 @@ import type { Pool, PoolClient } from 'pg'
 import type { ResolveApprovalResult } from '../approvals/store.js'
 import type { ChatAction, ChatEvent, ChatRef } from '../chat/contract.js'
 import { SLACK_BOT_TOKEN_SECRET } from '../chat/slack/adapter.js'
-import type { RelayConfig } from '../config/schema.js'
+import type { ApprovalPolicy, RelayConfig } from '../config/schema.js'
 import { loadRepoRegistryIfPresent } from '../config/load.js'
 import type { OutboundDispatcher } from '../dispatch/outbound.js'
 import { HookBridgeServer } from '../engine/hook-bridge.js'
@@ -54,6 +54,8 @@ export type AutonomousRuntimeOptions = {
   repoRegistryPath: string
   /** The built relay root, holding dist/scripts/hook-pretooluse.js. */
   distRoot: string
+  /** policy.yaml's `approvals` section, for who may approve a remote write. */
+  approvalPolicy?: ApprovalPolicy
 }
 
 export type AutonomousRuntime = {
@@ -75,7 +77,12 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   }
 
   // --- the guard ---------------------------------------------------------------
-  const operationDeps = { outbox: dispatcher, receiptKey: options.receiptKey, approvalTimeoutMs: config.approval_timeout_ms }
+  const operationDeps = {
+    outbox: dispatcher,
+    receiptKey: options.receiptKey,
+    approvalTimeoutMs: config.approval_timeout_ms,
+    ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
+  }
   const guard = createAutonomousGuard({
     loadTask: (taskId) => loadTask(pool, taskId),
     isKillSwitchEngaged: killSwitchCheck(options.killSwitch),

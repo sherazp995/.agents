@@ -71,6 +71,7 @@ import { KillSwitchEngagedError, PostgresKillSwitchStore, createKillSwitch } fro
 import type { KillSwitch } from './killswitch.js'
 import { createRun, finishRun, findActiveRunForSession } from './runs/store.js'
 import { resolveWorkspaceId } from './tenancy/workspaces.js'
+import { memberRefusal, OWNER_ONLY_REPLY, platformUserIsOwner, principalIsOwner } from './tenancy/access.js'
 
 /**
  * How long a parked message waits for a live session to collect it before
@@ -173,6 +174,10 @@ export async function createProductionSlackAdapter(
       if (!resolvedWorkspaceId) return null
       return resolvePrincipal(pool, resolvedWorkspaceId, 'slack', platformUserId)
     },
+    isOwner: async (platformUserId) => {
+      if (!resolvedWorkspaceId) return false
+      return platformUserIsOwner(pool, resolvedWorkspaceId, 'slack', platformUserId)
+    },
     isKnownSession: async (threadRef) => {
       if (!resolvedWorkspaceId) return false
       return isKnownSessionQuery(pool, resolvedWorkspaceId, 'slack', threadRef)
@@ -189,12 +194,25 @@ export async function createProductionSlackAdapter(
     // above, and for the same reason it is safe: it is never called until
     // `adapter.start()` runs, well after `create` has returned and set it.
     listRecentSessions: listRecentEngineSessions,
-    // `/direct` (FR-ATT-30). The handler posts its own first message,
-    // because that message's ts becomes the thread this session lives in,
-    // and only here is it known what to record against it.
-    onDirectCommand: async ({ channelId, userId, text, post }) => {
+    // A "direct" message (FR-ATT-30). The session lives in that message's
+    // own thread, so every reply below lands where the request was made.
+    onDirectCommand: async ({ channelId, userId, text, thread, post }) => {
       if (!resolvedWorkspaceId) {
         await post('Relay is still starting up. Try again in a moment.')
+        return
+      }
+
+      // Resolved BEFORE the session starts: starting one already runs an
+      // unmediated Claude turn with this message, so only an owner may.
+      const principalId = await resolvePrincipal(pool, resolvedWorkspaceId, 'slack', userId)
+      if (principalId === null) {
+        // Unmapped senders get no reply, as in handleChatEvent.
+        options.log?.warn({ workspaceId: resolvedWorkspaceId, platformUserId: userId }, 'ignored a direct request from an unmapped principal')
+        return
+      }
+      if (!(await principalIsOwner(pool, resolvedWorkspaceId, principalId))) {
+        options.log?.warn({ workspaceId: resolvedWorkspaceId, principalId }, 'refused a direct request from a member')
+        await post(OWNER_ONLY_REPLY)
         return
       }
 
@@ -204,30 +222,19 @@ export async function createProductionSlackAdapter(
         return
       }
 
-      // Resolved BEFORE the session is posted about, so an unknown principal
-      // fails before a thread exists claiming to be a working session.
-      const principalId = await resolvePrincipal(pool, resolvedWorkspaceId, 'slack', userId)
-      if (principalId === null) {
-        // Unmapped senders get no reply, as in handleChatEvent.
-        options.log?.warn({ workspaceId: resolvedWorkspaceId, platformUserId: userId }, 'ignored /direct from an unmapped principal')
-        return
-      }
-
-      const posted = await post(outcome.text)
+      await post(outcome.text)
       const session = await findOrCreateSession(pool, {
         workspaceId: resolvedWorkspaceId,
         principalId,
         adapter: 'slack',
-        threadRef: composeThreadRef(channelId, posted.ts),
+        threadRef: composeThreadRef(channelId, thread),
       })
       await markSessionDirect(pool, session.id, outcome.sessionId, outcome.cwd)
 
-      // Posted INTO the thread the message above just created, so the
-      // session's first answer is where every later one will be. Scrubbed
-      // for the same reason every other reply path here is: this text came
-      // from a session that reads arbitrary files.
+      // Scrubbed for the same reason every other reply path here is: this
+      // text came from a session that reads arbitrary files.
       if (outcome.reply !== undefined && outcome.reply.trim() !== '') {
-        await post(scrubSecrets(outcome.reply), posted.ts)
+        await post(scrubSecrets(outcome.reply))
       }
     },
     attachThreadToSession: async (params) => {
@@ -727,7 +734,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
       platformUserId
         ? 'ignored an inbound event from an unmapped principal, per FR-CA-4; no session or run was ' +
             `created. To map this user, run: relay principals add --platform ${event.adapter} ` +
-            `--user ${platformUserId} --display-name "<name>" --role operator`
+            `--user ${platformUserId} --display-name "<name>" --role member`
         : 'ignored an inbound event from an unmapped principal, per FR-CA-4; no session or run was ' +
             'created, and the platform user id could not be read from the raw event',
     )
@@ -746,6 +753,20 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     throw new Error('handleChatEvent: sessionRefFor returned a ref with no thread; this should be impossible')
   }
   const threadRef = composeThreadRef(event.ref.channel, threadTs)
+
+  // A member acts only in a thread they started, and never in a direct or
+  // live chat thread: both reach the owner's machine unmediated
+  // (src/tenancy/access.ts). Checked before Stop, so a member cannot stop
+  // someone else's work either, and before any session or run row exists.
+  const existing = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
+  if (!(await principalIsOwner(pool, event.workspaceId, principalId))) {
+    const refusal = await memberRefusal(pool, event.workspaceId, principalId, existing)
+    if (refusal !== undefined) {
+      log.warn({ workspaceId: event.workspaceId, principalId, threadRef }, 'refused a member in a thread they may not use')
+      await dispatcher.perform({ kind: 'post', ref: replyRef, text: refusal })
+      return
+    }
+  }
 
   // Gate fix, Blocker 1: recognised, and fully handled, BEFORE a session or
   // a run is ever created. No amount of retrying this branch can produce a
@@ -791,9 +812,8 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     }
   }
 
-  // A thread attached to a Claude chat (/sessions Attach, `relay notify`)
+  // A thread attached to a Claude chat ("sessions" Attach, `relay notify`)
   // belongs to that chat while it is open: its messages park for it below.
-  const existing = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
   const liveAttached = existing !== null && existing.mode !== 'direct' && (await isLiveControlled(pool, existing.id, event.workspaceId))
 
   // With autonomous mode on, every other conversation the adapter accepts (a
@@ -825,7 +845,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // a direct thread already IS the session: parking would queue a message
   // for something that is not waiting on one.
   //
-  // The mode was decided once, when /direct created the thread, and is read
+  // The mode was decided once, when a "direct" message created the thread, and is read
   // rather than re-derived. A conversation whose execution model can change
   // halfway through is the one thing a conversation must not be.
   if (session.mode === 'direct' && session.engineSessionId !== null && session.engineCwd !== null) {
@@ -1288,6 +1308,7 @@ export async function startOrchestrator(
       config: options.autonomous,
       killSwitch,
       secrets,
+      ...(options.policy.approvals ? { approvalPolicy: options.policy.approvals } : {}),
     })
   }
 

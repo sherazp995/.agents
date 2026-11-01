@@ -27,8 +27,8 @@ export type SessionMode = (typeof SESSION_MODES)[number]
 
 export const DEFAULT_SESSION_MODE: SessionMode = 'governed'
 
-/** The slash command that puts a thread in direct mode, declared in docs/slack-app-manifest.yaml. */
-export const DIRECT_SLASH_COMMAND = '/direct'
+/** The first word of a message that puts its thread in direct mode (src/chat/slack/adapter.ts). */
+export const DIRECT_COMMAND_WORD = 'direct'
 
 export type DirectRequest = {
   /** Where the session runs. Absent means the configured default directory. */
@@ -38,13 +38,13 @@ export type DirectRequest = {
 }
 
 /**
- * Parses `/direct [directory] [message]`.
+ * Parses what follows `direct` in a `direct [directory] [message]` message.
  *
  * The directory is recognised by SHAPE rather than by position alone: a
  * leading `~` or `/` is a path and anything else is the start of the
  * message. Requiring a directory every time would make the common case
  * ("just talk to my machine") the awkward one, and guessing that the first
- * word is always a path would turn `/direct check the logs` into a session
+ * word is always a path would turn `direct check the logs` into a session
  * in a directory called "check".
  */
 export function parseDirectCommand(text: string): DirectRequest {
@@ -76,5 +76,5 @@ export function expandHome(path: string, home: string): string {
  * answer to what they asked.
  */
 export function renderModeHint(): string {
-  return 'Running this under Relay\'s policy, approvals and sandbox. Use `/direct` instead for a plain Claude Code session in a directory, which is faster and unmediated.'
+  return `Running this under Relay's policy, approvals and sandbox. Start a message with \`${DIRECT_COMMAND_WORD}\` instead for a plain Claude Code session in a directory, which is faster and unmediated.`
 }

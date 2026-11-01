@@ -13,3 +13,13 @@ budget:
   run_cap_usd: 5
   session_cap_usd: 20
   principal_day_cap_usd: 50
+# FR-APR-4 / FR-APR-5: who may approve at each risk tier, and whether
+# approving needs the typed confirmation. `owner` also matches the legacy
+# `operator` role. A tier left out here needs an owner (src/approvals/tier-policy.ts).
+approvals:
+  write:
+    required_roles: [owner]
+  sensitive:
+    required_roles: [owner]
+  irreversible:
+    required_roles: [owner]

@@ -11,17 +11,11 @@ export type BuildAppManifestOptions = {
   appName?: string
   description?: string
   backgroundColor?: string
-  slashCommand?: string
-  slashCommandDescription?: string
-  slashCommandUsageHint?: string
 }
 
 const DEFAULT_APP_NAME = 'Relay'
 const DEFAULT_DESCRIPTION = 'Chat driven computer use agent'
 const DEFAULT_BACKGROUND_COLOR = '#2c2d30'
-const DEFAULT_SLASH_COMMAND = '/relay'
-const DEFAULT_SLASH_COMMAND_DESCRIPTION = 'Run a Relay task'
-const DEFAULT_SLASH_COMMAND_USAGE_HINT = '[task]'
 
 /**
  * Builds the manifest object Slack's app creation flow accepts, either as
@@ -30,9 +24,8 @@ const DEFAULT_SLASH_COMMAND_USAGE_HINT = '[task]'
  * only the bot events Relay listens for, with no `request_url` field at
  * all, and `socket_mode_enabled` is always true.
  *
- * The slash command is declared only to legitimately justify requesting the
- * `commands` scope; it is not wired up to any behaviour until phase 2
- * (FR-SL-9).
+ * No slash commands: Slack gives each command name to one app per
+ * workspace, so a second Relay would take the first one's.
  */
 export function buildAppManifest(opts: BuildAppManifestOptions = {}): object {
   const appName = opts.appName ?? DEFAULT_APP_NAME
@@ -59,14 +52,6 @@ export function buildAppManifest(opts: BuildAppManifestOptions = {}): object {
         messages_tab_enabled: true,
         messages_tab_read_only_enabled: false,
       },
-      slash_commands: [
-        {
-          command: opts.slashCommand ?? DEFAULT_SLASH_COMMAND,
-          description: opts.slashCommandDescription ?? DEFAULT_SLASH_COMMAND_DESCRIPTION,
-          usage_hint: opts.slashCommandUsageHint ?? DEFAULT_SLASH_COMMAND_USAGE_HINT,
-          should_escape: false,
-        },
-      ],
     },
     oauth_config: {
       scopes: {

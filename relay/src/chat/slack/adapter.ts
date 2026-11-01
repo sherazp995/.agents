@@ -57,10 +57,16 @@ import {
 } from './session-attach.js'
 import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from './session-attach.js'
 import type { EngineSession } from '../../sessions/discovery.js'
-import { DIRECT_SLASH_COMMAND } from '../../live/session-mode.js'
+import { OWNER_ONLY_REPLY } from '../../tenancy/access.js'
+import { DIRECT_COMMAND_WORD } from '../../live/session-mode.js'
 
 /** Slack's cumulative limit for markdown blocks in one message; a longer agent post goes out as plain text. */
 export const MARKDOWN_BLOCK_MAX_CHARS = 12_000
+
+/** The markdown block an agent's Markdown post or edit carries, with `text` as the fallback; none when plain or too long. */
+function markdownBlocks(action: { text: string; markdown?: true }): { blocks?: SlackBlock[] } {
+  return action.markdown === true && action.text.length <= MARKDOWN_BLOCK_MAX_CHARS ? { blocks: [{ type: 'markdown', text: action.text }] } : {}
+}
 
 /** Keychain item names, per Task 1. Exported so the smoke script and tests can name them without repeating the literal. */
 export const SLACK_BOT_TOKEN_SECRET = 'relay-slack-bot-token'
@@ -108,11 +114,20 @@ const DEDUPE_WINDOW_SIZE = 500
  * Stop check it mirrors.
  */
 const SESSIONS_COMMAND_TEXT = 'sessions'
-/** The slash command Slack itself dispatches, declared in docs/slack-app-manifest.yaml. */
-export const SESSIONS_SLASH_COMMAND = '/sessions'
+/** A message's text without mentions of the bot, so "@Relay sessions" in a channel reads as "sessions", as it does in a DM. */
+function withoutBotMention(text: Untrusted<string>, botUserId: string): string {
+  return unwrapForAudit(text).split(`<@${botUserId}>`).join(' ').replace(new RegExp(`<@${botUserId}\\|[^>]*>`, 'g'), ' ').trim()
+}
 
-function isSessionsCommand(text: Untrusted<string>): boolean {
-  return unwrapForAudit(text).trim().toLowerCase() === SESSIONS_COMMAND_TEXT
+function isSessionsCommand(command: string): boolean {
+  return command.toLowerCase() === SESSIONS_COMMAND_TEXT
+}
+
+/** For "direct [directory] [message]", what follows the word ('' for a bare "direct"); undefined for any other message. */
+function directCommandArguments(command: string): string | undefined {
+  const [first = '', ...rest] = command.split(/\s+/)
+  if (first.toLowerCase() !== DIRECT_COMMAND_WORD) return undefined
+  return rest.join(' ')
 }
 /**
  * Bounds how long stop() waits for already-queued inbound deliveries to
@@ -246,25 +261,9 @@ export interface SlackBoltApp {
   event(eventType: string, listener: SlackEventListener): void
   action(actionId: string, listener: SlackActionListener): void
   view(callbackId: string, listener: SlackViewListener): void
-  /**
-   * A Slack slash command. Its own method rather than another `event()`
-   * type, matching how `action` and `view` are modelled: Bolt dispatches it
-   * on a different envelope shape and it must be acked within three
-   * seconds, like an interaction and unlike an event.
-   */
-  command(commandName: string, listener: SlackCommandListener): void
   start(): Promise<unknown>
   stop(): Promise<void>
 }
-
-/** What Slack sends for a slash command. `channel_id` and `user_id` are Slack's own, so they are trusted the way a click envelope's are, and never read back out of the command's free text. */
-export type SlackCommandEnvelope = {
-  channel_id: string
-  user_id: string
-  text: string
-  trigger_id?: string
-}
-export type SlackCommandListener = (envelope: SlackCommandEnvelope) => Promise<void>
 
 export type SlackAuthIdentity = { botUserId: string; platformTeamId: string }
 /** `blocks` is optional on post and update, added by this task: every existing caller (ProgressReporter, reports) posts plain text through src/chat/contract.ts's text-only ChatAction and never sets it; only this file's own approval-card rendering (bypassing ChatAction, since approvals are not wired into the general chat contract yet) ever supplies one. */
@@ -401,21 +400,6 @@ function createLiveSlackBoltApp(botToken: string, appToken: string): SlackBoltAp
         }
         if (raw.channel !== undefined) envelope.channel = raw.channel
         if (raw.message !== undefined) envelope.message = raw.message
-        if (raw.trigger_id !== undefined) envelope.trigger_id = raw.trigger_id
-        await listener(envelope)
-      })
-    },
-    command(commandName, listener) {
-      app.command(commandName, async ({ ack, command }) => {
-        // Acked immediately, per Bolt's three second budget, which can be
-        // shorter than the filesystem scan the listener performs.
-        await ack()
-        const raw = command as unknown as { channel_id: string; user_id: string; text?: string; trigger_id?: string }
-        const envelope: SlackCommandEnvelope = {
-          channel_id: raw.channel_id,
-          user_id: raw.user_id,
-          text: raw.text ?? '',
-        }
         if (raw.trigger_id !== undefined) envelope.trigger_id = raw.trigger_id
         await listener(envelope)
       })
@@ -652,10 +636,21 @@ export type ApprovalInteractionRequest = {
   editedArguments?: string
 }
 
+/** A "direct [directory] [message]" message: `thread` is the message's own thread, where the session's replies go. */
+export type DirectCommandRequest = {
+  channelId: string
+  userId: string
+  text: string
+  thread: string
+  post: (text: string) => Promise<{ ts: string }>
+}
+
 export type SlackAdapterOptions = {
   log?: Logger
   /** Maps a Slack user id to a Relay principal id, per FR-CA-4. Defaults to always-null (unmapped, fail closed), because SlackAdapter itself has no database dependency; a caller that wants real mapping passes principals.ts's resolvePrincipal bound to its own pool and workspace. */
   resolvePrincipalId?: (platformUserId: string) => Promise<string | null>
+  /** Whether a Slack user is an owner of this Relay (src/tenancy/access.ts), for the owner-only session tools: the "sessions" and "direct" messages and Attach. Defaults to always-false, fail closed like resolvePrincipalId. */
+  isOwner?: (platformUserId: string) => Promise<boolean>
   /**
    * Maps this adapter's Slack team id to a Relay workspace uuid, per PRE-3.
    * Resolved once, at construction, since one running SlackAdapter always
@@ -722,12 +717,12 @@ export type SlackAdapterOptions = {
    */
   listRecentSessions?: (limit: number) => Promise<readonly EngineSession[]>
   /**
-   * FR-ATT-30: handles `/direct`, which puts a thread on a plain Claude Code
+   * FR-ATT-30: handles a "direct" message, which puts its thread on a plain Claude Code
    * session instead of Relay's governed loop. Injected rather than
    * implemented here for the same reason listRecentSessions is: the adapter
    * carries messages, it does not decide what a session is.
    */
-  onDirectCommand?: (request: { channelId: string; userId: string; text: string; post: (text: string, thread?: string) => Promise<{ ts: string }> }) => Promise<void>
+  onDirectCommand?: (request: DirectCommandRequest) => Promise<void>
   /**
    * Binds the current thread to an existing Claude Code session (a folder
    * plus an engine session id), per FR-ATT-5 and §24's attach flow.
@@ -763,11 +758,12 @@ type SlackAdapterDeps = {
   platformTeamId: string
   capabilities: AdapterCapabilities
   resolvePrincipalId: (platformUserId: string) => Promise<string | null>
+  isOwner: (platformUserId: string) => Promise<boolean>
   isKnownSession: (threadRef: string) => Promise<boolean>
   acceptThreadMentions: boolean
   resolveApprovalInteraction: (request: ApprovalInteractionRequest) => Promise<ResolveApprovalResult | undefined>
   listRecentSessions: (limit: number) => Promise<readonly EngineSession[]>
-  onDirectCommand: (request: { channelId: string; userId: string; text: string; post: (text: string, thread?: string) => Promise<{ ts: string }> }) => Promise<void>
+  onDirectCommand: (request: DirectCommandRequest) => Promise<void>
   attachThreadToSession: (params: AttachThreadToSessionParams) => Promise<AttachThreadToSessionResult | undefined>
   sleep: (ms: number) => Promise<void>
   maxRateLimitRetries: number
@@ -799,11 +795,12 @@ export class SlackAdapter implements ChatAdapter {
   readonly #workspaceId: string
   readonly #platformTeamId: string
   readonly #resolvePrincipalId: (platformUserId: string) => Promise<string | null>
+  readonly #isOwner: (platformUserId: string) => Promise<boolean>
   readonly #isKnownSession: (threadRef: string) => Promise<boolean>
   readonly #acceptThreadMentions: boolean
   readonly #resolveApprovalInteraction: (request: ApprovalInteractionRequest) => Promise<ResolveApprovalResult | undefined>
   readonly #listRecentSessions: (limit: number) => Promise<readonly EngineSession[]>
-  readonly #onDirectCommand: (request: { channelId: string; userId: string; text: string; post: (text: string, thread?: string) => Promise<{ ts: string }> }) => Promise<void>
+  readonly #onDirectCommand: (request: DirectCommandRequest) => Promise<void>
   readonly #attachThreadToSession: (params: AttachThreadToSessionParams) => Promise<AttachThreadToSessionResult | undefined>
   readonly #sleep: (ms: number) => Promise<void>
   readonly #maxRateLimitRetries: number
@@ -830,6 +827,7 @@ export class SlackAdapter implements ChatAdapter {
     this.#platformTeamId = deps.platformTeamId
     this.capabilities = deps.capabilities
     this.#resolvePrincipalId = deps.resolvePrincipalId
+    this.#isOwner = deps.isOwner
     this.#isKnownSession = deps.isKnownSession
     this.#acceptThreadMentions = deps.acceptThreadMentions
     this.#resolveApprovalInteraction = deps.resolveApprovalInteraction
@@ -874,13 +872,13 @@ export class SlackAdapter implements ChatAdapter {
       platformTeamId: identity.platformTeamId,
       capabilities: { ...DEFAULT_SLACK_CAPABILITIES, ...options.capabilities },
       resolvePrincipalId: options.resolvePrincipalId ?? (async () => null),
+      isOwner: options.isOwner ?? (async () => false),
       isKnownSession: options.isKnownSession ?? (async () => false),
       acceptThreadMentions: options.acceptThreadMentions ?? false,
       resolveApprovalInteraction: options.resolveApprovalInteraction ?? (async () => undefined),
       listRecentSessions: options.listRecentSessions ?? (async () => []),
       // Refuses rather than silently doing nothing when no handler is
-      // wired: a slash command that acknowledges and then ignores you is
-      // the worst of both.
+      // wired: a command that is accepted and then ignored is the worst of both.
       onDirectCommand:
         options.onDirectCommand ??
         (async ({ post }) => {
@@ -960,58 +958,6 @@ export class SlackAdapter implements ChatAdapter {
     // value, per SESSION_ATTACH_ACTION_ID's own doc comment), same
     // deliberate bypass of #deliveryQueue/#dispatch as the approval
     // buttons above, for the same reason.
-    // FR-ATT-5: `/sessions`, a real Slack slash command, so it appears in
-    // Slack's own autocomplete. The plain-text `sessions` trigger stays
-    // alongside it: it needs no manifest change and therefore keeps working
-    // if the app is ever reinstalled without the command declared.
-    //
-    // A slash command has no thread of its own, so the list posts at top
-    // level and the card's own ts becomes the thread root. That is why the
-    // button handler reads channel and thread from the click envelope
-    // rather than from the button's value: at render time the thread does
-    // not exist yet.
-    this.#boltApp.command(SESSIONS_SLASH_COMMAND, async (envelope) => {
-      try {
-        const sessions = await this.#listRecentSessions(MAX_LISTED_SESSIONS)
-        const { text, blocks } = renderSessionList(sessions, envelope.channel_id, '')
-        await this.#apiClient.postMessage({ channel: envelope.channel_id, text, blocks })
-      } catch (error) {
-        this.#log?.error({ err: error }, 'SlackAdapter: /sessions failed')
-        const { text, blocks } = renderAttachFailure('could not list sessions right now')
-        await this.#apiClient.postMessage({ channel: envelope.channel_id, text, blocks }).catch(() => {})
-      }
-    })
-
-    // The thread a direct session lives in is the message this posts, so the
-    // handler returns text and this posts it: the command envelope has no
-    // thread of its own, exactly as /sessions does not.
-    this.#boltApp.command(DIRECT_SLASH_COMMAND, async (envelope) => {
-      try {
-        // The handler posts, because the ts of its FIRST message becomes the
-        // thread this session lives in, and only the handler knows what to
-        // record against it.
-        await this.#onDirectCommand({
-          channelId: envelope.channel_id,
-          userId: envelope.user_id,
-          text: envelope.text ?? '',
-          // `thread` is what makes the session's later replies land where
-          // its first message did. Without it every reply posts at channel
-          // top level, which reads as a broken thread rather than a session.
-          post: (text: string, thread?: string) =>
-            this.#apiClient.postMessage({
-              channel: envelope.channel_id,
-              text,
-              ...(thread === undefined ? {} : { thread }),
-            }),
-        })
-      } catch (error) {
-        this.#log?.error({ err: error }, 'SlackAdapter: /direct failed')
-        await this.#apiClient
-          .postMessage({ channel: envelope.channel_id, text: 'Could not start a direct session. Check `relay doctor`.' })
-          .catch(() => {})
-      }
-    })
-
     this.#boltApp.action(SESSION_ATTACH_ACTION_ID, async (envelope) => {
       await this.#handleSessionAttachButton(envelope)
     })
@@ -1075,9 +1021,7 @@ export class SlackAdapter implements ChatAdapter {
           text: action.text,
           ...(action.ref.thread !== undefined ? { thread: action.ref.thread } : {}),
           ...(action.kind === 'post_approval_card' ? { blocks: action.blocks } : {}),
-          ...(action.kind === 'post' && action.markdown === true && action.text.length <= MARKDOWN_BLOCK_MAX_CHARS
-            ? { blocks: [{ type: 'markdown', text: action.text }] }
-            : {}),
+          ...(action.kind === 'post' ? markdownBlocks(action) : {}),
         }),
       )
       const ref: ChatRef = { channel: result.channel ?? action.ref.channel, message: result.ts }
@@ -1087,7 +1031,7 @@ export class SlackAdapter implements ChatAdapter {
 
     if (action.kind === 'edit') {
       await this.#callApi(() =>
-        this.#apiClient.updateMessage({ channel: action.ref.channel, ts: action.ref.message, text: action.text }),
+        this.#apiClient.updateMessage({ channel: action.ref.channel, ts: action.ref.message, text: action.text, ...markdownBlocks(action) }),
       )
       return { ref: action.ref }
     }
@@ -1246,9 +1190,20 @@ export class SlackAdapter implements ChatAdapter {
     // this one differently for no reason. No #handler gate is needed
     // either: this branch never calls the orchestrator's handler at all, so
     // there is nothing for a missing #handler to leave undelivered.
-    if (isSessionsCommand(chatEvent.text)) {
+    const command = withoutBotMention(chatEvent.text, this.#botUserId)
+    if (isSessionsCommand(command)) {
       this.#recentEvents.add(dedupeKey)
-      await this.#handleSessionsCommand(chatEvent)
+      await this.#handleSessionsCommand(chatEvent, typeof event.user === 'string' ? event.user : undefined)
+      return
+    }
+
+    // FR-ATT-30's "direct", only on a message that starts a thread: inside
+    // an existing thread the same words are part of that thread's task.
+    const directArguments = chatEvent.kind === 'message' ? directCommandArguments(command) : undefined
+    if (directArguments !== undefined) {
+      this.#recentEvents.add(dedupeKey)
+      if (typeof event.user !== 'string') return
+      await this.#handleDirectCommand(chatEvent.ref.channel, ts, event.user, directArguments)
       return
     }
 
@@ -1440,7 +1395,18 @@ export class SlackAdapter implements ChatAdapter {
    * operator asked for something and deserves to know it did not work,
    * not silence indistinguishable from Relay ignoring them.
    */
-  async #handleSessionsCommand(chatEvent: ChatEvent): Promise<void> {
+  /** Starts a direct session in the thread of the message that asked for it; the owner check is the handler's. */
+  async #handleDirectCommand(channel: string, thread: string, userId: string, text: string): Promise<void> {
+    const post = (message: string) => this.#apiClient.postMessage({ channel, thread, text: message })
+    try {
+      await this.#onDirectCommand({ channelId: channel, userId, text, thread, post })
+    } catch (error) {
+      this.#log?.error({ err: error }, 'SlackAdapter: direct failed')
+      await post('Could not start a direct session. Check `relay doctor`.').catch(() => {})
+    }
+  }
+
+  async #handleSessionsCommand(chatEvent: ChatEvent, platformUserId: string | undefined): Promise<void> {
     const channel = chatEvent.ref.channel
     const thread = chatEvent.ref.thread ?? chatEvent.ref.message
     if (thread === undefined) {
@@ -1448,6 +1414,11 @@ export class SlackAdapter implements ChatAdapter {
       return
     }
     try {
+      if (platformUserId === undefined || !(await this.#isOwner(platformUserId))) {
+        this.#log?.warn({ platformUserId }, 'SlackAdapter: refused a sessions message from someone who is not an owner')
+        await this.#apiClient.postMessage({ channel, thread, text: OWNER_ONLY_REPLY })
+        return
+      }
       const sessions = await this.#listRecentSessions(MAX_LISTED_SESSIONS)
       const { text, blocks } = renderSessionList(sessions, channel, thread)
       await this.#apiClient.postMessage({ channel, thread, text, blocks })
@@ -1518,6 +1489,11 @@ export class SlackAdapter implements ChatAdapter {
       if (principalId === null) {
         // Unmapped senders get no reply anywhere; the log names them for `relay principals add`.
         this.#log?.warn({ platformUserId: envelope.user.id }, 'SlackAdapter: ignored a session attach click from an unmapped principal')
+        return
+      }
+      if (!(await this.#isOwner(envelope.user.id))) {
+        this.#log?.warn({ platformUserId: envelope.user.id }, 'SlackAdapter: refused a session attach click from a member')
+        await this.#apiClient.postMessage({ channel, thread, text: OWNER_ONLY_REPLY })
         return
       }
 

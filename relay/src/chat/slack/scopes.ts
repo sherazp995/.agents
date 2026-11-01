@@ -22,7 +22,6 @@ export const SLACK_BOT_SCOPES = [
   'files:write',
   'reactions:read',
   'reactions:write',
-  'commands',
 ] as const
 
 /** One scope from the declared minimum set. */

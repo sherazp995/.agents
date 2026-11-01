@@ -7,9 +7,14 @@
  * database URL becomes a keystore reference to a `relay_app` role whose
  * password exists only in the keystore.
  *
+ * On Linux the same commands use the freedesktop Secret Service through
+ * `secret-tool` (src/secrets/libsecret.ts). It has no per-program access
+ * list, so there is no helper and nothing to recreate: any process running
+ * as the operator can read relay's items there, and migrate says so.
+ *
  * Values never pass through argv (the process table is world readable),
- * stdout, or an error message: they go to the helper on stdin, and every
- * report line names items, never values.
+ * stdout, or an error message: they go to the helper or `secret-tool` on
+ * stdin, and every report line names items, never values.
  */
 
 import { execFile } from 'node:child_process'
@@ -30,6 +35,14 @@ import {
   type KeychainItemStatus,
   keychainItemStatus,
 } from '../secrets/keychain.js'
+import {
+  runSecretTool,
+  type SecretToolRunner,
+  secretToolClear,
+  secretToolLookup,
+  secretToolStore,
+} from '../secrets/libsecret.js'
+import { registerSecretValue } from '../secrets/scrubber.js'
 
 export const APP_ROLE = 'relay_app'
 
@@ -56,6 +69,10 @@ export type SecretsCliDependencies = {
   readonly security?: ExecFileFn
   readonly pathExists?: (path: string) => boolean
   readonly randomSecret?: (bytes: number) => string
+  /** Picks the keystore: darwin uses the helper and the Keychain, linux the Secret Service. Defaults to process.platform. */
+  readonly platform?: NodeJS.Platform
+  /** Runs `secret-tool` on Linux with `input` on stdin. */
+  readonly secretTool?: SecretToolRunner
 }
 
 export type SecretsResult = { readonly report: string; readonly exitCode: number }
@@ -84,41 +101,18 @@ function holdingName(name: string): string {
   return `${name}.relay-migrating`
 }
 
-class SecretStore {
-  readonly #deps: SecretsCliDependencies
-  readonly #run: NonNullable<SecretsCliDependencies['runHelper']>
-  readonly #security: ExecFileFn
+/** "present" is a Secret Service item, which has no access list to be relay-only or shared. */
+type ItemStatus = KeychainItemStatus | 'present'
 
-  constructor(deps: SecretsCliDependencies) {
-    this.#deps = deps
-    this.#run = deps.runHelper ?? runHelperProcess
-    this.#security = deps.security ?? securityExec
-  }
-
-  status(name: string): Promise<KeychainItemStatus> {
-    return keychainItemStatus(name, this.#deps.helperPath, async (file, args) => {
-      const result = await this.#run(file, args)
-      if (result.exitCode !== 0) throw new Error(`relay-secrets status ${name} exited ${result.exitCode}`)
-      return result
-    })
-  }
-
-  /** Creates the item with the helper-only access list. Never replaces one. */
-  async create(name: string, value: string): Promise<void> {
-    const result = await this.#run(this.#deps.helperPath, ['set', name], value)
-    if (result.exitCode === HELPER_EXIT_EXISTS) throw new Error(`${name} already exists in the keychain`)
-    if (result.exitCode !== 0) throw new Error(`relay-secrets could not store ${name} (exit ${result.exitCode})`)
-  }
-
-  /** Through `security`, so macOS asks the operator when the item's access list does not name it. */
-  async delete(name: string): Promise<void> {
-    await this.#security('/usr/bin/security', ['delete-generic-password', '-s', name])
-  }
-
-  /** Through `security`, which raises a keychain dialog for the operator on a helper-owned item. */
-  read(name: string): Promise<string> {
-    return new KeychainSecretProvider(this.#security).get(name)
-  }
+abstract class SecretStore {
+  /** Appended to a successful `secrets set` report. */
+  abstract readonly storedNote: string
+  abstract status(name: string): Promise<ItemStatus>
+  /** Creates the item. Never replaces one. */
+  abstract create(name: string, value: string): Promise<void>
+  abstract delete(name: string): Promise<void>
+  abstract read(name: string): Promise<string>
+  abstract replace(name: string, value: string): Promise<void>
 
   /**
    * Finishes a replace an earlier run left part way. With `name` gone and
@@ -133,13 +127,52 @@ class SecretStore {
     await this.delete(holding)
     return true
   }
+}
+
+class HelperSecretStore extends SecretStore {
+  readonly storedNote = 'only relay-secrets can read it.'
+  readonly #deps: SecretsCliDependencies
+  readonly #run: NonNullable<SecretsCliDependencies['runHelper']>
+  readonly #security: ExecFileFn
+
+  constructor(deps: SecretsCliDependencies) {
+    super()
+    this.#deps = deps
+    this.#run = deps.runHelper ?? runHelperProcess
+    this.#security = deps.security ?? securityExec
+  }
+
+  override status(name: string): Promise<KeychainItemStatus> {
+    return keychainItemStatus(name, this.#deps.helperPath, async (file, args) => {
+      const result = await this.#run(file, args)
+      if (result.exitCode !== 0) throw new Error(`relay-secrets status ${name} exited ${result.exitCode}`)
+      return result
+    })
+  }
+
+  /** Creates the item with the helper-only access list. Never replaces one. */
+  override async create(name: string, value: string): Promise<void> {
+    const result = await this.#run(this.#deps.helperPath, ['set', name], value)
+    if (result.exitCode === HELPER_EXIT_EXISTS) throw new Error(`${name} already exists in the keychain`)
+    if (result.exitCode !== 0) throw new Error(`relay-secrets could not store ${name} (exit ${result.exitCode})`)
+  }
+
+  /** Through `security`, so macOS asks the operator when the item's access list does not name it. */
+  override async delete(name: string): Promise<void> {
+    await this.#security('/usr/bin/security', ['delete-generic-password', '-s', name])
+  }
+
+  /** Through `security`, which raises a keychain dialog for the operator on a helper-owned item. */
+  override read(name: string): Promise<string> {
+    return new KeychainSecretProvider(this.#security).get(name)
+  }
 
   /**
    * Replaces an item without a moment where its value exists nowhere: a
    * copy goes to `<name>.relay-migrating` first and is removed last, so a
    * failure part way leaves that copy, which `recover` restores next run.
    */
-  async replace(name: string, value: string): Promise<void> {
+  override async replace(name: string, value: string): Promise<void> {
     await this.recover(name)
     if ((await this.status(name)) === 'missing') {
       await this.create(name, value)
@@ -157,9 +190,57 @@ class SecretStore {
   }
 }
 
+/**
+ * The Secret Service through `secret-tool`. `store` overwrites an item with
+ * the same attributes in one call, so a replace needs no holding copy; it
+ * still finishes one a macOS-style run might have left.
+ */
+class LibSecretStore extends SecretStore {
+  readonly storedNote = 'any process running as this user can read it (the Secret Service has no per-program access list).'
+  readonly #run: SecretToolRunner
+
+  constructor(deps: SecretsCliDependencies) {
+    super()
+    this.#run = deps.secretTool ?? runSecretTool
+  }
+
+  override async status(name: string): Promise<ItemStatus> {
+    return (await secretToolLookup(this.#run, name)) === undefined ? 'missing' : 'present'
+  }
+
+  override async create(name: string, value: string): Promise<void> {
+    if ((await this.status(name)) !== 'missing') throw new Error(`${name} already exists in the Secret Service`)
+    await secretToolStore(this.#run, name, value)
+  }
+
+  override delete(name: string): Promise<void> {
+    return secretToolClear(this.#run, name)
+  }
+
+  override async read(name: string): Promise<string> {
+    const value = await secretToolLookup(this.#run, name)
+    if (value === undefined) throw new Error(`${name} is not in the Secret Service`)
+    registerSecretValue(value)
+    return value
+  }
+
+  override async replace(name: string, value: string): Promise<void> {
+    await this.recover(name)
+    await secretToolStore(this.#run, name, value)
+  }
+}
+
 function helperMissing(deps: SecretsCliDependencies): SecretsResult | undefined {
   if ((deps.pathExists ?? existsSync)(deps.helperPath)) return undefined
   return { report: `${deps.helperPath} does not exist. Run \`relay install-service\`, which builds it.`, exitCode: 1 }
+}
+
+/** The keystore for this platform, or the report refusing to go on. */
+function storeFor(deps: SecretsCliDependencies): SecretStore | SecretsResult {
+  const platform = deps.platform ?? process.platform
+  if (platform === 'darwin') return helperMissing(deps) ?? new HelperSecretStore(deps)
+  if (platform === 'linux') return new LibSecretStore(deps)
+  return { report: `relay secrets supports macOS (Keychain) and Linux (Secret Service), not ${platform}.`, exitCode: 1 }
 }
 
 /** `relay secrets set <name>`: the value comes from stdin and goes to the helper on stdin. */
@@ -170,10 +251,9 @@ export async function runSecretsSet(
   if (!isKeystoreItemName(options.name)) {
     return { report: `"${options.name}" is not a keystore item name: use letters, digits, dot, underscore and dash.`, exitCode: 1 }
   }
-  const missing = helperMissing(deps)
-  if (missing) return missing
+  const store = storeFor(deps)
+  if (!(store instanceof SecretStore)) return store
   if (options.value === '') return { report: 'No value arrived on stdin; nothing was stored.', exitCode: 1 }
-  const store = new SecretStore(deps)
   try {
     const status = await store.status(options.name)
     if (status !== 'missing' && !options.replace) {
@@ -183,7 +263,7 @@ export async function runSecretsSet(
   } catch (error) {
     return { report: `relay secrets set failed: ${(error as Error).message}`, exitCode: 1 }
   }
-  return { report: `Stored ${options.name}; only relay-secrets can read it.`, exitCode: 0 }
+  return { report: `Stored ${options.name}; ${store.storedNote}`, exitCode: 0 }
 }
 
 function assertRoleName(role: string): void {
@@ -295,9 +375,8 @@ export type MigrateOptions = {
  * again only finishes what an earlier run left; it never prints a value.
  */
 export async function runSecretsMigrate(options: MigrateOptions, deps: SecretsCliDependencies): Promise<SecretsResult> {
-  const missing = helperMissing(deps)
-  if (missing) return missing
-  const store = new SecretStore(deps)
+  const store = storeFor(deps)
+  if (!(store instanceof SecretStore)) return store
   const random = deps.randomSecret ?? ((bytes: number) => randomBytes(bytes).toString('hex'))
   const lines: string[] = []
 
@@ -333,6 +412,12 @@ export async function runSecretsMigrate(options: MigrateOptions, deps: SecretsCl
       )
     }
 
+    // Only Keychain items have an access list to narrow.
+    if (store instanceof LibSecretStore) {
+      lines.push(
+        "The Secret Service has no per-program access list, so any process running as this user can read relay's items.",
+      )
+    }
     for (const name of RELAY_KEYCHAIN_ITEMS) {
       const status = await store.status(name)
       if (status !== 'shared') continue

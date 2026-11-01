@@ -23,6 +23,13 @@
  * (Ctrl-C, `relay stop`, a deliberate shutdown) exits zero and STAYS
  * stopped; only a failure exit is restarted. A supervisor that fights the
  * operator when they are trying to stop something is worse than none.
+ *
+ * ON LINUX the same supervisor is a systemd user unit with
+ * `Restart=on-failure`, which has the same clean-stop-stays-stopped meaning.
+ * A user unit, not a system one, because the daemon reads its secrets from
+ * the login keyring, which only unlocks when the operator logs in. There is
+ * no relay-secrets helper to build there: that helper exists for the macOS
+ * keychain's per-program access list, and libsecret has no such list.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -37,8 +44,15 @@ export const SERVICE_LABEL = 'com.relay.orchestrator'
 
 export type ServiceResult = { readonly report: string; readonly exitCode: number }
 
+/** The systemd user unit's name; `systemctl --user stop relay` finds it by this. */
+export const SYSTEMD_UNIT = 'relay.service'
+
 export function servicePlistPath(home = homedir()): string {
   return join(home, 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`)
+}
+
+export function serviceUnitPath(home = homedir()): string {
+  return join(home, '.config', 'systemd', 'user', SYSTEMD_UNIT)
 }
 
 /** XML escaping, because a path can legitimately contain `&` and an unescaped one makes the plist unparseable. */
@@ -110,6 +124,65 @@ ${env}</dict>
 `
 }
 
+export type SystemdUnitOptions = {
+  readonly nodePath: string
+  readonly scriptPath: string
+  readonly workingDirectory: string
+  readonly logPath: string
+  readonly relayHome: string
+  /** systemd starts user units with its own short PATH; this one holds the CLIs relay spawns by name. */
+  readonly path: string
+}
+
+/**
+ * One value made safe for a unit file. A newline would end the directive
+ * and start another, so it is refused rather than escaped. `%` starts a
+ * specifier in every directive, so it is doubled.
+ */
+function systemdValue(value: string): string {
+  if (/[\r\n]/.test(value)) throw new Error(`a systemd unit value cannot hold a newline: ${JSON.stringify(value)}`)
+  return value.replace(/%/g, '%%')
+}
+
+/** A double quoted word, so a value with spaces stays one word; backslash and quote are C style escaped. */
+function systemdQuoted(value: string): string {
+  return `"${systemdValue(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+/** ExecStart also expands `$NAME`, so a literal `$` is doubled there. */
+function systemdCommandWord(value: string): string {
+  return systemdQuoted(value.replace(/\$/g, '$$$$'))
+}
+
+/**
+ * RELAY_CONFIG_PATH and RELAY_POLICY_PATH are set because the daemon reads
+ * them, and otherwise resolves both against its working directory.
+ */
+export function buildSystemdUnit(options: SystemdUnitOptions): string {
+  const environment: Array<[string, string]> = [
+    ['RELAY_HOME', options.relayHome],
+    ['RELAY_CONFIG_PATH', join(options.relayHome, 'config', 'relay.config.yaml')],
+    ['RELAY_POLICY_PATH', join(options.relayHome, 'config', 'policy.yaml')],
+    ['PATH', options.path],
+  ]
+  return `[Unit]
+Description=Relay orchestrator
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${systemdValue(options.workingDirectory)}
+${environment.map(([key, value]) => `Environment=${systemdQuoted(`${key}=${value}`)}\n`).join('')}ExecStart=${systemdCommandWord(options.nodePath)} ${systemdCommandWord(options.scriptPath)}
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:${systemdValue(options.logPath)}
+StandardError=append:${systemdValue(options.logPath)}
+
+[Install]
+WantedBy=default.target
+`
+}
+
 /** A CLI the daemon spawns. `path` is undefined when it could not be found; a required one stops the install. */
 export type ServiceBinary = { readonly name: string; readonly path: string | undefined; readonly required: boolean }
 
@@ -124,8 +197,10 @@ export function findOnPath(name: string, envPath = process.env.PATH ?? '', exist
 
 /**
  * The CLIs the daemon spawns: claude always (the governed loop spawns it by
- * name), and codex and gh when autonomous tasks are on. Configured paths win
- * over the installer's own PATH.
+ * name), and gh when autonomous tasks are on. Codex is optional: when it is
+ * missing every chat runs on a claude account (src/autonomous/accounts.ts),
+ * so it is added to the PATH when found and never stops the install.
+ * Configured paths win over the installer's own PATH.
  */
 export function serviceBinaries(
   autonomous: RelayConfig['autonomous'],
@@ -134,7 +209,7 @@ export function serviceBinaries(
   const enabled = autonomous?.enabled === true
   return [
     { name: 'claude', path: autonomous?.claude_bin ?? find('claude'), required: true },
-    { name: 'codex', path: autonomous?.codex_bin ?? find('codex'), required: enabled },
+    { name: 'codex', path: autonomous?.codex_bin ?? find('codex'), required: false },
     { name: 'gh', path: find('gh'), required: enabled },
   ]
 }
@@ -194,12 +269,12 @@ export function runInstallService(
   deps: ServiceDependencies = {},
 ): ServiceResult {
   const platform = deps.platform ?? process.platform
-  if (platform !== 'darwin') {
+  if (platform !== 'darwin' && platform !== 'linux') {
     return {
       report:
-        'A supervisor is only wired for macOS launchd here. On Linux, run the orchestrator under systemd with ' +
-        'Restart=on-failure; the daemon exits non-zero on repeated Slack failures precisely so something can ' +
-        'restart it.',
+        'A supervisor is only wired for macOS launchd and Linux systemd here. Run the orchestrator under a ' +
+        'supervisor that restarts it on a failure exit; the daemon exits non-zero on repeated Slack failures ' +
+        'precisely so something can restart it.',
       exitCode: 1,
     }
   }
@@ -223,7 +298,7 @@ export function runInstallService(
     return {
       report:
         `Not installed: ${relative.map((binary) => `${binary.name} (${binary.path ?? ''})`).join(', ')} must be an ` +
-        'absolute path. launchd resolves a relative one against its own working directory, not your shell.',
+        'absolute path. The supervisor resolves a relative one against its own working directory, not your shell.',
       exitCode: 1,
     }
   }
@@ -232,16 +307,21 @@ export function runInstallService(
     return {
       report:
         `Not installed: ${missing.map((binary) => `${binary.name} (${binary.path ?? 'not on PATH'})`).join(', ')} ` +
-        'could not be found. launchd has no shell PATH, so the daemon needs each one at a known path; install it ' +
+        'could not be found. The supervisor has no shell PATH, so the daemon needs each one at a known path; install it ' +
         'or set its path in the relay config (autonomous.claude_bin, autonomous.codex_bin).',
       exitCode: 1,
     }
   }
   const found = binaries.flatMap((binary) => (binary.path !== undefined && exists(binary.path) ? [binary.path] : []))
 
-  // Always written to the plist, so the daemon finds the helper and its pid
-  // file exactly where this install built them.
-  const relayHome = options.relayHome ?? resolveRelayHome({ cwd: repoRoot, pathExists: exists }).path
+  // Always written to the service, so the daemon finds its config, helper and
+  // pid file exactly where this install did. Resolved from where the command
+  // runs, as every other relay command does, never from repoRoot: a checkout
+  // carries its own development config, which would shadow ~/.relay.
+  const relayHome = options.relayHome ?? resolveRelayHome({ home, pathExists: exists }).path
+  if (platform === 'linux') {
+    return installSystemdService({ repoRoot, scriptPath, relayHome, found, start: options.start === true, home, write, run, makeDirectory })
+  }
   const helperPath = relaySecretsHelperPath(relayHome)
   const plistPath = servicePlistPath(home)
   const target = `gui/${process.getuid?.() ?? 501}`
@@ -341,9 +421,95 @@ export function runInstallService(
   }
 }
 
+function installSystemdService(input: {
+  readonly repoRoot: string
+  readonly scriptPath: string
+  readonly relayHome: string
+  readonly found: readonly string[]
+  readonly start: boolean
+  readonly home: string
+  readonly write: (path: string, contents: string) => void
+  readonly run: (file: string, args: readonly string[]) => void
+  readonly makeDirectory: (path: string) => void
+}): ServiceResult {
+  const unitPath = serviceUnitPath(input.home)
+  const logPath = join(input.repoRoot, 'tmp', 'relay.log')
+  let unit: string
+  try {
+    unit = buildSystemdUnit({
+      nodePath: process.execPath,
+      scriptPath: input.scriptPath,
+      workingDirectory: input.repoRoot,
+      logPath,
+      relayHome: input.relayHome,
+      path: plistPathValue([process.execPath, ...input.found]),
+    })
+    input.makeDirectory(dirname(unitPath))
+    input.makeDirectory(dirname(logPath))
+    input.write(unitPath, unit)
+  } catch (error) {
+    return { report: `Could not write ${unitPath}: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 }
+  }
+
+  // restart rather than start, so re-running with --start picks up a new build.
+  const commands: string[][] = [['daemon-reload'], ['enable', SYSTEMD_UNIT], ...(input.start ? [['restart', SYSTEMD_UNIT]] : [])]
+  for (const [index, args] of commands.entries()) {
+    try {
+      input.run('systemctl', ['--user', ...args])
+    } catch (error) {
+      return {
+        report:
+          `Wrote ${unitPath}, but \`systemctl --user ${args.join(' ')}\` failed: ${error instanceof Error ? error.message : String(error)}\n` +
+          'There may be no systemd user session (a login over plain su or sudo has none). From a login session, run:\n' +
+          commands.slice(index).map((rest) => `  systemctl --user ${rest.join(' ')}`).join('\n'),
+        exitCode: 1,
+      }
+    }
+  }
+
+  return {
+    report: [
+      input.start
+        ? `Installed and started ${SYSTEMD_UNIT} as a systemd user unit.`
+        : `Installed and enabled ${SYSTEMD_UNIT} as a systemd user unit. It starts at your next login; start it now with \`relay install-service --start\`.`,
+      '',
+      `  unit:  ${unitPath}`,
+      `  log:   ${logPath}`,
+      '',
+      'It restarts on a FAILURE exit, which is what the daemon does after repeated Slack connectivity failures.',
+      'A clean stop stays stopped, so this will not fight you when you want it down.',
+      'It starts at login, not at boot: the daemon reads its secrets from the login keyring, which must be unlocked.',
+      '',
+      `Stop it:      systemctl --user stop relay`,
+      'Remove it:    relay uninstall-service',
+    ].join('\n'),
+    exitCode: 0,
+  }
+}
+
 export function runUninstallService(deps: ServiceDependencies = {}): ServiceResult {
   const home = deps.home ?? homedir()
   const run = deps.run ?? ((file: string, args: readonly string[]) => { execFileSync(file, args as string[], { stdio: 'ignore' }) })
+  if ((deps.platform ?? process.platform) === 'linux') {
+    const remove = deps.removeFile ?? ((path: string) => { rmSync(path, { force: true }) })
+    const unitPath = serviceUnitPath(home)
+    try {
+      run('systemctl', ['--user', 'disable', '--now', SYSTEMD_UNIT])
+    } catch {
+      // Not enabled, or no user session; the unit file is still removed.
+    }
+    try {
+      remove(unitPath)
+    } catch (error) {
+      return { report: `Stopped the unit but could not remove ${unitPath}: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 }
+    }
+    try {
+      run('systemctl', ['--user', 'daemon-reload'])
+    } catch {
+      // systemd forgets the removed unit at the next reload anyway.
+    }
+    return { report: `Removed ${SYSTEMD_UNIT}. Relay will no longer start at login or restart itself.`, exitCode: 0 }
+  }
   const plistPath = servicePlistPath(home)
   const target = `gui/${process.getuid?.() ?? 501}`
 
@@ -364,5 +530,6 @@ export function runUninstallService(deps: ServiceDependencies = {}): ServiceResu
 /** Whether a supervisor is actually installed, for `relay doctor`. */
 export function serviceInstalled(deps: ServiceDependencies = {}): boolean {
   const exists = deps.pathExists ?? existsSync
-  return exists(servicePlistPath(deps.home ?? homedir()))
+  const home = deps.home ?? homedir()
+  return exists((deps.platform ?? process.platform) === 'linux' ? serviceUnitPath(home) : servicePlistPath(home))
 }

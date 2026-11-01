@@ -200,6 +200,9 @@ export const LOCAL_ONLY_SPAWN_BINARIES: Readonly<Record<string, string>> = {
   'secret-tool':
     'the freedesktop Secret Service CLI (src/secrets/libsecret.ts), the Linux counterpart of the Keychain entry ' +
     'above; reads local keystore items over D-Bus, no network call',
+  git:
+    'only `git -C <path> rev-parse` and `symbolic-ref` from `relay repos add` (src/cli/repos.ts), which read the ' +
+    'local repository to register it; neither subcommand contacts a remote',
 }
 
 /**
@@ -228,6 +231,10 @@ export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
     "A generic execFile wrapper's own `file` parameter (defaultExecFile), not a fixed destination by itself; the " +
     'actual binary it is invoked with (secret-tool) is resolved and matched separately, above. Same shape as ' +
     'src/secrets/keychain.ts, and for the same reason.',
+  'src/cli/db.ts':
+    'Spawns `sudo -u postgres psql` on Linux or `psql` on macOS, chosen by psqlCommand() in the same file, for ' +
+    '`relay db create`. Both connect only to the Postgres named by database.url, and the command refuses any host ' +
+    'that is not local (isLocalHost), so the spawn reaches this machine\'s own database and nothing else.',
   'src/sandbox/exec.ts':
     'Spawns /usr/bin/sandbox-exec, the macOS confinement wrapper, which then execs the command it was given ' +
     '(FR-SH-6). sandbox-exec is not itself a network destination, and the process it wraps is the most tightly ' +

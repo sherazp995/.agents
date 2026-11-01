@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   buildPlist,
+  buildSystemdUnit,
   escapeXml,
   findOnPath,
   plistPathValue,
@@ -11,6 +12,7 @@ import {
   SERVICE_LABEL,
   serviceInstalled,
   servicePlistPath,
+  serviceUnitPath,
 } from '../../src/cli/service.js'
 
 /**
@@ -212,22 +214,135 @@ describe('installing', () => {
     expect(run).not.toHaveBeenCalled()
   })
 
-  it('says what to do on Linux rather than pretending to support it', () => {
-    const result = runInstallService({ repoRoot: '/r' }, { platform: 'linux' })
+  it('refuses a platform with no supervisor wired, rather than pretending to support it', () => {
+    const result = runInstallService({ repoRoot: '/r' }, { platform: 'win32' })
 
     expect(result.exitCode).toBe(1)
-    expect(result.report).toContain('systemd')
-    expect(result.report).toContain('Restart=on-failure')
+    expect(result.report).toContain('supervisor')
+  })
+})
+
+describe('installing on Linux as a systemd user unit', () => {
+  function installLinux(start: boolean, run: (file: string, args: readonly string[]) => void = () => {}) {
+    const written: Array<[string, string]> = []
+    const commands: string[][] = []
+    const result = runInstallService(
+      { repoRoot: '/r', relayHome: '/home/op/.relay', start },
+      {
+        platform: 'linux',
+        home: '/home/op',
+        pathExists: () => true,
+        writeFile: (path, contents) => written.push([path, contents]),
+        makeDirectory: () => {},
+        run: (file, args) => {
+          commands.push([file, ...args])
+          run(file, args)
+        },
+      },
+    )
+    return { result, written, commands }
+  }
+
+  it('points the daemon at ~/.relay, not at the checkout it runs from, when no RELAY_HOME is set', () => {
+    const previous = process.env.RELAY_HOME
+    delete process.env.RELAY_HOME
+    const written: Array<[string, string]> = []
+    try {
+      runInstallService(
+        { repoRoot: '/checkout' },
+        {
+          platform: 'linux',
+          home: '/home/op',
+          // The checkout carries its own development config; the folder the command runs from does not.
+          pathExists: (path) => path !== `${process.cwd()}/config/relay.config.yaml`,
+          writeFile: (path, contents) => written.push([path, contents]),
+          makeDirectory: () => {},
+          run: () => {},
+        },
+      )
+    } finally {
+      if (previous !== undefined) process.env.RELAY_HOME = previous
+    }
+
+    expect(written[0]?.[1]).toContain('Environment="RELAY_HOME=/home/op/.relay"')
+  })
+
+  it('writes a unit that restarts on failure and points the daemon at RELAY_HOME, then enables it without building a helper', () => {
+    const { result, written, commands } = installLinux(false)
+
+    expect(result.exitCode).toBe(0)
+    expect(written.map(([path]) => path)).toEqual(['/home/op/.config/systemd/user/relay.service'])
+    const unit = written[0]?.[1] ?? ''
+    expect(unit).toContain('Restart=on-failure')
+    expect(unit).toContain('WorkingDirectory=/r\n')
+    expect(unit).toContain('Environment="RELAY_HOME=/home/op/.relay"')
+    expect(unit).toContain('Environment="RELAY_CONFIG_PATH=/home/op/.relay/config/relay.config.yaml"')
+    expect(unit).toContain('Environment="RELAY_POLICY_PATH=/home/op/.relay/config/policy.yaml"')
+    expect(unit).toContain('WantedBy=default.target')
+    expect(commands).toEqual([
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'enable', 'relay.service'],
+    ])
+    expect(result.report).toContain('next login')
+    expect(result.report).toContain('systemctl --user stop relay')
+    expect(result.report).toContain('keyring')
+  })
+
+  it('--start also restarts it, so a new build is picked up', () => {
+    const { result, commands } = installLinux(true)
+
+    expect(result.exitCode).toBe(0)
+    expect(commands.at(-1)).toEqual(['systemctl', '--user', 'restart', 'relay.service'])
+  })
+
+  it('names the unit and the commands still to run when systemctl fails', () => {
+    const { result } = installLinux(true, (_file, args) => {
+      if (args.includes('enable')) throw new Error('Failed to connect to bus')
+    })
+
+    expect(result.exitCode).toBe(1)
+    expect(result.report).toContain('/home/op/.config/systemd/user/relay.service')
+    expect(result.report).toContain('  systemctl --user enable relay.service\n  systemctl --user restart relay.service')
+  })
+
+  it('keeps a value with spaces one word and escapes what systemd would expand', () => {
+    const unit = buildSystemdUnit({ nodePath: '/opt/my node/node', scriptPath: '/r/$s%.js', workingDirectory: '/r', logPath: '/l', relayHome: '/h', path: '/a b:/usr/bin' })
+
+    expect(unit).toContain('ExecStart="/opt/my node/node" "/r/$$s%%.js"')
+    expect(unit).toContain('Environment="PATH=/a b:/usr/bin"')
+    expect(() => buildSystemdUnit({ nodePath: '/n', scriptPath: '/s', workingDirectory: '/r\nExecStartPre=/x', logPath: '/l', relayHome: '/h', path: '/p' })).toThrow(/newline/)
   })
 })
 
 describe('uninstalling and detection', () => {
   it('unloads and removes', () => {
     const commands: string[][] = []
-    const result = runUninstallService({ home: '/Users/op', run: (file, args) => commands.push([file, ...args]) })
+    const result = runUninstallService({ platform: 'darwin', home: '/Users/op', run: (file, args) => commands.push([file, ...args]) })
 
     expect(result.exitCode).toBe(0)
     expect(commands[0]).toContain('bootout')
+  })
+
+  it('on Linux disables and removes the unit, even when systemctl has no session', () => {
+    const commands: string[][] = []
+    const removed: string[] = []
+    const result = runUninstallService({
+      platform: 'linux',
+      home: '/home/op',
+      removeFile: (path) => removed.push(path),
+      run: (file, args) => {
+        commands.push([file, ...args])
+        throw new Error('Failed to connect to bus')
+      },
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(commands).toEqual([
+      ['systemctl', '--user', 'disable', '--now', 'relay.service'],
+      ['systemctl', '--user', 'daemon-reload'],
+    ])
+    expect(removed).toEqual([serviceUnitPath('/home/op')])
+    expect(serviceInstalled({ platform: 'linux', home: '/home/op', pathExists: (path) => path === serviceUnitPath('/home/op') })).toBe(true)
   })
 
   it('reports whether a supervisor is installed, which is what doctor asks', () => {
@@ -247,7 +362,7 @@ describe('the daemon PATH', () => {
     )
   })
 
-  it('requires claude always, and codex and gh only when autonomous tasks are on', () => {
+  it('requires claude always and gh only when autonomous tasks are on; codex never', () => {
     const find = (name: string) => (name === 'gh' ? '/opt/homebrew/bin/gh' : undefined)
     expect(serviceBinaries(undefined, find)).toEqual([
       { name: 'claude', path: undefined, required: true },
@@ -257,7 +372,7 @@ describe('the daemon PATH', () => {
     const autonomous = { enabled: true, claude_bin: '/c/claude', codex_bin: '/x/codex' } as Parameters<typeof serviceBinaries>[0]
     expect(serviceBinaries(autonomous, find).map((binary) => [binary.path, binary.required])).toEqual([
       ['/c/claude', true],
-      ['/x/codex', true],
+      ['/x/codex', false],
       ['/opt/homebrew/bin/gh', true],
     ])
   })

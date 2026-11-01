@@ -40,9 +40,9 @@ registerCheck({
     const problems: string[] = []
     const notes: string[] = []
 
-    for (const [label, bin] of [['claude_bin', autonomous.claude_bin], ['codex_bin', autonomous.codex_bin]] as const) {
-      if (!executable(bin)) problems.push(`${label} ${bin} is not an executable file`)
-    }
+    if (!executable(autonomous.claude_bin)) problems.push(`claude_bin ${autonomous.claude_bin} is not an executable file`)
+    // Codex is optional: without it every chat runs on a claude account (src/autonomous/accounts.ts skips an unproven codex one).
+    if (!executable(autonomous.codex_bin)) notes.push(`codex is not installed at ${autonomous.codex_bin}, so chats use claude only`)
     const accounts = await readAccountPool()
     if (!accounts.some((account) => account.client === 'claude')) problems.push('the account pool has no claude account (~/.agents/accounts.toml plus the default logins)')
     notes.push(`accounts: ${accounts.map((account) => account.key).join(', ') || 'none'}`)
@@ -65,6 +65,7 @@ registerCheck({
     if (autonomous?.enabled !== true) return { name: CODEX_HOOK, status: 'ok', detail: 'autonomous mode is off' }
     const codexAccounts = (await readAccountPool()).filter((account) => account.client === 'codex')
     if (codexAccounts.length === 0) return { name: CODEX_HOOK, status: 'ok', detail: 'no codex account in the pool' }
+    if (!executable(autonomous.codex_bin)) return { name: CODEX_HOOK, status: 'ok', detail: `codex is not installed at ${autonomous.codex_bin}; it is optional, so codex is not used` }
 
     // The compiled hook script sits beside this file's dist tree: dist/src/doctor/checks -> dist/scripts.
     const hookScript = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'scripts', 'hook-pretooluse.js')

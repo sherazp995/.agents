@@ -14,13 +14,15 @@
 
 import type { Pool } from 'pg'
 import { provisionPrincipal } from '../tenancy/principals.js'
+import { MEMBER_ROLE, parseRole } from '../tenancy/roles.js'
 import { listWorkspacesForPlatform } from '../tenancy/workspaces.js'
 
 export type PrincipalsAddParams = {
   platform: string
   platformUserId: string
   displayName: string
-  roles: string[]
+  /** owner or member (src/tenancy/roles.ts); member when left out. */
+  role?: string
   /** Bypasses the platform lookup below. Mainly for tests and for the day a platform genuinely has more than one workspace and the operator already knows which uuid they mean. */
   workspaceId?: string
 }
@@ -59,16 +61,19 @@ export class PrincipalsAddError extends Error {
  * time, for instance, is safe.
  */
 export async function runPrincipalsAdd(pool: Pool, params: PrincipalsAddParams): Promise<PrincipalsAddResult> {
+  const role = resolveRole(params.role)
   const workspaceId = params.workspaceId ?? (await resolveTargetWorkspaceId(pool, params.platform))
-  const principalId = await provisionPrincipal(
-    pool,
-    workspaceId,
-    params.platform,
-    params.platformUserId,
-    params.displayName,
-    params.roles,
-  )
+  const principalId = await provisionPrincipal(pool, workspaceId, params.platform, params.platformUserId, params.displayName, [role])
   return { principalId, workspaceId }
+}
+
+function resolveRole(role: string | undefined): string {
+  if (role === undefined) return MEMBER_ROLE
+  try {
+    return parseRole(role)
+  } catch (error) {
+    throw new PrincipalsAddError(error instanceof Error ? error.message : String(error))
+  }
 }
 
 async function resolveTargetWorkspaceId(pool: Pool, platform: string): Promise<string> {

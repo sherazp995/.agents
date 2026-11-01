@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Rebuilds Relay in this checkout, then restarts a running daemon, and only
+# after a passing build. agents-sync starts it in the background after an
+# update that touches relay/; `relay update` runs it by hand.
+#
+# tsc runs with --noEmitOnError, so a failed build writes nothing and the old
+# compiled code stays whole. The result goes to tmp/update.status ("running",
+# "ok <commit>" or "failed <commit>: <reason>"), which agents-sync reports,
+# and the full output to tmp/update.log.
+set -uo pipefail
+
+source="${BASH_SOURCE[0]}"
+while [ -L "$source" ]; do
+  dir=$(cd -P "$(dirname "$source")" && pwd)
+  source=$(readlink "$source")
+  [[ $source == /* ]] || source="$dir/$source"
+done
+root=$(cd -P "$(dirname "$source")/.." && pwd)
+state="$root/tmp"
+log="$state/update.log"
+status="$state/update.status"
+lock="$state/update.lock"
+mkdir -p "$state"
+
+# A hook starts with almost no PATH; these are where node and pnpm usually live.
+PATH="$PATH:$HOME/.asdf/shims:$HOME/.local/bin:$HOME/.volta/bin:$HOME/.local/share/pnpm:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# mkdir is atomic on every platform, unlike flock, which macOS lacks. A lock
+# older than 30 minutes is from a run that died.
+if [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+  rmdir "$lock" 2>/dev/null
+fi
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "A Relay update is already running; its log is $log."
+  exit 0
+fi
+trap 'rmdir "$lock" 2>/dev/null' EXIT
+
+commit=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo unknown)
+echo running > "$status"
+
+fail() {
+  echo "failed $commit: $1" > "$status"
+  echo "Relay update failed: $1. The old build and the running daemon were left as they were. Log: $log" >&2
+  exit 1
+}
+
+{
+  echo "== $(date) relay update at $commit"
+} > "$log"
+echo "Updating Relay at $commit (log: $log)"
+
+command -v pnpm >/dev/null 2>&1 || fail "pnpm not found"
+command -v node >/dev/null 2>&1 || fail "node not found"
+(cd "$root" && pnpm install --frozen-lockfile) >> "$log" 2>&1 || fail "pnpm install failed"
+(cd "$root" && pnpm exec tsc -p tsconfig.json --noEmitOnError) >> "$log" 2>&1 || fail "the build failed"
+(cd "$root" && node scripts/copy-assets.mjs) >> "$log" 2>&1 || fail "copying the build assets failed"
+
+restarted="no daemon is running, so none was restarted"
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet relay.service 2>/dev/null; then
+  systemctl --user restart relay.service >> "$log" 2>&1 || fail "the build passed, but systemctl could not restart relay.service"
+  restarted="restarted relay.service"
+elif command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$(id -u)/com.relay.orchestrator" >/dev/null 2>&1; then
+  launchctl kickstart -k "gui/$(id -u)/com.relay.orchestrator" >> "$log" 2>&1 || fail "the build passed, but launchctl could not restart com.relay.orchestrator"
+  restarted="restarted com.relay.orchestrator"
+fi
+
+echo "ok $commit" > "$status"
+echo "Relay is built at $commit; $restarted."

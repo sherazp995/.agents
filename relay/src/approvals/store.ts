@@ -22,6 +22,7 @@ import type { Pool, PoolClient } from 'pg'
 import type { RiskTier } from '../capabilities/registry.js'
 import { getCapability } from '../capabilities/registry.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
+import { isOwner, OWNER_ROLE_NAMES } from '../tenancy/roles.js'
 import { signApprovalReceipt } from './receipt.js'
 
 export const APPROVAL_OPTIONS = ['approve', 'deny', 'approve_all_session', 'edit_and_approve'] as const
@@ -519,16 +520,20 @@ export async function listApprovalEvents(pool: Pool, workspaceId: string, approv
  * failure mode than "anybody can," so this function does not special-case
  * the empty array back toward "no restriction" the way an earlier version
  * did.
+ *
+ * An owner role name (`owner`, or the legacy `operator`) is satisfied by
+ * either name, so an approval stored before the rename still resolves for
+ * an owner, and one asking for `owner` still resolves for an operator.
  */
 export function hasRequiredRole(roles: readonly string[], requiredRoles: readonly string[]): boolean {
-  return requiredRoles.some((role) => roles.includes(role))
+  return requiredRoles.some((role) => (OWNER_ROLE_NAMES.includes(role) ? isOwner(roles) : roles.includes(role)))
 }
 
-/** An approval naming its allowed principals replaces the role check with "in the list, or an operator"; otherwise the role check applies. */
+/** An approval naming its allowed principals replaces the role check with "in the list, or an owner"; otherwise the role check applies. */
 function isAuthorizedResolver(current: ApprovalRow, resolverPrincipalId: string | null, resolverRoles: readonly string[]): boolean {
   if (current.allowed_principal_ids === null) return hasRequiredRole(resolverRoles, current.required_roles)
   if (resolverPrincipalId === null) return false
-  return current.allowed_principal_ids.includes(resolverPrincipalId) || resolverRoles.includes('operator')
+  return current.allowed_principal_ids.includes(resolverPrincipalId) || isOwner(resolverRoles)
 }
 
 /** The digest a receipt binds to: the operation's payload digest, or empty for an approval with no operation. */

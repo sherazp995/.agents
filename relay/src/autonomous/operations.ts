@@ -17,11 +17,14 @@ import { canonicalise } from '../audit/chain.js'
 import { renderApprovalCard } from '../approvals/blockkit.js'
 import { verifyApprovalReceipt } from '../approvals/receipt.js'
 import { createApprovalInTransaction, expireApproval, getApproval, listOverdueApprovals } from '../approvals/store.js'
+import { approvalRolesFor } from '../approvals/tier-policy.js'
 import type { ChatRef } from '../chat/contract.js'
 import type { RiskTier } from '../capabilities/registry.js'
+import type { ApprovalPolicy } from '../config/schema.js'
 import { scanText } from '../repos/secrets-gate.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
 import type { InvocationContext } from '../engine/hook-bridge.js'
+import { describeRemoteWrite } from './describe-write.js'
 import type { ShellWriteAnswer } from './guard.js'
 import { addNote, inTransaction, type IntakeOutbox, type Lease } from './store.js'
 
@@ -94,6 +97,8 @@ export type OperationDeps = {
   /** The daemon's approval receipt key; an approval without a valid receipt never runs. */
   receiptKey: Uint8Array
   approvalTimeoutMs: number
+  /** policy.yaml's `approvals` section: who may approve at each tier (src/approvals/tier-policy.ts). */
+  approvalPolicy?: ApprovalPolicy
 }
 
 /** The thread and people an operation belongs to, read from its task and session. */
@@ -172,16 +177,15 @@ export function newOperationId(): string {
   return randomUUID()
 }
 
-/** How an operation reads on its approval card and in the thread. */
+/** How an operation reads on its approval card and in the thread: a plain line for its title, the exact command for its text. */
 export function describeOperation(payload: OperationPayload): { capability: string; tier: RiskTier; title: string; text: string } {
-  const short = payload.command.length > 80 ? `${payload.command.slice(0, 77)}...` : payload.command
-  return { capability: 'autonomous.remote_write', tier: 'write', title: `run \`${short}\``, text: `Run in ${payload.cwd}:\n${payload.command}` }
+  return { capability: 'autonomous.remote_write', tier: 'write', title: describeRemoteWrite(payload.command), text: `Run in ${payload.cwd}:\n${payload.command}` }
 }
 
 /**
  * Creates the `remote_write` approval for a `requested` operation that has
- * none yet, and queues its card, on the caller's transaction. Only the
- * requester (or an operator) may resolve it.
+ * none yet, and queues its card, on the caller's transaction. The roles
+ * policy.yaml names for its tier (an owner by default) may resolve it.
  */
 export async function offerApprovalInTransaction(
   client: PoolClient,
@@ -197,13 +201,13 @@ export async function offerApprovalInTransaction(
     sessionId: thread.sessionId,
     requesterPrincipalId: thread.requesterPrincipalId,
     capability: described.capability,
-    description: `Relay asks to ${described.title}.`,
-    target: described.title,
+    description: described.title,
+    target: operation.payload.command,
     tier: described.tier,
     escalationReason: 'Every remote write from a Slack chat is approved one command at a time.',
-    requiredRoles: ['operator'],
+    requiredRoles: approvalRolesFor(deps.approvalPolicy, described.tier),
     timeoutMs: deps.approvalTimeoutMs,
-    // Only an operator approves a push or a GitHub write, never whoever started the thread.
+    // Only an owner approves a push or a GitHub write (unless policy.yaml says otherwise), never whoever started the thread.
     kind: 'remote_write',
     operationId: operation.id,
   })

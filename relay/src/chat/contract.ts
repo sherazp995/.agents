@@ -162,6 +162,8 @@ export type ChatAction =
       kind: 'edit'
       ref: Required<Pick<ChatRef, 'channel' | 'message'>> & ChatRef
       text: string
+      /** As on `post`: Slack replaces the message's markdown block too, not just its fallback text. */
+      markdown?: true
     }
   | { kind: 'upload'; ref: ChatRef; filename: string; bytes: Uint8Array; comment?: string }
   | { kind: 'setStatus'; ref: ChatRef; status: string }

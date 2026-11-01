@@ -41,6 +41,15 @@ describe('relay notify', () => {
     return rows.map((row) => row.action)
   }
 
+  it('sends to owners and legacy operators by default, never to members', async () => {
+    const { workspaceId, operator } = await setup()
+    const owner = `U_${randomUUID()}`
+    await provisionPrincipal(pool, workspaceId, 'slack', owner, 'Owner', ['owner'])
+
+    const sent = await runNotify(pool, { workspaceId, text: 'Done' })
+    expect(sent.map((recipient) => recipient.userId).sort()).toEqual([operator, owner].sort())
+  })
+
   it('queues a scrubbed DM to the operators by default', async () => {
     const { workspaceId, operator } = await setup()
     const secret = `sk-notify-${randomUUID()}`

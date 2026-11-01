@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_SESSION_MODE,
-  DIRECT_SLASH_COMMAND,
+  DIRECT_COMMAND_WORD,
   expandHome,
   parseDirectCommand,
   renderModeHint,
@@ -21,7 +21,7 @@ describe('the default is the mode WITH the guarantees', () => {
   })
 
   it('names the command that switches, in the hint a thread actually sees', () => {
-    expect(renderModeHint()).toContain(DIRECT_SLASH_COMMAND)
+    expect(renderModeHint()).toContain(`\`${DIRECT_COMMAND_WORD}\``)
   })
 })
 

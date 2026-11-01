@@ -453,6 +453,23 @@ describeDb('src/approvals/store.ts', () => {
       expect(hasRequiredRole(['operator'], ['operator'])).toBe(true)
     })
 
+    it('treats owner and the legacy operator as one owner requirement, and never lets a member satisfy it', () => {
+      expect(hasRequiredRole(['owner'], ['operator'])).toBe(true)
+      expect(hasRequiredRole(['operator'], ['owner'])).toBe(true)
+      expect(hasRequiredRole(['member'], ['owner'])).toBe(false)
+      expect(hasRequiredRole(['member'], ['member'])).toBe(true)
+    })
+
+    it('lets an owner-role principal resolve an approval stored as needing operator, and refuses a member', async () => {
+      const fixtures = await createFixtures({ approverRoles: ['owner'] })
+      const approval = await createApproval(pool, baseApprovalParams(fixtures))
+      const resolve = (resolverPrincipalId: string) =>
+        resolveApproval(pool, { workspaceId: fixtures.workspaceId, approvalId: approval.id, option: 'deny', resolverPrincipalId })
+
+      expect((await resolve(fixtures.unauthorizedPrincipalId)).outcome).toBe('unauthorized')
+      expect((await resolve(fixtures.approverPrincipalId)).outcome).toBe('resolved')
+    })
+
     it('createApproval rejects an empty requiredRoles list immediately, before any database write', async () => {
       const fixtures = await createFixtures()
       await expect(

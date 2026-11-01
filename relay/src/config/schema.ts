@@ -103,8 +103,7 @@ const capabilityScopeOverridesSchema = z
  * decisions, rather than hard-coded in src/approvals/store.ts. That store
  * deliberately takes `requiredRoles` and `requiresTypedConfirmation` as
  * caller-supplied fields per approval precisely so this section can be the
- * caller (once a later task wires the two together; this schema does not
- * do that wiring itself).
+ * caller; src/approvals/tier-policy.ts reads it for each approval.
  */
 const approvalTierPolicySchema = z
   .object({
@@ -136,19 +135,13 @@ const approvalTierPolicySchema = z
 /**
  * Keyed by risk tier via `z.record`, not a fixed four-key object, so this
  * can never drift out of sync with RISK_TIERS if that enum ever changes.
- * Deliberately SPARSE: every tier is optional, and a tier this policy
- * never mentions has NO configured approvers, which must mean nobody may
- * resolve an approval at that tier, per FR-POL-3's ask-never-allow default
- * applied one level down to FR-APR-4. This is the exact same failure mode
- * `approvalTierPolicySchema`'s non-empty `required_roles` already guards
- * against, and it resolves the same way: whatever reads this map (a later
- * wiring task, not this schema or src/approvals/store.ts) must treat a
- * missing tier exactly like an empty required_roles list, which
- * createApproval already refuses outright and hasRequiredRole already
- * treats as satisfiable by nobody. A `read` tier action never actually
- * reaches an approval at all (src/policy/decide.ts's own switch always
- * allows it), so omitting `read` here is the ordinary case, not an
- * oversight to flag.
+ * Deliberately SPARSE: every tier is optional. A tier this policy never
+ * mentions (or no `approvals` section at all) needs an owner, never
+ * "anybody": src/approvals/tier-policy.ts's approvalRolesFor is the one
+ * reader and owns that default, so an install that never configured
+ * approvals keeps a working approver. A `read` tier action never reaches
+ * an approval (src/policy/decide.ts always allows it), so omitting `read`
+ * here is the ordinary case.
  */
 const approvalPolicySchema = z.record(z.enum(RISK_TIERS), approvalTierPolicySchema)
 
@@ -231,10 +224,8 @@ export const policySchema = z
     capabilities: z.record(z.string(), capabilityScopeOverridesSchema).optional(),
     // FR-APR-4 / FR-APR-5: which roles may resolve an approval at each
     // tier, and which tiers require typed confirmation. Optional at the
-    // top level too: a policy that configures no approvals section at all
-    // means every tier is unconfigured, which per approvalPolicySchema's
-    // own comment means no principal may resolve an approval at any tier,
-    // the same fail-closed default as an entirely missing tier entry.
+    // top level too: with no approvals section every tier needs an owner,
+    // per approvalPolicySchema's own comment.
     approvals: approvalPolicySchema.optional(),
   })
   .strict()
@@ -313,7 +304,8 @@ export const relayConfigSchema = z
           enabled: z.boolean(),
           // launchd has no shell aliases or PATH, so the CLIs are named here.
           claude_bin: z.string().trim().min(1).default(join(homedir(), '.local/bin/claude')),
-          codex_bin: z.string().trim().min(1).default('/opt/homebrew/bin/codex'),
+          // Where each platform's usual installer puts it; codex is optional (src/autonomous/accounts.ts).
+          codex_bin: z.string().trim().min(1).default(process.platform === 'darwin' ? '/opt/homebrew/bin/codex' : join(homedir(), '.local/bin/codex')),
           turn_wall_clock_ms: z.number().int().positive().default(60 * 60 * 1000),
           approval_timeout_ms: z.number().int().positive().default(24 * 60 * 60 * 1000),
         })

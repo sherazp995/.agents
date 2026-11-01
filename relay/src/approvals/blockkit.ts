@@ -127,8 +127,8 @@ export function renderApprovalCard(fields: ApprovalCardFields): RenderedCard {
         { type: 'mrkdwn', text: `*Why it needs approval:*\n${escalationReason}` },
       ],
     },
-    { type: 'section', text: { type: 'mrkdwn', text: `*What it will do:*\n${description}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*Exact target:*\n\`${target}\`` } },
+    mrkdwnSection(`*What it will do:*\n${description}`),
+    mrkdwnSection(`*Exact target:*\n\`${target}\``),
   ]
 
   if (fields.screenshotUrl) {
@@ -255,8 +255,8 @@ export function renderResolvedCard(fields: ResolvedCardFields): RenderedCard {
 
   const blocks: SlackBlock[] = [
     { type: 'header', text: { type: 'plain_text', text: verb, emoji: true } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*What it does:*\n${description}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*Exact target:*\n\`${target}\`` } },
+    mrkdwnSection(`*What it does:*\n${description}`),
+    mrkdwnSection(`*Exact target:*\n\`${target}\``),
   ]
 
   if (fields.selectedOption === 'edit_and_approve' && fields.editedArguments !== undefined && fields.editedArguments !== null) {

@@ -17,4 +17,8 @@ config/profiles.yaml
 # tracked template is config/repos.example.yaml.
 config/repos.yaml
 /run/
-/bin/
+# relay install-service builds the macOS relay-secrets helper here; the PATH
+# wrapper and the update script beside it are tracked.
+/bin/*
+!/bin/relay
+!/bin/relay-update
