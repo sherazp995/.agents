@@ -132,23 +132,41 @@ boot the keyring is locked and Relay could not read its secrets.
      Tokens*, with the `connections:write` scope. Socket Mode needs this, so
      Relay never accepts an inbound webhook and needs no public URL.
 
-3. Put both in the Keychain. These commands prompt for the value rather than
-   taking it as an argument, because process arguments are readable by any
-   user on the machine:
+3. Store both. `relay setup` asks for them, hidden. By hand, the value goes
+   in on stdin rather than as an argument, because process arguments are
+   readable by any user on the machine:
 
    ```bash
+   # macOS: the Keychain
    security add-generic-password -s relay-slack-bot-token -a "$USER" -w
    security add-generic-password -s relay-slack-app-token -a "$USER" -w
+   # Linux: the Secret Service
+   printf %s "$TOKEN" | relay secrets set relay-slack-bot-token
+   printf %s "$TOKEN" | relay secrets set relay-slack-app-token
    ```
 
-   `relay secrets migrate` (below) recreates both so only Relay's helper can
-   read them.
+   On macOS, `relay secrets migrate` (below) recreates both so only Relay's
+   helper can read them. If a reinstall gives the app a new bot token, store
+   it again with `--replace` and restart the supervisor.
 
 4. **Already installed the app before autonomous tasks?** Reinstall it from
    `docs/slack-app-manifest.yaml`: the bot now needs `reactions:write` so the
    agent can react to a message (`relay live react`). `relay doctor` fails until the token has it.
 
 ### Install the supervisor and lock down Relay's own secrets
+
+On Linux there is no helper to build:
+
+```bash
+relay secrets migrate         # database URL into the Secret Service, relay_app role, receipt key
+relay install-service --start # writes ~/.config/systemd/user/relay.service, enables and starts it
+systemctl --user restart relay   # after a config or token change
+```
+
+The unit restarts Relay when it fails and starts it at login. For it to
+start at boot before you log in, run `loginctl enable-linger "$USER"` once.
+
+On macOS:
 
 ```bash
 relay install-service         # builds relay-secrets, stops the daemon
@@ -209,8 +227,8 @@ relay kill clear
 ### Check it
 
 ```bash
-node dist/src/cli.js init --yes    # writes starter config and policy
-node dist/src/cli.js doctor        # every dependency, truthfully
+relay init --yes    # writes starter config and policy (relay setup does this too)
+relay doctor        # every dependency, truthfully
 ```
 
 `doctor` reports what is actually true rather than what is configured. No
@@ -219,11 +237,14 @@ refused with a clear reason, which is a safe state and not a broken one.
 
 ### Run it
 
+Under the supervisor it is already running, and its log is
+`relay/tmp/relay.log`. To run it in the foreground instead:
+
 ```bash
 node dist/scripts/relay-orchestrator.js
 ```
 
-Watch for this line, and do not settle for the process merely existing:
+In the log or the terminal, watch for this line, and do not settle for the process merely existing:
 
 ```
 orchestrator is running: Socket Mode is connected
