@@ -15,6 +15,7 @@ import { scrubSecrets } from '../secrets/scrubber.js'
 import { claimLiveControl } from '../live/control.js'
 import { attachSessionToEngineChat, findOrCreateSession } from '../sessions/store.js'
 import { listWorkspacesForPlatform } from '../tenancy/workspaces.js'
+import { OWNER_ROLE_NAMES } from '../tenancy/roles.js'
 import { queueUpload, readUploadFile } from './upload.js'
 
 const PLATFORM = 'slack'
@@ -33,7 +34,7 @@ export class NotifyError extends Error {
 
 export type NotifyParams = {
   text: string
-  /** A mapped Slack user id; defaults to every operator in the workspace. */
+  /** A mapped Slack user id; defaults to every owner in the workspace. */
   to?: string
   /** Skips the lookup of the one Slack workspace. */
   workspaceId?: string
@@ -55,8 +56,8 @@ export async function runNotify(pool: Pool, params: NotifyParams): Promise<Notif
   // Read before anything is queued, so a bad path sends nothing.
   const file = params.file !== undefined ? await readUploadFile(params.file).catch((error: Error) => { throw new NotifyError(error.message) }) : undefined
   const workspaceId = params.workspaceId ?? (await slackWorkspaceId(pool))
-  const recipients = params.to !== undefined ? await mappedUser(pool, workspaceId, params.to) : await operators(pool, workspaceId)
-  if (recipients.length === 0) throw new NotifyError('No operator is mapped in this workspace; add one with `relay principals add`.')
+  const recipients = params.to !== undefined ? await mappedUser(pool, workspaceId, params.to) : await owners(pool, workspaceId)
+  if (recipients.length === 0) throw new NotifyError('No owner is mapped in this workspace; add one with `relay principals add --role owner`.')
 
   const queued: { userId: string; outboxId: string }[] = []
   for (const userId of recipients) {
@@ -121,10 +122,10 @@ async function mappedUser(pool: Pool, workspaceId: string, userId: string): Prom
   return [userId]
 }
 
-async function operators(pool: Pool, workspaceId: string): Promise<string[]> {
+async function owners(pool: Pool, workspaceId: string): Promise<string[]> {
   const { rows } = await pool.query<{ platform_user_id: string }>(
-    `SELECT platform_user_id FROM principals WHERE workspace_id = $1 AND platform = $2 AND 'operator' = ANY (roles) ORDER BY platform_user_id`,
-    [workspaceId, PLATFORM],
+    `SELECT platform_user_id FROM principals WHERE workspace_id = $1 AND platform = $2 AND roles && $3::text[] ORDER BY platform_user_id`,
+    [workspaceId, PLATFORM, OWNER_ROLE_NAMES],
   )
   return rows.map((row) => row.platform_user_id)
 }

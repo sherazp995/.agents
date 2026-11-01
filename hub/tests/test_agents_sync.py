@@ -33,6 +33,7 @@ class AgentsSyncCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def commit(self, cwd, name, text):
+        (cwd / name).parent.mkdir(parents=True, exist_ok=True)
         (cwd / name).write_text(text)
         git(cwd, 'add', name)
         git(cwd, 'commit', '-q', '-m', f'edit {name}')
@@ -55,6 +56,50 @@ class AgentsSyncCase(unittest.TestCase):
         self.assertIn('was updated from', line)
         self.assertEqual(git(self.repo, 'rev-parse', 'HEAD'), git(self.other, 'rev-parse', 'HEAD'))
         self.assertIsNone(self.run_hook(), 'nothing to say once current')
+
+    def install_fake_relay(self, with_packages=True):
+        """A relay folder whose relay-update only records that it ran."""
+        relay = self.repo / 'relay'
+        (relay / 'bin').mkdir(parents=True, exist_ok=True)
+        update = relay / 'bin' / 'relay-update'
+        update.write_text('#!/usr/bin/env bash\ntouch "$(dirname "$0")/../ran"\n')
+        update.chmod(0o755)
+        if with_packages:
+            (relay / 'node_modules').mkdir(exist_ok=True)
+        return relay
+
+    def wait_for(self, path):
+        for _ in range(50):
+            if path.exists():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_a_relay_change_starts_its_rebuild_in_the_background(self):
+        self.push_upstream('relay/src.ts', 'x\n')
+        relay = self.install_fake_relay()
+        line = self.run_hook()
+        self.assertIn('Relay changed, so it is rebuilding in the background', line)
+        self.assertTrue(self.wait_for(relay / 'ran'))
+
+    def test_a_relay_change_where_relay_was_never_installed_builds_nothing(self):
+        self.push_upstream('relay/src.ts', 'x\n')
+        relay = self.install_fake_relay(with_packages=False)
+        line = self.run_hook()
+        self.assertNotIn('Relay changed', line)
+        time.sleep(0.5)
+        self.assertFalse((relay / 'ran').exists())
+
+    def test_a_failed_relay_rebuild_is_reported_at_every_start(self):
+        status = self.repo / 'relay' / 'tmp' / 'update.status'
+        status.parent.mkdir(parents=True)
+        status.write_text('failed abc1234: the build failed\n')
+        for _ in range(2):
+            line = self.run_hook()
+            self.assertIn("Relay's last rebuild failed (abc1234: the build failed)", line)
+            self.assertIn('relay update', line)
+        status.write_text('ok abc1234\n')
+        self.assertIsNone(self.run_hook())
 
     def test_a_setup_change_asks_for_install(self):
         self.push_upstream('registry.toml', 'x = 1\n')

@@ -31,6 +31,7 @@ class FakeKeychain {
 
   readonly deps = (overrides: Partial<SecretsCliDependencies> = {}): SecretsCliDependencies => ({
     helperPath: '/h/bin/relay-secrets',
+    platform: 'darwin',
     pathExists: () => true,
     runHelper: async (helperPath, args, input) => this.helper(helperPath, args, input),
     security: async (file, args) => this.security(file, args),
@@ -74,6 +75,81 @@ class FakeKeychain {
     return this.argv.map((argv) => argv.join(' ')).join('\n')
   }
 }
+
+/**
+ * A fake Secret Service behind a fake `secret-tool`, answering as the real
+ * one does: a missing item is exit 1 with no output, and `store` overwrites
+ * an item with the same attributes. Every argv and stdin is kept.
+ */
+class FakeSecretService {
+  readonly items = new Map<string, string>()
+  readonly calls: { args: readonly string[]; input: string | undefined }[] = []
+
+  readonly deps = (overrides: Partial<SecretsCliDependencies> = {}): SecretsCliDependencies => ({
+    helperPath: '/h/bin/relay-secrets',
+    platform: 'linux',
+    pathExists: () => false,
+    secretTool: async (args, input) => this.run(args, input),
+    ...overrides,
+  })
+
+  async run(args: readonly string[], input?: string): Promise<HelperResult> {
+    this.calls.push({ args, input })
+    const [command, ...rest] = args
+    const name = rest[rest.indexOf('service') + 1] ?? ''
+    if (command === 'lookup') {
+      const value = this.items.get(name)
+      return value === undefined ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: value, stderr: '' }
+    }
+    if (command === 'store') {
+      this.items.set(name, input ?? '')
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    if (command === 'clear') {
+      this.items.delete(name)
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    return { exitCode: 2, stdout: '', stderr: '' }
+  }
+
+  everyArgv(): string {
+    return this.calls.map((call) => call.args.join(' ')).join('\n')
+  }
+}
+
+describe('relay secrets set on Linux', () => {
+  it('stores the value through secret-tool on stdin, never on argv, without the helper', async () => {
+    const service = new FakeSecretService()
+    const result = await runSecretsSet({ name: 'relay-mcp-linear-token', value: 'lin_secret_value', replace: false }, service.deps())
+
+    expect(result.exitCode, result.report).toBe(0)
+    expect(service.items.get('relay-mcp-linear-token')).toBe('lin_secret_value')
+    expect(service.calls).toContainEqual({
+      args: ['store', '--label=Relay: relay-mcp-linear-token', 'service', 'relay-mcp-linear-token'],
+      input: 'lin_secret_value',
+    })
+    expect(service.everyArgv()).not.toContain('lin_secret_value')
+    expect(result.report).not.toContain('lin_secret_value')
+    expect(result.report).not.toContain('only relay-secrets')
+  })
+
+  it('refuses to overwrite an existing item unless --replace', async () => {
+    const service = new FakeSecretService()
+    service.items.set('relay-github-read-token', 'old')
+
+    expect((await runSecretsSet({ name: 'relay-github-read-token', value: 'new', replace: false }, service.deps())).exitCode).toBe(1)
+    expect(service.items.get('relay-github-read-token')).toBe('old')
+
+    expect((await runSecretsSet({ name: 'relay-github-read-token', value: 'new', replace: true }, service.deps())).exitCode).toBe(0)
+    expect([...service.items]).toEqual([['relay-github-read-token', 'new']])
+  })
+
+  it('refuses a platform with neither keystore', async () => {
+    const result = await runSecretsSet({ name: 'x', value: 'v', replace: false }, new FakeSecretService().deps({ platform: 'win32' }))
+    expect(result).toMatchObject({ exitCode: 1 })
+    expect(result.report).toContain('win32')
+  })
+})
 
 describe('relay secrets set', () => {
   it('stores a value from stdin with the helper-only access list, never on argv', async () => {
@@ -251,6 +327,28 @@ describe('relay secrets migrate, against the test Postgres', () => {
     expect(keychain.items.get('relay-database-url')?.value).toBe('postgres://relay_app:p@localhost/relay')
     expect([...keychain.items.keys()].filter((name) => name.endsWith('.relay-migrating'))).toEqual([])
     expect(result.report).toContain('finished an interrupted replace of relay-slack-bot-token')
+  })
+
+  it('on Linux, creates the receipt key and moves a plain URL into the Secret Service with no helper', async () => {
+    const service = new FakeSecretService()
+    const configPath = writeConfig(adminUrl)
+    const appUrl = 'postgres://relay_app:app-password@localhost/relay'
+    const provision = vi.fn(async () => appUrl)
+
+    const result = await runSecretsMigrate({ configPath, provision }, service.deps())
+    expect(result.exitCode, result.report).toBe(0)
+    expect(provision).toHaveBeenCalledWith(adminUrl, 'relay_app', expect.any(String))
+
+    expect(service.items.get('relay-approval-receipt-key')).toMatch(/^[0-9a-f]{64}$/)
+    expect(service.items.get('relay-database-admin-url')).toBe(adminUrl)
+    expect(service.items.get('relay-database-url')).toBe(appUrl)
+    expect(readFileSync(configPath, 'utf8')).toContain('url: keystore:relay-database-url')
+    expect(result.report).toContain('no per-program access list')
+    expect(result.report).not.toContain('only relay-secrets')
+    for (const value of service.items.values()) {
+      expect(service.everyArgv()).not.toContain(value)
+      expect(result.report).not.toContain(value)
+    }
   })
 
   it('stops naming a reference whose keystore item is missing', async () => {

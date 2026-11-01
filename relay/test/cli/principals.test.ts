@@ -76,13 +76,30 @@ describeDb('runPrincipalsAdd', () => {
       platform,
       platformUserId,
       displayName: 'Ada Operator',
-      roles: ['operator'],
+      role: 'owner',
     })
 
     expect(result.workspaceId).toBe(workspaceId)
     await expect(resolvePrincipal(pool, workspaceId, platform, platformUserId)).resolves.toBe(
       result.principalId,
     )
+  })
+
+  it('stores member when no role is given, and refuses an unknown role before writing anything', async () => {
+    const platform = 'test'
+    const workspaceId = await resolveWorkspaceId(pool, platform, `T_${randomUUID()}`)
+    const rolesOf = async (platformUserId: string) =>
+      (await pool.query<{ roles: string[] }>('SELECT roles FROM principals WHERE workspace_id = $1 AND platform_user_id = $2', [workspaceId, platformUserId])).rows[0]?.roles
+
+    const memberId = `U_${randomUUID()}`
+    await runPrincipalsAdd(pool, { platform, platformUserId: memberId, displayName: 'Ahsan' })
+    expect(await rolesOf(memberId)).toEqual(['member'])
+
+    const adminId = `U_${randomUUID()}`
+    await expect(runPrincipalsAdd(pool, { platform, platformUserId: adminId, displayName: 'Admin', role: 'admin' })).rejects.toThrow(
+      new PrincipalsAddError('unknown role "admin": use owner or member'),
+    )
+    expect(await rolesOf(adminId)).toBeUndefined()
   })
 
   it('is idempotent: running it twice returns the same principal id and creates only one row', async () => {
@@ -94,14 +111,14 @@ describeDb('runPrincipalsAdd', () => {
       platform,
       platformUserId,
       displayName: 'Ada Operator',
-      roles: ['operator'],
+      role: 'owner',
       workspaceId,
     })
     const second = await runPrincipalsAdd(pool, {
       platform,
       platformUserId,
       displayName: 'A Different Name The Second Call Must Not Apply',
-      roles: ['operator'],
+      role: 'owner',
       workspaceId,
     })
 
@@ -126,7 +143,7 @@ describeDb('runPrincipalsAdd', () => {
         platform,
         platformUserId: `U_${randomUUID()}`,
         displayName: 'Ada Operator',
-        roles: ['operator'],
+        role: 'owner',
       }),
     ).rejects.toThrow(PrincipalsAddError)
 
@@ -144,7 +161,7 @@ describeDb('runPrincipalsAdd', () => {
         platform,
         platformUserId: `U_${randomUUID()}`,
         displayName: 'Ada Operator',
-        roles: ['operator'],
+        role: 'owner',
       }),
     ).rejects.toThrow(/Multiple workspaces found/)
   })
@@ -158,7 +175,7 @@ describeDb('runPrincipalsAdd', () => {
       platform,
       platformUserId,
       displayName: 'Ada Operator',
-      roles: ['operator'],
+      role: 'owner',
       workspaceId,
     })
 

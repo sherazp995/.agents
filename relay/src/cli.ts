@@ -6,7 +6,7 @@ import { runPrincipalsAdd } from './cli/principals.js'
 import { runNotify } from './cli/notify.js'
 import { DEFAULT_PROFILES_PATH as PROFILE_LOGIN_PROFILES_PATH, runProfileLogin } from './cli/profile-login.js'
 import { formatChromeProfiles, listChromeProfiles, runProfileClone } from './cli/profile-clone.js'
-import { runInstallService, runUninstallService, serviceBinaries } from './cli/service.js'
+import { runInstallService, runUninstallService, serviceBinaries, serviceInstalled } from './cli/service.js'
 import {
   runProfileAdd,
   runProfileOrigins,
@@ -27,6 +27,7 @@ import {
   resolveDrainWorkspace,
   runLiveClaim,
   runLiveDrain,
+  runLiveEdit,
   runLiveReact,
   runLiveRelease,
   runLiveSay,
@@ -40,20 +41,28 @@ import {
   runSmoke,
 } from './cli/smoke.js'
 import { createSecretProvider } from './secrets/index.js'
-import { loadRelayConfig } from './config/load.js'
+import { loadRelayConfig, loadRepoRegistryIfPresent } from './config/load.js'
 import { ConfigError } from './config/errors.js'
 import { resolveOperatorDatabaseUrl } from './config/database-url.js'
 import { closePool, createPool } from './db/pool.js'
 import { formatResults, runDoctor } from './doctor/run.js'
 import { RELAY_VERSION } from './version.js'
-import { defaultConfigPath, defaultPolicyPath, resolveRelayHome } from './config/paths.js'
+import { defaultConfigPath, defaultPolicyPath, defaultReposPath, resolveRelayHome } from './config/paths.js'
 import { runSecretsMigrate, runSecretsSet } from './cli/secrets.js'
 import { relaySecretsHelperPath } from './secrets/keychain.js'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { runReposAdd } from './cli/repos.js'
+import { runDbCreate } from './cli/db.js'
+import { buildSetupSteps, promptHidden, promptLine, runSetup } from './cli/setup.js'
 
 /** Commander's accumulator for a repeatable option, so `--origin a --origin b` yields both rather than the last one. */
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value]
 }
+
+/** The relay checkout or package this CLI runs from: dist/src/cli.js sits two folders below it. */
+const RELAY_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 
 const program = new Command()
 program.name('relay').description('Chat-driven computer-use agent').version(RELAY_VERSION)
@@ -287,7 +296,8 @@ program
 program
   .command('install-service')
   .description(
-    'Install a launchd agent so the daemon restarts when it exits and starts at login. The daemon exits on ' +
+    'Install a supervisor (a launchd agent on macOS, a systemd user unit on Linux) so the daemon restarts when ' +
+      'it exits and starts at login. The daemon exits on ' +
       'purpose after repeated Slack connectivity failures; without this, nothing brings it back.',
   )
   .option('--relay-home <path>', 'RELAY_HOME for the service, when the installation is not this directory')
@@ -304,7 +314,7 @@ program
       return
     }
     const result = runInstallService({
-      repoRoot: process.cwd(),
+      repoRoot: RELAY_ROOT,
       ...(options.relayHome !== undefined ? { relayHome: options.relayHome } : {}),
       binaries: serviceBinaries(autonomous),
       start: options.start,
@@ -315,7 +325,7 @@ program
 
 program
   .command('uninstall-service')
-  .description('Remove the launchd agent. Relay will no longer start at login or restart itself.')
+  .description('Remove the supervisor (launchd agent or systemd unit). Relay will no longer start at login or restart itself.')
   .action(() => {
     const result = runUninstallService()
     process.stdout.write(`${result.report}\n`)
@@ -451,6 +461,16 @@ liveOptions(liveCommand.command('say'))
     )
   })
 
+liveOptions(liveCommand.command('edit'))
+  .description('Rewrite, in place, a message relay live say posted in this thread')
+  .requiredOption('--id <status id>', 'the status id relay live say printed')
+  .requiredOption('--text <text>', 'the new message')
+  .action(async (options: LiveOptions & { id: string; text: string }) => {
+    await withLivePool(options, (pool, workspaceId) =>
+      runLiveEdit({ pool, workspaceId, channel: options.channel, thread: options.thread, id: options.id, text: options.text }),
+    )
+  })
+
 liveOptions(liveCommand.command('react'))
   .description('Add an emoji reaction to one message in the thread')
   .requiredOption('--message <ts>', 'the ts of the message to react to')
@@ -527,7 +547,7 @@ killCommand
 
 const secretsCommand = program
   .command('secrets')
-  .description("Manage relay's own keychain items, readable only through the relay-secrets helper")
+  .description("Manage relay's own keystore items: the macOS Keychain behind the relay-secrets helper, or the Linux Secret Service")
 
 /** Reads all of stdin, dropping the one trailing newline `echo` or a heredoc adds. */
 async function readStdin(): Promise<string> {
@@ -539,7 +559,7 @@ async function readStdin(): Promise<string> {
 secretsCommand
   .command('set')
   .description('Store a value read from stdin (never from an argument), e.g. an MCP env var or a GitHub token')
-  .argument('<name>', 'the keychain item name')
+  .argument('<name>', 'the keystore item name')
   .option('--replace', 'overwrite an existing item', false)
   .action(async (name: string, options: { replace: boolean }) => {
     if (process.stdin.isTTY) process.stderr.write(`Paste the value for ${name}, then press Enter and Ctrl-D:\n`)
@@ -583,7 +603,7 @@ principalsCommand
     "the platform's own user id, e.g. a Slack user id. An unmapped sender's own log line names it.",
   )
   .requiredOption('--display-name <name>', 'a human readable name, used only in logs and reports')
-  .option('--role <role>', 'role to grant', 'operator')
+  .option('--role <role>', 'owner (approves risky actions, starts direct sessions) or member (default)')
   .option('--workspace-id <uuid>', 'skip the platform lookup and provision directly into this workspace uuid')
   .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
   .action(
@@ -591,7 +611,7 @@ principalsCommand
       platform: string
       user: string
       displayName: string
-      role: string
+      role?: string
       workspaceId?: string
       config: string
     }) => {
@@ -602,7 +622,7 @@ principalsCommand
           platform: options.platform,
           platformUserId: options.user,
           displayName: options.displayName,
-          roles: [options.role],
+          ...(options.role !== undefined ? { role: options.role } : {}),
           ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
         })
         process.stdout.write(
@@ -654,6 +674,89 @@ program
     } finally {
       await closePool(pool)
     }
+  })
+
+const reposCommand = program.command('repos').description('Manage the repositories Relay may work in (config/repos.yaml)')
+
+reposCommand
+  .command('add')
+  .description('Register a git repository with read and write access; publish is never granted here')
+  .argument('<path>', 'a folder inside the repository')
+  .option('--name <name>', 'the name chats use for it; defaults to the folder name')
+  .action(async (path: string, options: { name?: string }) => {
+    const result = await runReposAdd({ path, reposPath: defaultReposPath(), ...(options.name !== undefined ? { name: options.name } : {}) })
+    process.stdout.write(`${result.report}\n`)
+    process.exitCode = result.exitCode
+  })
+
+const dbCommand = program.command('db').description("Relay's Postgres database")
+
+dbCommand
+  .command('create')
+  .description(
+    'Create the role and database named by database.url when it does not connect yet. On Linux this runs ' +
+      '`sudo -u postgres psql`, so sudo asks for your password; on macOS it runs psql as you.',
+  )
+  .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
+  .action(async (options: { config: string }) => {
+    const result = await runDbCreate({ configPath: options.config })
+    process.stdout.write(`${result.report}\n`)
+    process.exitCode = result.exitCode
+  })
+
+program
+  .command('setup')
+  .description(
+    'Set Relay up on macOS or Linux: config, database, secrets, Slack tokens, a repository and the supervisor, ' +
+      'then relay doctor. Safe to run again; finished steps are skipped.',
+  )
+  .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
+  .option('-p, --policy <path>', 'policy path', defaultPolicyPath())
+  .option('--repo <path>', 'the repository to register when none is, instead of asking')
+  .action(async (options: { config: string; policy: string; repo?: string }) => {
+    const helperPath = relaySecretsHelperPath(resolveRelayHome().path)
+    const reposPath = defaultReposPath()
+    const steps = buildSetupSteps({
+      platform: process.platform,
+      configPath: options.config,
+      configExists: () => existsSync(options.config),
+      init: () =>
+        runInit({
+          configPath: options.config,
+          policyPath: options.policy,
+          profilesPath: DEFAULT_PROFILES_PATH,
+          profilesExamplePath: DEFAULT_PROFILES_EXAMPLE_PATH,
+          yes: false,
+          force: false,
+          skipProfiles: true,
+          withExampleProfiles: false,
+          hardBlockedOrigins: [],
+          databaseUrl: DEFAULT_DATABASE_URL,
+          redisUrl: DEFAULT_REDIS_URL,
+        }),
+      dbCreate: () => runDbCreate({ configPath: options.config }),
+      installService: async (start) =>
+        runInstallService({ repoRoot: RELAY_ROOT, binaries: serviceBinaries(loadRelayConfig(options.config).autonomous), start }),
+      serviceInstalled: () => serviceInstalled(),
+      secretsMigrate: () => runSecretsMigrate({ configPath: options.config }, { helperPath }),
+      hasSecret: (name) => createSecretProvider(loadRelayConfig(options.config)).has(name),
+      setSecret: (name, value) => runSecretsSet({ name, value, replace: false }, { helperPath }),
+      registeredRepos: () => loadRepoRegistryIfPresent(reposPath).repos.map((repo) => repo.name),
+      reposAdd: (path) => runReposAdd({ path, reposPath }),
+      doctor: async () => {
+        const { results, exitCode } = await runDoctor({ configPath: options.config, policyPath: options.policy })
+        // Reported, not a setup failure: some checks (the Linux sandbox) cannot pass on every machine.
+        return { report: `${formatResults(results)}\nrelay doctor exit code: ${exitCode}`, exitCode: 0 }
+      },
+      interactive: process.stdin.isTTY === true,
+      askHidden: promptHidden,
+      askLine: promptLine,
+      ...(options.repo !== undefined ? { repo: options.repo } : {}),
+      cwd: process.cwd(),
+    })
+    const result = await runSetup(steps, (text) => process.stdout.write(text))
+    process.stdout.write(`\n${result.report}\n`)
+    process.exitCode = result.exitCode
   })
 
 await program.parseAsync(process.argv)

@@ -21,6 +21,17 @@ describe('WORKER_BRIEF', () => {
     for (const gone of ['JSON', 'plan', 'worktree', 'remote_write']) expect(WORKER_BRIEF).not.toContain(gone)
   })
 
+  it('asks for one remote write per command, plain git push, and gh only for GitHub actions', () => {
+    expect(WORKER_BRIEF).toContain('Run each remote write as its own command')
+    expect(WORKER_BRIEF).toContain('Push with plain `git push`')
+    expect(WORKER_BRIEF).toContain('Use `gh` only for what git cannot do on GitHub')
+  })
+
+  it('asks long work to edit one status message in place and post the final report as a new message', () => {
+    expect(WORKER_BRIEF).toContain('update that one status message in place')
+    expect(WORKER_BRIEF).toContain('Post the final report as a new message')
+  })
+
   it('says the final message is the report, and to ack long work in its own words but answer a quick question directly', () => {
     expect(WORKER_BRIEF).toContain('posted in the thread as the report')
     expect(WORKER_BRIEF).toContain('does not acknowledge messages for you')

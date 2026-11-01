@@ -24,6 +24,7 @@ import { applyMigrations } from '../src/db/migrate.js'
 import { createLogger } from '../src/obs/logger.js'
 import { resolveWorkspaceId } from '../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../src/tenancy/principals.js'
+import { NOT_YOUR_THREAD_REPLY, OWNER_ONLY_REPLY } from '../src/tenancy/access.js'
 import { registerSecretValue, resetSecretScrubberForTests } from '../src/secrets/scrubber.js'
 import { attachSessionToEngineChat, findOrCreateSession } from '../src/sessions/store.js'
 import { claimLiveControl } from '../src/live/control.js'
@@ -52,7 +53,6 @@ import type {
   SlackAuthIdentity,
   SlackBlockActionEnvelope,
   SlackBoltApp,
-  SlackCommandEnvelope,
   SlackEventEnvelope,
   SlackEventListener,
   SlackPostMessageArgs,
@@ -503,6 +503,86 @@ describeDb('orchestrator', () => {
 
       expect(auto.stopped).toEqual([session.id])
       expect((adapter.performed[0] as { text: string }).text).toContain('Stopped')
+    })
+
+    describe('members', () => {
+      async function memberIn(workspaceId: string): Promise<string> {
+        return provisionPrincipal(pool, workspaceId, 'test', `U_${randomUUID()}`, 'Member', ['member'])
+      }
+
+      async function threadOf(workspaceId: string, principalId: string, event: ChatEvent) {
+        return findOrCreateSession(pool, { workspaceId, principalId, adapter: 'test', threadRef: composeThreadRef(event.ref.channel, event.ref.message ?? '') })
+      }
+
+      async function handle(event: ChatEvent, auto: ReturnType<typeof fakeAutonomous>, adapter: MockAdapter): Promise<void> {
+        await handleChatEvent({ pool, dispatcher: adapter, log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, autonomous: auto.routing }, event)
+      }
+
+      const replies = (adapter: MockAdapter) => adapter.performed.map((action) => (action as { text?: string }).text)
+
+      it("refuses a member's reply in the owner's thread, and their Stop there stops nothing", async () => {
+        const { workspaceId, principalId: ownerId } = await createFixtures()
+        const memberId = await memberIn(workspaceId)
+        const reply = buildEvent({ workspaceId, principalId: memberId })
+        const session = await threadOf(workspaceId, ownerId, reply)
+        await pool.query(`UPDATE sessions SET mode = 'autonomous' WHERE id = $1`, [session.id])
+        const stop = buildEvent({ workspaceId, principalId: memberId, channel: reply.ref.channel, message: reply.ref.message ?? '', text: 'stop' })
+        const auto = fakeAutonomous('handled')
+        const adapter = new MockAdapter()
+
+        await handle(reply, auto, adapter)
+        await handle(stop, auto, adapter)
+
+        expect(auto.routed).toEqual([])
+        expect(auto.stopped).toEqual([])
+        expect(replies(adapter)).toEqual([NOT_YOUR_THREAD_REPLY, NOT_YOUR_THREAD_REPLY])
+        expect(await runCount(workspaceId)).toBe(0)
+      })
+
+      it('lets a member work and Stop in their own thread', async () => {
+        const { workspaceId } = await createFixtures()
+        const memberId = await memberIn(workspaceId)
+        const first = buildEvent({ workspaceId, principalId: memberId })
+        const auto = fakeAutonomous('handled')
+
+        await handle(first, auto, new MockAdapter())
+        const session = await threadOf(workspaceId, memberId, first)
+        await pool.query(`UPDATE sessions SET mode = 'autonomous' WHERE id = $1`, [session.id])
+        await handle(buildEvent({ workspaceId, principalId: memberId, channel: first.ref.channel, message: first.ref.message ?? '', text: 'stop' }), auto, new MockAdapter())
+
+        expect(auto.routed).toEqual([first.platformEventId])
+        expect(auto.stopped).toEqual([session.id])
+      })
+
+      it.each(['direct', 'live'] as const)('refuses a member in their own thread once it is a %s chat', async (kind) => {
+        const { workspaceId } = await createFixtures()
+        const memberId = await memberIn(workspaceId)
+        const event = buildEvent({ workspaceId, principalId: memberId })
+        const session = await threadOf(workspaceId, memberId, event)
+        if (kind === 'direct') await pool.query(`UPDATE sessions SET mode = 'direct' WHERE id = $1`, [session.id])
+        else await claimLiveControl(pool, workspaceId, session.id)
+        const auto = fakeAutonomous('handled')
+        const adapter = new MockAdapter()
+
+        await handle(event, auto, adapter)
+
+        expect(auto.routed).toEqual([])
+        expect(replies(adapter)).toEqual([OWNER_ONLY_REPLY])
+        const { rows } = await pool.query('SELECT 1 FROM live_control_messages WHERE session_id = $1', [session.id])
+        expect(rows).toHaveLength(0)
+      })
+
+      it("lets the owner act in a member's thread", async () => {
+        const { workspaceId, principalId: ownerId } = await createFixtures()
+        const memberId = await memberIn(workspaceId)
+        const event = buildEvent({ workspaceId, principalId: ownerId })
+        await threadOf(workspaceId, memberId, event)
+        const auto = fakeAutonomous('handled')
+
+        await handle(event, auto, new MockAdapter())
+
+        expect(auto.routed).toEqual([event.platformEventId])
+      })
     })
   })
 
@@ -1461,16 +1541,6 @@ describeDb('orchestrator', () => {
       action(actionId: string, listener: SlackActionListener): void {
         this.actions.set(actionId, listener)
       }
-      readonly commands = new Map<string, (envelope: SlackCommandEnvelope) => Promise<void>>()
-      command(commandName: string, listener: (envelope: SlackCommandEnvelope) => Promise<void>): void {
-        this.commands.set(commandName, listener)
-      }
-      /** Drives one registered slash command the way Slack would. */
-      async dispatchCommand(commandName: string, envelope: SlackCommandEnvelope): Promise<void> {
-        const listener = this.commands.get(commandName)
-        if (!listener) throw new Error(`no listener registered for command ${commandName}`)
-        await listener(envelope)
-      }
       view(): void {}
       /** Drives one registered Block Kit action the way Socket Mode would. */
       async dispatchAction(actionId: string, envelope: SlackBlockActionEnvelope): Promise<void> {
@@ -1586,6 +1656,35 @@ describeDb('orchestrator', () => {
       expect(rows[0]?.engine_cwd).toBe(target?.cwd)
       expect(rows[0]?.principal_id).toBe(principalId)
 
+      await adapter.stop()
+    })
+
+    it.each([
+      ['a member', ['member'], [OWNER_ONLY_REPLY]],
+      ['an unmapped user', null, []],
+    ] as const)('refuses a "direct" message from %s before any session starts', async (_label, roles, expectedPosts) => {
+      const teamId = `T_${randomUUID()}`
+      const boltApp = new StubBoltApp()
+      const posts: string[] = []
+      const apiClient = new (class extends StubApiClient {
+        override async postMessage(args: SlackPostMessageArgs): Promise<{ ts: string }> {
+          posts.push(args.text)
+          return super.postMessage(args)
+        }
+      })({ botUserId: 'UBOTFAKE', platformTeamId: teamId })
+      const { adapter, workspaceId } = await createProductionSlackAdapter(pool, fakeSecrets(), { boltApp, apiClient })
+      const platformUserId = `U_${randomUUID()}`
+      if (roles !== null) await provisionPrincipal(pool, workspaceId, 'slack', platformUserId, 'Someone', [...roles])
+      await adapter.start(async () => {})
+
+      await boltApp.dispatch('message', {
+        event: { type: 'message', channel: `D_${randomUUID().slice(0, 8)}`, user: platformUserId, text: 'direct /tmp list the files', ts: '4000.000001' },
+        body: {},
+      })
+
+      expect(posts).toEqual(expectedPosts)
+      const { rows } = await pool.query('SELECT 1 FROM sessions WHERE workspace_id = $1', [workspaceId])
+      expect(rows).toHaveLength(0)
       await adapter.stop()
     })
 

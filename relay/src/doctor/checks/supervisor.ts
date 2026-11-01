@@ -15,33 +15,57 @@
  * after.
  */
 
-import { serviceInstalled, SERVICE_LABEL } from '../../cli/service.js'
+import { serviceInstalled, SERVICE_LABEL, SYSTEMD_UNIT, type ServiceDependencies } from '../../cli/service.js'
 import type { CheckResult } from '../checks.js'
-import { registerCheck } from '../registry.js'
+import { registerCheck, type Check } from '../registry.js'
 
-registerCheck({
-  name: 'supervisor',
-  async run(): Promise<CheckResult> {
-    if (process.platform !== 'darwin') {
-      return {
-        name: 'supervisor',
-        status: 'degraded',
-        detail: 'no supervisor check on this platform; run the orchestrator under systemd with Restart=on-failure.',
+const NOTHING_RESTARTS =
+  'so nothing restarts the daemon when it exits. It exits deliberately after repeated Slack connectivity failures, ' +
+  'which means the next transient network blip takes Relay down until someone notices by hand. This has already ' +
+  'happened once, for two days.'
+
+/** `deps` reaches serviceInstalled, so a test can pick the platform and what is on disk. */
+export function checkSupervisor(deps: Pick<ServiceDependencies, 'platform' | 'home' | 'pathExists'> = {}): Check {
+  return {
+    name: 'supervisor',
+    async run(): Promise<CheckResult> {
+      const platform = deps.platform ?? process.platform
+      if (platform === 'linux') {
+        if (!serviceInstalled(deps)) {
+          return {
+            name: 'supervisor',
+            status: 'degraded',
+            detail: `no systemd user unit is installed, ${NOTHING_RESTARTS}`,
+            remediation: 'Run `relay install-service --start`.',
+          }
+        }
+        return {
+          name: 'supervisor',
+          status: 'ok',
+          detail: `${SYSTEMD_UNIT} is installed as a systemd user unit, so a failure exit is restarted and Relay starts at login.`,
+        }
       }
-    }
 
-    if (!serviceInstalled()) {
-      return {
-        name: 'supervisor',
-        status: 'degraded',
-        detail:
-          'no launchd agent is installed, so nothing restarts the daemon when it exits. It exits deliberately after ' +
-          'repeated Slack connectivity failures, which means the next transient network blip takes Relay down until ' +
-          'someone notices by hand. This has already happened once, for two days.',
-        remediation: 'Run `relay install-service --start`.',
+      if (platform !== 'darwin') {
+        return {
+          name: 'supervisor',
+          status: 'degraded',
+          detail: 'no supervisor check on this platform; run the orchestrator under a supervisor that restarts it on a failure exit.',
+        }
       }
-    }
 
-    return { name: 'supervisor', status: 'ok', detail: `${SERVICE_LABEL} is installed, so a failure exit is restarted and Relay starts at login.` }
-  },
-})
+      if (!serviceInstalled(deps)) {
+        return {
+          name: 'supervisor',
+          status: 'degraded',
+          detail: `no launchd agent is installed, ${NOTHING_RESTARTS}`,
+          remediation: 'Run `relay install-service --start`.',
+        }
+      }
+
+      return { name: 'supervisor', status: 'ok', detail: `${SERVICE_LABEL} is installed, so a failure exit is restarted and Relay starts at login.` }
+    },
+  }
+}
+
+registerCheck(checkSupervisor())

@@ -3,7 +3,10 @@
  * calls (claude and codex, through scripts/hook-pretooluse.ts and the hook
  * bridge). A command that writes to a remote (`git push`, a `gh` write)
  * waits for the requester's approval in the thread and then runs once;
- * everything else runs, because the worker is a regular chat.
+ * everything else runs, because the worker is a regular chat. A remote
+ * write must be its own command, so one card names one action and what is
+ * approved is exactly what runs; a chain, pipe, substitution or wrapper
+ * shell around one is refused before any card is posted.
  *
  * Every dependency failure throws out of here, and the bridge turns a throw
  * (or a slow answer) into deny.
@@ -70,6 +73,12 @@ export function createAutonomousGuard(deps: GuardDeps): AutonomousGuard {
     const writes = remoteWrites(input.data.command)
     if ('error' in writes) return deny(`could not parse this command (${writes.error}); rewrite it plainly`)
     if (writes.length === 0) return { decision: 'allow', reason: 'no remote write' }
+    if (writes.length > 1 || loneCommandWords(input.data.command) === undefined) {
+      return deny(
+        `This command holds a remote write (${writes.join(', ')}) together with other commands, so it cannot be approved as one action: ` +
+          'run each remote write as its own command, with no chaining, pipes, substitutions or wrapper shells, and run the rest separately.',
+      )
+    }
     const answer = await deps.requestShellWrite(context, { command: input.data.command, cwd: input.data.workdir ?? parsed.data.cwd ?? '' })
     if (answer.kind === 'approved') return { decision: 'allow', reason: 'approved in the Slack thread' }
     if (answer.kind === 'refused') return deny(answer.reason)
@@ -82,10 +91,23 @@ export function createAutonomousGuard(deps: GuardDeps): AutonomousGuard {
   return { decide }
 }
 
+/**
+ * The words of a command that is one plain command: one segment, no
+ * `$(...)` or backticks, no grouping, and no `sh -c` or `eval` inside.
+ * Undefined for anything else, including a command that does not parse.
+ */
+export function loneCommandWords(command: string): Word[] | undefined {
+  const tokens = tokenize(command)
+  if ('error' in tokens || tokens.grouped || tokens.nested.length > 0) return undefined
+  const [segment, ...others] = tokens.segments
+  if (segment === undefined || others.length > 0 || innerCommands(segment).length > 0) return undefined
+  return segment.words
+}
+
 const MAX_NESTING = 8
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh'])
 /** git's global options that take the next word as their value. */
-const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--exec-path'])
+export const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--exec-path'])
 /** gh command groups that never write to a remote. */
 const GH_LOCAL_GROUPS = new Set(['auth', 'browse', 'completion', 'config', 'extension', 'alias', 'help', 'search', 'status', 'version'])
 /** gh subcommands that only read (or fetch to the local machine). */
@@ -172,7 +194,7 @@ function apiMethod(texts: readonly string[]): string | undefined {
   return method
 }
 
-type Word = { text: string; quoted: boolean; dynamic: boolean }
+export type Word = { text: string; quoted: boolean; dynamic: boolean }
 type Segment = { words: Word[]; separator: string }
 
 /** Strings a segment hands to a shell to run: `sh -c '<string>'` and `eval <words>`. */

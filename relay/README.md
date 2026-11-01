@@ -19,8 +19,8 @@ you (Slack)  ──▶  Relay daemon  ──▶  claude -p (headless)
 ## Before you start
 
 **macOS is the fully supported platform.** Linux runs Slack, approvals and
-the browser: set `secrets.provider: libsecret` and store the tokens with
-`secret-tool store --label="Relay" service relay-slack-bot-token`. What Linux
+the browser, with `secrets.provider: libsecret` (the Secret Service, through
+`secret-tool`), and `relay setup` works the same there. What Linux
 does not have is the sandbox, which is built on macOS `sandbox-exec`, so
 `shell` calls there fail closed rather than running unconfined (FR-SH-7).
 Windows is unsupported.
@@ -82,6 +82,40 @@ copy's configuration. `relay doctor` tells you which one it chose.
 
 Postgres and Redis are still needed either way, set up as above.
 
+### Set it up with one command
+
+Inside `~/.agents`, `python3 ~/.agents/install.py` puts `relay` on your PATH
+(`~/.local/bin/relay`, next to `agents-hub`); run `relay update` once to
+build it. After that, when agents-sync pulls commits that touch `relay/`,
+Relay rebuilds itself in the background and restarts a running daemon only
+if the build passed. A failed build keeps the old one and every session
+start says so until `relay update` passes. Its log is `relay/tmp/update.log`.
+
+Create the Slack app first (below; it needs a browser), then:
+
+```bash
+relay setup                   # or: node dist/src/cli.js setup
+```
+
+It runs each step below in order and skips what is already done, so it is
+safe to run again. It asks only for the two Slack tokens (hidden), the
+repository Relay may work in, and, on Linux, your sudo password when it
+creates the Postgres role. Each step is also its own command:
+
+| Step | Command |
+|---|---|
+| Config | `relay init` |
+| Postgres role and database | `relay db create` (Linux: `sudo -u postgres psql`; macOS: `psql` as you) |
+| Secrets helper (macOS only) | `relay install-service` |
+| Receipt key, database URL into the keystore | `relay secrets migrate` |
+| Slack tokens | `relay secrets set relay-slack-bot-token`, `relay secrets set relay-slack-app-token` |
+| A repository | `relay repos add <path>` |
+| Supervisor | `relay install-service --start` (launchd on macOS, a systemd user unit on Linux) |
+| Check | `relay doctor` |
+
+On Linux the unit starts at login, once the login keyring is unlocked; at
+boot the keyring is locked and Relay could not read its secrets.
+
 ### Create the Slack app
 
 1. Go to <https://api.slack.com/apps>, choose **Create New App → From a
@@ -128,8 +162,9 @@ recreates them, and a daemon started before that would raise Keychain
 dialogs from launchd.
 
 `install-service` refuses, naming the binary, when claude (or, with
-autonomous tasks on, codex or gh) cannot be found: launchd has no shell PATH,
-so the plist carries one. It also compiles `native/relay-secrets` into
+autonomous tasks on, gh) cannot be found: launchd and systemd have no shell
+PATH, so the service carries one. Codex is optional; without it every chat
+runs on Claude. It also compiles `native/relay-secrets` into
 `<RELAY_HOME>/bin/relay-secrets` and signs it ad hoc. That helper is the only
 program on the access list of Relay's Keychain items, and it answers only
 the running daemon.
@@ -198,6 +233,42 @@ A running process is not evidence. Relay has shipped a bug where the daemon
 stayed alive having never completed the Socket Mode handshake.
 
 Then mention Relay in a channel it is in, or DM it.
+
+### Who can use your Relay
+
+Relay ignores anyone you have not added. Add yourself as the owner, and
+anyone else as a member:
+
+```bash
+node dist/src/cli.js principals add --platform slack --user U0123ABC --display-name "Sheraz" --role owner
+node dist/src/cli.js principals add --platform slack --user U0456DEF --display-name "Ahsan"
+```
+
+`--role` defaults to `member`. An ignored sender's Slack user id is in the
+daemon log. A principal added before roles existed holds `operator`, which
+counts as owner. Re-running the command keeps the role a person already has.
+
+| | Owner | Member |
+|---|---|---|
+| Start work by mentioning or DMing Relay | yes | yes |
+| Reply in, or Stop, a thread | any thread | only threads they started |
+| Approve a push or a GitHub write | yes | no (policy.yaml `approvals` decides per risk tier) |
+| "direct", a live chat thread, "sessions", Attach | yes | no |
+
+Relay has no slash commands, because Slack gives each command name to one
+app per workspace and a second Relay would take the first one's. Two words
+do the same job as plain messages, in a DM or after a mention:
+
+- `sessions` lists your Claude Code sessions to attach the thread to.
+- `direct [directory] [message]` starts a plain Claude Code session in that
+  message's thread, for example `@Relay direct ~/project fix the build`.
+
+Each person who wants their own assistant runs their own Relay with their
+own Slack app and tokens. Two machines sharing one app split its events
+between them. An app made from an older manifest still has `/relay`,
+`/sessions` and `/direct` and the `commands` permission: paste
+`docs/slack-app-manifest.yaml` into its settings and reinstall it, or
+`relay doctor`'s scope check fails.
 
 ---
 

@@ -68,6 +68,18 @@ describe('the guard', () => {
     expect(await guardWith({ kind: 'refused', reason: 'no' }).guard.decide(bash('git push origin x'), CONTEXT)).toEqual({ decision: 'deny', reason: 'no' })
   })
 
+  it('refuses a remote write run with anything else before asking, and still refuses what it cannot parse', async () => {
+    const { guard, requested } = guardWith({ kind: 'approved' })
+    for (const command of ['git add . && git push', 'git push && gh pr create --title x', 'echo origin | xargs git push', 'sh -c "git push && echo done"', 'echo $(git push)', '(git push)']) {
+      expect(await guard.decide(bash(command), CONTEXT)).toEqual({ decision: 'deny', reason: expect.stringContaining('run each remote write as its own command') })
+    }
+    expect(await guard.decide(bash('git push "unterminated'), CONTEXT)).toEqual({ decision: 'deny', reason: expect.stringContaining('could not parse') })
+    expect(requested).toEqual([])
+    expect(await guard.decide(bash('pnpm test && git status | cat'), CONTEXT)).toMatchObject({ decision: 'allow' })
+    expect(await guard.decide(bash('git push -u origin feature-x 2>&1'), CONTEXT)).toMatchObject({ decision: 'allow' })
+    expect(requested).toEqual([{ command: 'git push -u origin feature-x 2>&1', cwd: '/repo' }])
+  })
+
   it('denies without a token, on the kill switch, for a stopped task and for a stale lease', async () => {
     const { guard } = guardWith({ kind: 'approved' })
     expect(await guard.decide(bash('ls'), undefined)).toMatchObject({ decision: 'deny' })

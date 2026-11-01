@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# `relay` on PATH: install.py links ~/.local/bin/relay here. Runs the compiled
+# CLI of this checkout; `relay update` rebuilds it, which works even when the
+# build is missing or broken, because it never loads the compiled code.
+set -euo pipefail
+
+source="${BASH_SOURCE[0]}"
+while [ -L "$source" ]; do
+  dir=$(cd -P "$(dirname "$source")" && pwd)
+  source=$(readlink "$source")
+  [[ $source == /* ]] || source="$dir/$source"
+done
+root=$(cd -P "$(dirname "$source")/.." && pwd)
+
+if [ "${1:-}" = update ]; then
+  shift
+  exec "$root/bin/relay-update" "$@"
+fi
+
+cli="$root/dist/src/cli.js"
+if [ ! -f "$cli" ]; then
+  echo "Relay is not built in $root yet. Run: relay update" >&2
+  exit 1
+fi
+exec node "$cli" "$@"

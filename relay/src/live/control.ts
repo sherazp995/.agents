@@ -61,6 +61,11 @@ export function buildReplyCommand(ref: { channel?: string; thread?: string; mess
   return `relay live say --channel ${channel} --thread ${thread} --text "<your answer>"`
 }
 
+/** The command that rewrites a message `relay live say` posted, in place; `id` is the status id say printed. Shared by say's output and the worker brief, like buildReplyCommand. */
+export function buildEditCommand(ref: { channel?: string; thread?: string }, id: string): string {
+  return `relay live edit --channel ${ref.channel ?? '?'} --thread ${ref.thread ?? '?'} --id ${id} --text "<new status>"`
+}
+
 /** The Postgres channel a waiting consumer listens on. One per session, so a consumer is never woken by another thread's traffic. */
 export function liveControlChannel(sessionId: string): string {
   // A channel name is an identifier, so a uuid's hyphens are replaced rather

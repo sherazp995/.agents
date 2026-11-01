@@ -32,10 +32,14 @@ describe('relay live say', () => {
     const principalId = await provisionPrincipal(pool, workspaceId, 'slack', `U_${randomUUID()}`, 'Operator', ['operator'])
     await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef: 'D1:1.1' })
 
-    await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '1.1', text: ' Done. ' })
+    const out = await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '1.1', text: ' Done. ' })
 
-    const { rows } = await pool.query<{ action: unknown }>('SELECT action FROM outbox WHERE workspace_id = $1', [workspaceId])
+    const { rows } = await pool.query<{ id: string; action: unknown }>('SELECT id, action FROM outbox WHERE workspace_id = $1', [workspaceId])
     expect(rows.map((row) => row.action)).toEqual([{ kind: 'post', ref: { channel: 'D1', thread: '1.1' }, text: 'Done.', markdown: true }])
+    // The printed status id is the post's outbox row, which relay live edit resolves.
+    expect(out).toBe(
+      `queued ${rows[0]?.id} for D1:1.1; the relay daemon posts it. Edit it later with: relay live edit --channel D1 --thread 1.1 --id ${rows[0]?.id} --text "<new status>"`,
+    )
   })
 
   it('attaches a file after the text, and refuses one over the size limit', async () => {
@@ -51,9 +55,11 @@ describe('relay live say', () => {
 
     await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '2.1', text: 'Plan attached.', file: join(dir, 'plan.md') })
     await expect(runLiveSay({ pool, workspaceId, channel: 'D1', thread: '2.1', text: '', file: join(dir, 'big.md') })).rejects.toThrow("Slack's limit is")
+    // A file alone has no text post to edit, so no status id is printed.
+    expect(await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '2.1', text: '', file: join(dir, 'plan.md') })).toBe('queued for D1:2.1; the relay daemon posts it.')
 
     const { rows } = await pool.query<{ action: { kind: string; filename?: string; path?: string } }>('SELECT action FROM outbox WHERE workspace_id = $1 ORDER BY created_at', [workspaceId])
     // The row holds the path, not the bytes: the daemon reads the file when it uploads.
-    expect(rows.map((row) => [row.action.kind, row.action.filename, row.action.path])).toEqual([['post', undefined, undefined], ['upload', 'plan.md', join(dir, 'plan.md')]])
+    expect(rows.map((row) => [row.action.kind, row.action.filename, row.action.path])).toEqual([['post', undefined, undefined], ['upload', 'plan.md', join(dir, 'plan.md')], ['upload', 'plan.md', join(dir, 'plan.md')]])
   })
 })

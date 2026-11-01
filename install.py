@@ -789,6 +789,9 @@ class Installer:
 
     def cli(self):
         self.link(self.home / '.local' / 'bin' / 'agents-hub', HUB / 'hub' / 'agents-hub')
+        relay = HUB / 'relay' / 'bin' / 'relay'
+        if relay.exists():  # a hub copy without relay gets no dangling link
+            self.link(self.home / '.local' / 'bin' / 'relay', relay)
 
     def scheduler_path(self):
         """PATH for the scheduled job: launchd, systemd and cron start with almost none, and the

@@ -74,6 +74,24 @@ describe('src/approvals/blockkit.ts', () => {
       expect(rendered).toContain('Hassan')
     })
 
+    it('keeps every section within Slack\'s 3000 character limit when the title and target come from a very long command', () => {
+      const command = `gh pr create --title "${'t'.repeat(4000)}" --body "${'x'.repeat(5000)}"`
+      const card = renderApprovalCard(
+        baseCardFields({ description: `Open a pull request: ${'t'.repeat(4000)}`, target: command, kind: 'remote_write', operation: { kind: 'shell', text: command } }),
+      )
+      const resolved = renderResolvedCard({
+        ...baseCardFields({ description: `Open a pull request: ${'t'.repeat(4000)}`, target: command }),
+        status: 'approved',
+        selectedOption: 'approve',
+        resolverDisplayName: 'Sheraz',
+        resolvedAtIso: '2026-11-01T00:00:00.000Z',
+      })
+      for (const block of [...card.blocks, ...resolved.blocks]) {
+        const text = (block as { text?: { text?: string } }).text?.text
+        if (text !== undefined) expect(text.length).toBeLessThanOrEqual(3000)
+      }
+    })
+
     it('renders exactly FR-APR-2\'s four options as buttons, each carrying the approval id', () => {
       const { blocks } = renderApprovalCard(baseCardFields())
       const actions = actionsBlock(blocks)

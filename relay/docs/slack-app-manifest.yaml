@@ -27,33 +27,9 @@ features:
     home_tab_enabled: false
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
-  # Declared so the `commands` scope is legitimately requested. Socket Mode
-  # means no request URL is needed. The command is not implemented until
-  # phase 2 (FR-SL-9); it exists here only to justify the scope.
-  slash_commands:
-    # Puts this thread in DIRECT mode: an ordinary Claude Code session in a
-    # directory, which Relay carries messages to and from. Unmediated, and
-    # the reply says so. Everything else stays governed.
-    - command: /direct
-      description: Start a plain Claude Code session in a directory
-      usage_hint: "[directory] [first message]"
-      should_escape: false
-    - command: /relay
-      description: Run a Relay task
-      usage_hint: "[task]"
-      should_escape: false
-    # FR-ATT-5. Lists the Claude Code sessions already on the operator's
-    # machine and lets them bind this thread to one, so work runs in that
-    # project with its own skills, agents, and settings.
-    #
-    # The adapter also answers a plain message reading exactly "sessions",
-    # deliberately kept alongside this: that trigger needs no manifest change
-    # and so survives a reinstall that omits this declaration. Slack only
-    # autocompletes the declared one, which is why this exists.
-    - command: /sessions
-      description: List your Claude Code sessions and attach this thread to one
-      usage_hint: ""
-      should_escape: false
+  # No slash commands: Slack gives each command name to one app per
+  # workspace, so two Relays would take each other's. "sessions" and
+  # "direct" are plain messages to Relay instead.
 
 oauth_config:
   scopes:
@@ -69,7 +45,6 @@ oauth_config:
       - files:write
       - reactions:read
       - reactions:write
-      - commands
 
 settings:
   event_subscriptions:

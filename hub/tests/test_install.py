@@ -125,6 +125,17 @@ class HubCase(unittest.TestCase):
 
 
 class InstallTests(HubCase):
+    def test_relay_is_linked_onto_path_when_the_hub_has_it(self):
+        self.assertFalse(install(self.hub, self.home).returncode)
+        self.assertFalse((self.home / '.local/bin/relay').is_symlink(), 'no relay in the hub, no dangling link')
+
+        wrapper = self.hub / 'relay/bin/relay'
+        wrapper.parent.mkdir(parents=True)
+        shutil.copy(CHECKOUT / 'relay/bin/relay', wrapper)
+        self.assertFalse(install(self.hub, self.home).returncode)
+
+        self.assertEqual((self.home / '.local/bin/relay').resolve(), wrapper)
+
     def test_first_run_wires_everything_and_a_second_run_changes_nothing(self):
         first = install(self.hub, self.home)
         second = install(self.hub, self.home)

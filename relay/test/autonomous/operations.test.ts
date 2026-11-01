@@ -96,7 +96,34 @@ describe('remote-write approvals', () => {
     expect(rows).toEqual([{ state: 'skipped' }])
   })
 
-  it('lets only an operator approve a remote write, not the member who started the thread', async () => {
+  it('asks for the roles policy.yaml names for the write tier, and an owner when it names none', async () => {
+    const approvalRoles = async (approvalPolicy?: { write: { required_roles: string[]; requires_typed_confirmation: boolean } }) => {
+      const { context } = await newTask()
+      await requestShellWrite(pool, { ...deps, ...(approvalPolicy ? { approvalPolicy } : {}) }, context, { command: 'git push origin main', cwd: '/repo' })
+      const { rows } = await pool.query<{ required_roles: string[] }>(
+        'SELECT a.required_roles FROM approvals a JOIN autonomous_operations o ON o.approval_id = a.id WHERE o.task_id = $1',
+        [context.taskId],
+      )
+      return rows[0]?.required_roles
+    }
+    expect(await approvalRoles()).toEqual(['owner'])
+    expect(await approvalRoles({ write: { required_roles: ['member'], requires_typed_confirmation: false } })).toEqual(['member'])
+  })
+
+  it('titles the card with the plain line and shows the exact command in full', async () => {
+    const { context } = await newTask()
+    const command = `git push -u origin feature-x ${'--no-verify '.repeat(10).trim()}`
+    await requestShellWrite(pool, deps, context, { command, cwd: '/repo' })
+    const { rows } = await pool.query<{ action: { text: string; blocks: unknown[] } }>(
+      `SELECT action FROM outbox WHERE workspace_id = $1 AND action->>'kind' = 'post_approval_card'`,
+      [context.workspaceId],
+    )
+    const card = JSON.stringify(rows[0]?.action.blocks)
+    expect(rows[0]?.action.text).toContain('Approval needed: Push branch feature-x to origin')
+    expect(card).toContain(JSON.stringify(`\`\`\`Run in /repo:\n${command}\`\`\``).slice(1, -1))
+  })
+
+  it('lets only an owner approve a remote write, not the member who started the thread', async () => {
     const { context, principalId } = await newTask()
     await requestShellWrite(pool, deps, context, { command: 'git push origin main', cwd: '/repo' })
     const { rows } = await pool.query<{ approval_id: string }>('SELECT approval_id FROM autonomous_operations WHERE task_id = $1', [context.taskId])

@@ -58,7 +58,12 @@ const destinations = listCapabilities()
   .filter((definition) => definition.destinationOf !== undefined)
   .map((definition) => definition.name)
 
-const evidence = scanSourceForEgressEvidence(join(root, 'src'))
+// Scanned as 'src' from the package root, exactly as doctor's live check
+// scans it, so file paths match the relative keys VENDOR_LAUNCHER_SPAWNS and
+// KNOWN_UNRESOLVED_SPAWN_NOTES use. An absolute path missed every key and
+// recorded the declared launchers as undeclared.
+process.chdir(root)
+const evidence = scanSourceForEgressEvidence('src')
 const comparison = compareEgressToSource(EGRESS_INVENTORY, evidence, destinations)
 
 writeFileSync(
