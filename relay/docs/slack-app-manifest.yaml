@@ -41,6 +41,8 @@ oauth_config:
       - im:write
       - channels:history
       - groups:history
+      - channels:read
+      - groups:read
       - files:read
       - files:write
       - reactions:read

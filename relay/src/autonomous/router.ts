@@ -41,7 +41,7 @@ export async function routeAutonomousEvent(
   deps: RouterDeps,
   event: ChatEvent,
   thread: { threadRef: string; replyRef: ChatRef },
-  options: { adopt?: boolean } = {},
+  options: { adopt?: boolean; chatCwd?: string } = {},
 ): Promise<RouteResult> {
   const principalId = event.principalId
   if (principalId === null) return 'not_autonomous'
@@ -68,7 +68,8 @@ export async function routeAutonomousEvent(
     replyRef: thread.replyRef,
     files: pendingFiles(event.files),
     adopt: options.adopt === true,
-    chatCwd: deps.chatFolder(text),
+    // A folder decided before routing (the channel's) wins over the message's.
+    chatCwd: options.chatCwd ?? deps.chatFolder(text),
   })
   if (result.kind === 'not_autonomous') return 'not_autonomous'
   if (result.kind === 'appended' && result.duplicate) return 'handled'
@@ -80,7 +81,12 @@ export async function routeAutonomousEvent(
     return 'handled'
   }
   const preference = result.kind === 'created' ? parseAgentPreference(text) : null
-  if (preference !== null) await recordAgentPreference(deps.pool, task.id, preference)
+  // The task is already committed: a failed preference write must not read as a failed intake (that would ask for a resend).
+  if (preference !== null) {
+    await recordAgentPreference(deps.pool, task.id, preference).catch((error: unknown) => {
+      deps.log.warn({ err: error, taskId: task.id }, 'could not record the agent preference; the task runs with the default')
+    })
+  }
 
   deps.wake()
   return 'handled'

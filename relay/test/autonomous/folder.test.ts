@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { chatFolder } from '../../src/autonomous/folder.js'
+import { chatFolder, namedFolder } from '../../src/autonomous/folder.js'
 import type { RepoEntry } from '../../src/repos/schema.js'
 
 const home = mkdtempSync(join(tmpdir(), 'relay-folder-'))
@@ -24,5 +24,13 @@ describe('chatFolder', () => {
     expect(chatFolder('fix the login in wa', repos, home)).toBe('/repos/winad')
     expect(chatFolder('check ~/missing for me', repos, home)).toBe('/repos/agents')
     expect(chatFolder('hello', [], home)).toBe(home)
+  })
+})
+
+describe('namedFolder', () => {
+  it('takes only a folder the text names, never a repo or home', () => {
+    expect(namedFolder('use ~/code', home)).toBe(join(home, 'code'))
+    expect(namedFolder('use agents', home)).toBeUndefined()
+    expect(namedFolder('use ~/missing', home)).toBeUndefined()
   })
 })

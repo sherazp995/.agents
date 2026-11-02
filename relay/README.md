@@ -152,6 +152,9 @@ boot the keyring is locked and Relay could not read its secrets.
 4. **Already installed the app before autonomous tasks?** Reinstall it from
    `docs/slack-app-manifest.yaml`: the bot now needs `reactions:write` so the
    agent can react to a message (`relay live react`). `relay doctor` fails until the token has it.
+   It also needs `channels:read` and `groups:read` to read a channel's
+   description (see "A folder per channel" below); until then Relay refuses
+   to start sessions in channels and says why.
 
 ### Install the supervisor and lock down Relay's own secrets
 
@@ -283,6 +286,25 @@ do the same job as plain messages, in a DM or after a mention:
 - `sessions` lists your Claude Code sessions to attach the thread to.
 - `direct [directory] [message]` starts a plain Claude Code session in that
   message's thread, for example `@Relay direct ~/project fix the build`.
+
+### A folder per channel
+
+Put a folder path in a channel's description, for example
+`this should start sessions only from ~/Documents/project`, and every new
+thread in that channel starts its session there, mentions (with autonomous
+mode on) and `direct` alike, even when the message names another folder.
+Relay reads the description for each new thread, so an edit applies to the
+next one; threads already running keep their folder. The first `~/` or
+absolute path in the description counts (quote it if it has spaces); an
+absolute path is not reinterpreted, so write `~/Documents/...`, not
+`/Documents/...`.
+
+If that folder is not on this machine, Relay asks in the thread. Reply
+there with a folder that exists (no mention needed) and your original
+request starts in it, in the mode you asked for; reply "stop" to drop it.
+The waiting request lives in memory, so after a Relay restart send it
+again. A channel whose description names no folder, and a DM, work as
+before.
 
 Each person who wants their own assistant runs their own Relay with their
 own Slack app and tokens. Two machines sharing one app split its events

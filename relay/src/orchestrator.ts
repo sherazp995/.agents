@@ -45,7 +45,7 @@ import type { OutboxDrainResult } from './chat/outbox.js'
 import { ProgressReporter, truncateToBytes } from './chat/progress.js'
 import { resolvePrincipal } from './chat/principals.js'
 import type { SecretProvider } from './secrets/provider.js'
-import { SlackAdapter, composeThreadRef } from './chat/slack/adapter.js'
+import { SLACK_BOT_TOKEN_SECRET, SlackAdapter, composeThreadRef } from './chat/slack/adapter.js'
 import { createRealAttachThreadToSession, listRecentEngineSessions } from './chat/slack/session-attach.js'
 import type { SlackAdapterCreateOptions } from './chat/slack/adapter.js'
 import { OutboundDispatcher } from './dispatch/outbound.js'
@@ -55,8 +55,12 @@ import { scrubSecrets } from './secrets/scrubber.js'
 import type { RelayConfig } from './config/schema.js'
 import { resolveApproval, type ResolveApprovalResult } from './approvals/store.js'
 import { sessionRunContext } from './sessions/context.js'
-import { findActiveSession, findOrCreateSession, markSessionDirect, setSessionEngineSessionId } from './sessions/store.js'
-import { continueDirectSession, startDirectSession } from './live/direct-router.js'
+import { findActiveSession, findOrCreateSession, setSessionEngineSessionId } from './sessions/store.js'
+import { continueDirectSession } from './live/direct-router.js'
+import { startDirectThread } from './live/direct-thread.js'
+import type { DirectSessionDependencies } from './live/direct-session.js'
+import { CANCELLED_TEXT, FolderQuestions, folderGate } from './chat/slack/folder-questions.js'
+import { lazySlackChannelPurpose, lookupChannelFolder } from './chat/slack/channel-folder.js'
 import { CancellationRegistry } from './runs/cancel.js'
 import {
   buildReplyCommand,
@@ -134,6 +138,10 @@ export type CreateProductionSlackAdapterOptions = Omit<
   approvalReceiptKey?: Uint8Array
   /** Told about every resolution, so the autonomous scheduler can wake the task an approval belongs to. */
   onApprovalResolved?: (result: ResolveApprovalResult) => Promise<void>
+  /** The folder a channel's description names, for `direct` and for admitting the answer to a folder question. */
+  folderQuestions?: FolderQuestions
+  /** Injected for tests; production starts the real `claude` for `direct`. */
+  directSession?: DirectSessionDependencies
 }
 
 /**
@@ -163,7 +171,7 @@ export async function createProductionSlackAdapter(
 ): Promise<{ adapter: SlackAdapter; workspaceId: string }> {
   let resolvedWorkspaceId: string | undefined
 
-  const { approvalReceiptKey, onApprovalResolved, ...adapterOptions } = options
+  const { approvalReceiptKey, onApprovalResolved, folderQuestions, directSession, ...adapterOptions } = options
   const adapter = await SlackAdapter.create(secrets, {
     ...adapterOptions,
     resolveWorkspaceId: async (platform, platformTeamId) => {
@@ -180,6 +188,8 @@ export async function createProductionSlackAdapter(
     },
     isKnownSession: async (threadRef) => {
       if (!resolvedWorkspaceId) return false
+      // A thread waiting for a folder has no session yet, but its answer must get through.
+      if (folderQuestions?.isWaiting(threadRef)) return true
       return isKnownSessionQuery(pool, resolvedWorkspaceId, 'slack', threadRef)
     },
     // FR-ATT-5: the session picker's two real implementations. Without
@@ -216,26 +226,21 @@ export async function createProductionSlackAdapter(
         return
       }
 
-      const outcome = await startDirectSession({ text, defaultDirectory: process.cwd() })
-      if (outcome.outcome !== 'started') {
-        await post(outcome.text)
+      const threadRef = composeThreadRef(channelId, thread)
+      const folder = await folderQuestions?.forNewThread(threadRef, channelId, principalId, { mode: 'direct', text })
+      if (folder?.kind === 'asked' || folder?.kind === 'refused') {
+        await post(folder.text)
         return
       }
-
-      await post(outcome.text)
-      const session = await findOrCreateSession(pool, {
+      await startDirectThread(pool, {
         workspaceId: resolvedWorkspaceId,
         principalId,
-        adapter: 'slack',
-        threadRef: composeThreadRef(channelId, thread),
-      })
-      await markSessionDirect(pool, session.id, outcome.sessionId, outcome.cwd)
-
-      // Scrubbed for the same reason every other reply path here is: this
-      // text came from a session that reads arbitrary files.
-      if (outcome.reply !== undefined && outcome.reply.trim() !== '') {
-        await post(scrubSecrets(outcome.reply))
-      }
+        threadRef,
+        text,
+        ...(folder?.kind === 'folder' ? { channelDirectory: folder.path } : {}),
+        post,
+        ...(options.log ? { log: options.log } : {}),
+      }, directSession)
     },
     attachThreadToSession: async (params) => {
       if (!resolvedWorkspaceId) return undefined
@@ -694,12 +699,16 @@ export type OrchestratorDeps = {
   readonly requestApproval?: RequestApproval
   /** Present when `autonomous.enabled`: mentions start or continue autonomous tasks instead of governed runs. */
   readonly autonomous?: AutonomousRouting
+  /** New threads run in the folder their channel's description names, asking when it is missing (src/chat/slack/folder-questions.ts). */
+  readonly folderQuestions?: FolderQuestions
+  /** Injected for tests; production starts the real `claude` for an answered `direct` request. */
+  readonly directSession?: DirectSessionDependencies
 }
 
 /** The orchestrator's view of autonomous mode (src/autonomous/router.ts and scheduler.ts behind it). */
 export type AutonomousRouting = {
   /** Takes the event into its thread's autonomous task; `not_autonomous` when the thread belongs to another mode. Throws IntakeFailedError when intake failed after retries. */
-  route(event: ChatEvent, thread: { threadRef: string; replyRef: ChatRef }, options?: { adopt?: boolean }): Promise<'handled' | 'not_autonomous'>
+  route(event: ChatEvent, thread: { threadRef: string; replyRef: ChatRef }, options?: { adopt?: boolean; chatCwd?: string }): Promise<'handled' | 'not_autonomous'>
   /** Stops the session's autonomous task; false when the session has none. */
   stopSession(sessionId: string): Promise<boolean>
 }
@@ -773,6 +782,11 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // run row, the same "fail closed before persistence" shape PRE-2's own
   // branch above uses.
   if (isStopInstruction(event.text)) {
+    // A request waiting for a folder has no session to stop yet.
+    if (existing === null && deps.folderQuestions?.cancel(threadRef, principalId)) {
+      await dispatcher.perform({ kind: 'post', ref: replyRef, text: CANCELLED_TEXT })
+      return
+    }
     await handleStopInstruction(deps, event, threadRef, replyRef)
     return
   }
@@ -812,6 +826,29 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     }
   }
 
+  // A thread with no session yet: the answer to a folder question, or a new
+  // thread whose folder its channel's description decides.
+  let channelCwd: string | undefined
+  if (existing === null && deps.folderQuestions) {
+    const autonomous = deps.autonomous
+    const post = (text: string) => dispatcher.perform({ kind: 'post', ref: replyRef, text })
+    const gate = await folderGate(
+      {
+        questions: deps.folderQuestions,
+        post,
+        ...(autonomous ? { routeAutonomous: (routed: ChatEvent, chatCwd: string) => autonomous.route(routed, { threadRef, replyRef }, { chatCwd }) } : {}),
+        startDirect: (text, folder) =>
+          startDirectThread(pool, { workspaceId: event.workspaceId, principalId, threadRef, text, channelDirectory: folder, post, log }, deps.directSession),
+        log,
+      },
+      event,
+      threadRef,
+      principalId,
+    )
+    if (gate.kind === 'handled') return
+    channelCwd = gate.chatCwd
+  }
+
   // A thread attached to a Claude chat ("sessions" Attach, `relay notify`)
   // belongs to that chat while it is open: its messages park for it below.
   const liveAttached = existing !== null && existing.mode !== 'direct' && (await isLiveControlled(pool, existing.id, event.workspaceId))
@@ -823,7 +860,8 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // the thread's autonomous task, so the thread keeps one session.
   if (deps.autonomous && !liveAttached) {
     const adopt = existing !== null && existing.mode === 'governed' && existing.engineCwd !== null
-    if ((await deps.autonomous.route(event, { threadRef, replyRef }, adopt ? { adopt } : undefined)) === 'handled') return
+    const routeOptions = adopt ? { adopt } : channelCwd !== undefined ? { chatCwd: channelCwd } : undefined
+    if ((await deps.autonomous.route(event, { threadRef, replyRef }, routeOptions)) === 'handled') return
   }
 
   const session = await findOrCreateSession(pool, {
@@ -1265,8 +1303,12 @@ export async function startOrchestrator(
 
   // Bound once the runtime exists; an approval click before then has no task to wake.
   let autonomousRuntime: AutonomousRuntime | undefined
+  const botTokenSecret = options.slackAdapterOptions?.botTokenSecretName ?? SLACK_BOT_TOKEN_SECRET
+  const fetchPurpose = lazySlackChannelPurpose(() => secrets.get(botTokenSecret))
+  const folderQuestions = new FolderQuestions({ lookup: (channel) => lookupChannelFolder(fetchPurpose, channel) })
   const { adapter, workspaceId } = await createProductionSlackAdapter(pool, secrets, {
     log,
+    folderQuestions,
     acceptThreadMentions: autonomousEnabled,
     ...(options.autonomousRuntime ? { approvalReceiptKey: options.autonomousRuntime.receiptKey } : {}),
     onApprovalResolved: async (result) => {
@@ -1327,6 +1369,7 @@ export async function startOrchestrator(
         ...(options.requestApproval ? { requestApproval: options.requestApproval } : {}),
         ...(options.limits ? { limits: options.limits } : {}),
         ...(autonomousRuntime ? { autonomous: autonomousRuntime.routing } : {}),
+        folderQuestions,
       },
       event,
     )

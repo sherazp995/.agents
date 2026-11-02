@@ -118,6 +118,29 @@ describe('autonomous router', () => {
     expect(d.wakes).toBe(1)
   })
 
+  it('creates the task in a folder decided before routing, over the one the message names', async () => {
+    const { workspaceId, requester } = await setup()
+    const where = thread('10.2')
+
+    await routeAutonomousEvent(deps(), event(workspaceId, requester, 'fix winad', '10.2'), where, { chatCwd: '/repos/channel' })
+
+    const session = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: where.threadRef })
+    expect((await loadTaskBySession(pool, session?.id ?? ''))?.chatCwd).toBe('/repos/channel')
+  })
+
+  it('still handles a created task when recording its agent preference fails', async () => {
+    const { workspaceId, requester } = await setup()
+    const where = thread('10.3')
+    const failingPreference = Object.assign(Object.create(pool) as Pool, {
+      query: (text: unknown, ...rest: unknown[]) =>
+        typeof text === 'string' && text.includes('SET agent_preference') ? Promise.reject(new Error('injected')) : (pool.query as (...args: unknown[]) => Promise<unknown>).call(pool, text, ...rest),
+    })
+    const d = deps({ pool: failingPreference })
+
+    expect(await routeAutonomousEvent(d, event(workspaceId, requester, 'use codex to fix it', '10.3'), where)).toBe('handled')
+    expect(d.wakes).toBe(1)
+  })
+
   it('retries a failed intake and creates exactly one task', async () => {
     const { workspaceId, requester } = await setup()
     const d = deps({ pool: failingIntakePool(1) })

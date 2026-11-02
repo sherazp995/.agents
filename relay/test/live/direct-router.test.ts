@@ -44,6 +44,22 @@ describe('starting a direct session', () => {
     expect(outcome.cwd).toBe(workspace)
   })
 
+  it("runs in the channel's folder over the one the command names, and says so", async () => {
+    const outcome = await startDirectSession({ text: '/elsewhere look at the tests', defaultDirectory: '/default', channelDirectory: workspace }, replied())
+
+    expect(outcome.outcome).toBe('started')
+    if (outcome.outcome !== 'started') return
+    expect(outcome.cwd).toBe(workspace)
+    expect(outcome.text).toContain(`runs in \`${workspace}\`, not \`/elsewhere\``)
+    expect(outcome.reply).toBe('hello')
+  })
+
+  it("adds no note when the command names the channel's folder with a trailing slash", async () => {
+    const outcome = await startDirectSession({ text: `${workspace}/ look`, defaultDirectory: '/default', channelDirectory: workspace }, replied())
+
+    expect(outcome.outcome === 'started' && outcome.text).not.toContain('not `')
+  })
+
   it('REFUSES a directory that does not exist, before spawning anything', async () => {
     // A session started in the wrong place looks identical to one started in
     // the right place until you ask it to read a file, and by then it has a

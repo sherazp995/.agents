@@ -18,6 +18,11 @@ export const SLACK_BOT_SCOPES = [
   'im:write',
   'channels:history',
   'groups:history',
+  // conversations.info, for the folder a channel's description names
+  // (src/chat/slack/channel-folder.ts). Channel metadata (names, topics,
+  // descriptions), never message content outside channels Relay is in.
+  'channels:read',
+  'groups:read',
   'files:read',
   'files:write',
   'reactions:read',

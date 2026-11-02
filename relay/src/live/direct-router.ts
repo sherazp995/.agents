@@ -16,6 +16,7 @@
 
 import { homedir } from 'node:os'
 import { statSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import { runDirectTurn, renderSessionStarted } from './direct-session.js'
 import type { DirectSessionDependencies } from './direct-session.js'
@@ -25,6 +26,8 @@ export type DirectStartRequest = {
   readonly text: string
   /** Where a `/direct` with no directory runs. The operator's default working folder. */
   readonly defaultDirectory: string
+  /** The folder the channel's description names. It wins over a directory in the command, and the reply says so. */
+  readonly channelDirectory?: string
   readonly home?: string
 }
 
@@ -46,7 +49,8 @@ export async function startDirectSession(
 ): Promise<DirectStartOutcome> {
   const home = request.home ?? homedir()
   const parsed = parseDirectCommand(request.text)
-  const cwd = expandHome(parsed.directory ?? request.defaultDirectory, home)
+  const named = parsed.directory === undefined ? undefined : resolve(expandHome(parsed.directory, home))
+  const cwd = request.channelDirectory ?? named ?? expandHome(request.defaultDirectory, home)
 
   // One guarded check rather than exists-then-stat: `statSync` throws on a
   // dangling symlink and on a path whose parent is unreadable, and an
@@ -83,7 +87,10 @@ export async function startDirectSession(
     outcome: 'started',
     sessionId: turn.sessionId,
     cwd,
-    text: renderSessionStarted(turn.sessionId, cwd),
+    text:
+      named !== undefined && named !== cwd
+        ? `This channel's description sets the folder, so this session runs in \`${cwd}\`, not \`${named}\`.\n${renderSessionStarted(turn.sessionId, cwd)}`
+        : renderSessionStarted(turn.sessionId, cwd),
     ...(parsed.message === undefined ? {} : { reply: turn.text }),
   }
 }

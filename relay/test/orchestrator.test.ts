@@ -13,6 +13,8 @@ import { composeThreadRef } from '../src/chat/slack/adapter.js'
 import { KillSwitchEngagedError } from '../src/killswitch.js'
 import { listEngineSessions } from '../src/sessions/discovery.js'
 import { SESSION_ATTACH_ACTION_ID } from '../src/chat/slack/session-attach.js'
+import { startDirectThread } from '../src/live/direct-thread.js'
+import { ASK_AGAIN_TEXT, CANCELLED_TEXT, FolderQuestions, questionText } from '../src/chat/slack/folder-questions.js'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -35,7 +37,7 @@ import { z } from 'zod'
 import { echo } from '../src/agent/capabilities/echo.js'
 import { PLAN_JSON_SCHEMA } from '../src/agent/loop.js'
 import type { AgentLoopResult, Engine } from '../src/agent/loop.js'
-import { wrapUntrusted } from '../src/agent/untrusted.js'
+import { unwrapForAudit, wrapUntrusted } from '../src/agent/untrusted.js'
 import { MockAdapter } from '../src/chat/mock.js'
 import { OutboundDispatcher } from '../src/dispatch/outbound.js'
 import { CancellationRegistry } from '../src/runs/cancel.js'
@@ -503,6 +505,172 @@ describeDb('orchestrator', () => {
 
       expect(auto.stopped).toEqual([session.id])
       expect((adapter.performed[0] as { text: string }).text).toContain('Stopped')
+    })
+
+    describe("the channel description's folder", () => {
+      const present = mkdtempSync(join(tmpdir(), 'relay-channel-folder-'))
+      const other = mkdtempSync(join(tmpdir(), 'relay-channel-folder-other-'))
+      const missing = join(present, 'not-here')
+
+      function harness(description: { path: string }) {
+        const lookups: string[] = []
+        const routed: Array<{ id: string; chatCwd: string | undefined }> = []
+        const folderQuestions = new FolderQuestions({
+          lookup: async (channel) => {
+            lookups.push(channel)
+            return { kind: 'folder', path: description.path }
+          },
+        })
+        const autonomous = {
+          async route(event: ChatEvent, _thread: unknown, options?: { chatCwd?: string }) {
+            routed.push({ id: event.platformEventId, chatCwd: options?.chatCwd })
+            return 'handled' as const
+          },
+          async stopSession() {
+            return true
+          },
+        }
+        const adapter = new MockAdapter()
+        const handle = (event: ChatEvent, extra: { directSession?: object; withAutonomous?: boolean } = {}) =>
+          handleChatEvent(
+            {
+              pool,
+              dispatcher: adapter,
+              log: silentLogger(),
+              capabilities: { echo },
+              policy: PERMISSIVE_POLICY,
+              ...(extra.withAutonomous === false ? {} : { autonomous }),
+              folderQuestions,
+              ...(extra.directSession ? { directSession: extra.directSession } : {}),
+            },
+            event,
+          )
+        const posts = () => adapter.performed.map((action) => (action as { text?: string }).text ?? '')
+        return { lookups, routed, folderQuestions, handle, posts }
+      }
+
+      it('starts each new thread in the folder the description names at that moment', async () => {
+        const { workspaceId, principalId } = await createFixtures()
+        const description = { path: present }
+        const h = harness(description)
+
+        const first = buildEvent({ workspaceId, principalId, text: 'fix it in /tmp' })
+        await h.handle(first)
+        description.path = other
+        const second = buildEvent({ workspaceId, principalId, channel: first.ref.channel })
+        await h.handle(second)
+
+        expect(h.routed).toEqual([
+          { id: first.platformEventId, chatCwd: present },
+          { id: second.platformEventId, chatCwd: other },
+        ])
+      })
+
+      it('asks for a missing folder, then starts the original request where the requester says', async () => {
+        const { workspaceId, principalId } = await createFixtures()
+        const h = harness({ path: missing })
+        const ask = buildEvent({ workspaceId, principalId })
+        const root = ask.ref.message ?? ''
+        const reply = (text: string, from = principalId) => buildEvent({ workspaceId, principalId: from, channel: ask.ref.channel, thread: root, text })
+
+        await h.handle(ask)
+        expect(h.routed).toEqual([])
+        expect(h.posts()).toEqual([questionText(missing)])
+
+        await h.handle(reply('no idea'))
+        const someoneElse = await provisionPrincipal(pool, workspaceId, 'test', `U_${randomUUID()}`, 'Owner Two', ['owner'])
+        await h.handle(reply(other, someoneElse))
+        expect(h.posts()).toEqual([questionText(missing), ASK_AGAIN_TEXT])
+        expect(h.routed).toEqual([])
+
+        const answer = reply(`use ${other}`)
+        await h.handle(answer)
+        expect(h.routed).toEqual([
+          { id: ask.platformEventId, chatCwd: other },
+          { id: answer.platformEventId, chatCwd: other },
+        ])
+      })
+
+      it("drops a waiting request on the requester's stop only", async () => {
+        const { workspaceId, principalId } = await createFixtures()
+        const h = harness({ path: missing })
+        const ask = buildEvent({ workspaceId, principalId })
+
+        const stop = (from: string) => buildEvent({ workspaceId, principalId: from, channel: ask.ref.channel, thread: ask.ref.message ?? '', text: 'stop' })
+        await h.handle(ask)
+        const someoneElse = await provisionPrincipal(pool, workspaceId, 'test', `U_${randomUUID()}`, 'Owner Two', ['owner'])
+        await h.handle(stop(someoneElse))
+        expect(h.folderQuestions.isWaiting(composeThreadRef(ask.ref.channel, ask.ref.message ?? ''))).toBe(true)
+        await h.handle(stop(principalId))
+
+        expect(h.posts().at(-1)).toBe(CANCELLED_TEXT)
+        expect(h.folderQuestions.isWaiting(composeThreadRef(ask.ref.channel, ask.ref.message ?? ''))).toBe(false)
+      })
+
+      it('starts an answered direct request as a direct session, even with autonomous mode off', async () => {
+        const { workspaceId, principalId } = await createFixtures()
+        const h = harness({ path: missing })
+        const channel = `C_${randomUUID()}`
+        const root = `${Date.now()}.000001`
+        const threadRef = composeThreadRef(channel, root)
+        await h.folderQuestions.forNewThread(threadRef, channel, principalId, { mode: 'direct', text: '/elsewhere list the files' })
+        const engineSessionId = randomUUID()
+        const runClaude = async () => ({ stdout: JSON.stringify({ type: 'result', session_id: engineSessionId, result: 'Listed.' }), stderr: '', code: 0, timedOut: false })
+
+        await h.handle(buildEvent({ workspaceId, principalId, channel, thread: root, text: other }), { directSession: { runClaude }, withAutonomous: false })
+
+        expect(h.routed).toEqual([])
+        const { rows } = await pool.query('SELECT mode, engine_cwd FROM sessions WHERE workspace_id = $1 AND thread_ref = $2', [workspaceId, threadRef])
+        expect(rows).toEqual([{ mode: 'direct', engine_cwd: other }])
+        expect(h.posts().at(-1)).toBe('Listed.')
+      })
+
+      it('refuses an answered direct request from someone who is no longer an owner', async () => {
+        const { workspaceId } = await createFixtures()
+        const member = await provisionPrincipal(pool, workspaceId, 'test', `U_${randomUUID()}`, 'Member', ['member'])
+        const h = harness({ path: missing })
+        const channel = `C_${randomUUID()}`
+        const root = `${Date.now()}.000003`
+        await h.folderQuestions.forNewThread(composeThreadRef(channel, root), channel, member, { mode: 'direct', text: 'list the files' })
+        let claudeCalls = 0
+        const runClaude = async () => {
+          claudeCalls += 1
+          return { stdout: '{}', stderr: '', code: 0, timedOut: false }
+        }
+
+        await h.handle(buildEvent({ workspaceId, principalId: member, channel, thread: root, text: other }), { directSession: { runClaude } })
+
+        expect(claudeCalls).toBe(0)
+        expect(h.posts()).toEqual([OWNER_ONLY_REPLY])
+        const { rows } = await pool.query('SELECT 1 FROM sessions WHERE workspace_id = $1', [workspaceId])
+        expect(rows).toEqual([])
+      })
+
+      it('keeps a started direct session bound to its thread when posting its replies fails', async () => {
+        const { workspaceId, principalId } = await createFixtures()
+        const threadRef = composeThreadRef(`C_${randomUUID()}`, `${Date.now()}.000004`)
+        const runClaude = async () => ({ stdout: JSON.stringify({ type: 'result', session_id: randomUUID(), result: 'Done.' }), stderr: '', code: 0, timedOut: false })
+
+        await startDirectThread(pool, { workspaceId, principalId, threadRef, text: 'list the files', channelDirectory: other, post: () => Promise.reject(new Error('slack down')) }, { runClaude })
+
+        const { rows } = await pool.query('SELECT mode, engine_cwd FROM sessions WHERE workspace_id = $1 AND thread_ref = $2', [workspaceId, threadRef])
+        expect(rows).toEqual([{ mode: 'direct', engine_cwd: other }])
+      })
+
+      it('asks again for a reply after the waiting request was forgotten, and never looks up an existing thread', async () => {
+        const { workspaceId, principalId } = await createFixtures()
+        const h = harness({ path: missing })
+        const forgotten = buildEvent({ workspaceId, principalId, thread: `${Date.now()}.000002`, text: other })
+        await h.handle(forgotten)
+        expect(h.posts()).toEqual([questionText(missing)])
+
+        const existing = buildEvent({ workspaceId, principalId })
+        const session = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'test', threadRef: composeThreadRef(existing.ref.channel, existing.ref.message ?? '') })
+        await pool.query(`UPDATE sessions SET mode = 'autonomous' WHERE id = $1`, [session.id])
+        await h.handle(existing)
+        expect(h.lookups).toEqual([forgotten.ref.channel])
+        expect(h.routed).toEqual([{ id: existing.platformEventId, chatCwd: undefined }])
+      })
     })
 
     describe('members', () => {
@@ -1685,6 +1853,81 @@ describeDb('orchestrator', () => {
       expect(posts).toEqual(expectedPosts)
       const { rows } = await pool.query('SELECT 1 FROM sessions WHERE workspace_id = $1', [workspaceId])
       expect(rows).toHaveLength(0)
+      await adapter.stop()
+    })
+
+    it("asks for a missing channel folder on \"direct\", then lets the requester's plain reply through", async () => {
+      const teamId = `T_${randomUUID()}`
+      const boltApp = new StubBoltApp()
+      const posts: string[] = []
+      const apiClient = new (class extends StubApiClient {
+        override async postMessage(args: SlackPostMessageArgs): Promise<{ ts: string }> {
+          posts.push(args.text)
+          return super.postMessage(args)
+        }
+      })({ botUserId: 'UBOTFAKE', platformTeamId: teamId })
+      const missing = join(tmpdir(), `relay-missing-${randomUUID()}`)
+      const folderQuestions = new FolderQuestions({ lookup: async () => ({ kind: 'folder', path: missing }) })
+      const { adapter, workspaceId } = await createProductionSlackAdapter(pool, fakeSecrets(), { boltApp, apiClient, folderQuestions })
+      const platformUserId = `U_${randomUUID()}`
+      await provisionPrincipal(pool, workspaceId, 'slack', platformUserId, 'Owner', ['owner'])
+      const delivered: string[] = []
+      await adapter.start(async (event) => {
+        delivered.push(unwrapForAudit(event.text))
+      })
+      const channel = `C_${randomUUID().slice(0, 8)}`
+
+      await boltApp.dispatch('app_mention', {
+        event: { type: 'app_mention', channel, user: platformUserId, text: '<@UBOTFAKE> direct /tmp list the files', ts: '4100.000001' },
+        body: {},
+      })
+      expect(posts).toEqual([questionText(missing)])
+
+      const reply = (thread: string, ts: string) => boltApp.dispatch('message', { event: { type: 'message', channel, user: platformUserId, text: '~/code', ts, thread_ts: thread }, body: {} })
+      await reply('4100.000001', '4100.000002')
+      await reply('4200.000001', '4200.000002')
+      expect(delivered).toEqual(['~/code'])
+      const { rows } = await pool.query('SELECT 1 FROM sessions WHERE workspace_id = $1', [workspaceId])
+      expect(rows).toHaveLength(0)
+      await adapter.stop()
+    })
+
+    it.each([
+      ['runs "direct" in the channel folder', 'folder'],
+      ['refuses "direct" when the description cannot be read', 'failed'],
+    ] as const)('%s', async (_label, kind) => {
+      const teamId = `T_${randomUUID()}`
+      const boltApp = new StubBoltApp()
+      const posts: string[] = []
+      const apiClient = new (class extends StubApiClient {
+        override async postMessage(args: SlackPostMessageArgs): Promise<{ ts: string }> {
+          posts.push(args.text)
+          return super.postMessage(args)
+        }
+      })({ botUserId: 'UBOTFAKE', platformTeamId: teamId })
+      const folder = mkdtempSync(join(tmpdir(), 'relay-direct-channel-'))
+      const folderQuestions = new FolderQuestions({
+        lookup: async () => (kind === 'folder' ? { kind: 'folder', path: folder } : { kind: 'failed', missingScope: false }),
+      })
+      const runClaude = async () => ({ stdout: JSON.stringify({ type: 'result', session_id: randomUUID(), result: 'Listed.' }), stderr: '', code: 0, timedOut: false })
+      const { adapter, workspaceId } = await createProductionSlackAdapter(pool, fakeSecrets(), { boltApp, apiClient, folderQuestions, directSession: { runClaude } })
+      const platformUserId = `U_${randomUUID()}`
+      await provisionPrincipal(pool, workspaceId, 'slack', platformUserId, 'Owner', ['owner'])
+      await adapter.start(async () => {})
+
+      await boltApp.dispatch('app_mention', {
+        event: { type: 'app_mention', channel: `C_${randomUUID().slice(0, 8)}`, user: platformUserId, text: '<@UBOTFAKE> direct /tmp list the files', ts: '4300.000001' },
+        body: {},
+      })
+
+      const { rows } = await pool.query('SELECT mode, engine_cwd FROM sessions WHERE workspace_id = $1', [workspaceId])
+      if (kind === 'folder') {
+        expect(rows).toEqual([{ mode: 'direct', engine_cwd: folder }])
+        expect(posts[0]).toContain(`runs in \`${folder}\`, not \`/tmp\``)
+      } else {
+        expect(rows).toEqual([])
+        expect(posts).toEqual([expect.stringContaining("could not read this channel's description")])
+      }
       await adapter.stop()
     })
 
