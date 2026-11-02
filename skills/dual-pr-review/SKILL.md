@@ -46,6 +46,8 @@ When the launcher exits, read from the run folder: `claude.md` and `codex.md` (e
 
 The launcher sets `AGENT_REVIEW_HEADLESS=1` for both sessions and writes `<reviewer>.incomplete` when a report has no verdict line (a session that ended while its agents still ran). A session that exited non-zero, or ended without a verdict, is reported as "did not finish" with the reason from its log. Never fill its side in yourself.
 
+If `codex.log` shows "You've hit your usage limit", find another Codex login with `agents-hub account list` (e.g. `codex1  ~/.codex1  links ok`) and rerun the Codex side on it before reporting: clear only that run's own `agents/codex/<KEY>.lock` (its `run_id` appears in `codex.log` and no process holds it), then run the launcher's same `codex exec` line with `CODEX_HOME=<that login's folder>` and outputs named after the login (`codex1.md`, `codex1.log`, `codex1.exit`) in the same run folder. Report Codex as "did not finish" only when no extra login is listed or every one fails.
+
 ## 5. Report
 
 Answer first: both verdicts, then one merged list.
