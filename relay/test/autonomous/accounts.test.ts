@@ -74,6 +74,7 @@ describe('account pool', () => {
     expect(classifyBlocked({ exitCode: 1, stderr: 'HTTP 429 Too Many Requests' })).toBe('rate_limit')
     expect(classifyBlocked({ exitCode: 1, stderr: 'Not logged in. Please run /login' })).toBe('auth')
     expect(classifyBlocked({ exitCode: 1, stderr: 'Failed to authenticate: OAuth session expired and could not be refreshed' })).toBe('auth')
+    expect(classifyBlocked({ exitCode: 1, stderr: 'expected the user can authenticate to pass' })).toBeNull()
     expect(classifyBlocked({ exitCode: null, stderr: '', spawnErrorCode: 'ENOENT' })).toBe('missing_cli')
     expect(classifyBlocked({ exitCode: 1, stderr: 'TypeError in test' })).toBeNull()
   })
