@@ -109,7 +109,7 @@ export type BlockedReason = 'usage_limit' | 'rate_limit' | 'auth' | 'missing_cli
 const BLOCKED_PATTERNS: readonly { reason: BlockedReason; pattern: RegExp }[] = [
   { reason: 'usage_limit', pattern: /usage limit|spend limit|hit your (?!rate )(?:\w+ ){0,2}limit|limit reached|quota|credit balance is too low|out of credits/i },
   { reason: 'rate_limit', pattern: /rate limit|too many requests|\b429\b|overloaded/i },
-  { reason: 'auth', pattern: /not logged in|please log in|login required|unauthorized|\b401\b|invalid api key|authentication/i },
+  { reason: 'auth', pattern: /not logged in|please log in|login required|unauthorized|\b401\b|invalid api key|authenticat(?:e|ion)|oauth (?:session|token) (?:has )?expired/i },
 ]
 
 /** Why this exit means "try the next account", or null when it was an ordinary failure of the task itself. */
