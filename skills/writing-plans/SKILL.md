@@ -7,7 +7,7 @@ description: The one format for every implementation plan, written so the user o
 
 A plan is read by people before it is read by agents. The user, or a junior developer who has never seen the ticket, must be able to answer three questions from the first screen: what is wrong or missing, what will be different afterwards, and what do I need to decide. Proof for reviewers and builders goes lower down, in the appendix.
 
-Write every plan to its plan file (`~/.agents/tmp/plans/`, or plan mode's own plans folder) and show the user its summary, decisions and path, never a plan only in chat. The `plan-guard` hook delivers this skill the first time a session writes a plan and sends back missing or out-of-order sections.
+Write every plan to its plan file (`~/.agents/tmp/plans/`, or plan mode's own plans folder) and show the user its summary, decisions and path, never a plan only in chat. The `plan-guard` hook delivers this skill the first time a session writes a plan, gives the planning steps for each new plan file, and sends back missing or out-of-order sections; once the status says `Waiting for`, it also refuses a plan without its follow-up list, its Log with the context-free review, and its archify diagram.
 
 This skill sets the shape only. How a plan is made (interview, advisor opinions, approval, the plan file path) stays with `doing-substantial-work`, `rethink` and `interview-me`.
 
@@ -17,18 +17,22 @@ Copy [references/template.md](references/template.md). A filled example is in [r
 
 1. **Title and status lines.** `# <ticket>: <what changes, in plain words>`, then the ticket link, branch, plan file path, and a `Status:` line: `Waiting for your decisions`, `Waiting for approval`, `Approved <date>`, `Building`, `Done`. A plan made with `rethink` adds an `Advisor status:` line with its result (`agreed`, `open points` or `advisor unavailable`).
 2. **`## In short`.** One paragraph, at most five sentences: what is broken or missing today, what we will do, who notices the difference. No file names, no class names.
-3. **`## Decisions for you`.** Each open question as a short heading, then the options, our recommendation and what the build does if the plan is approved without a choice. `None` when there are none. Questions go here, never only in the appendix.
+3. **`## Decisions for you`.** Only questions the user must answer: product or business choices the ticket, the user's earlier answers and the code don't settle, or a change to screens or data the ticket doesn't name. Each as a short heading, then the options, our recommendation and what the build does if the plan is approved without a choice. A straightforward choice (the plain reading of the ticket, the repo's existing pattern, a dependency order, a safe default) is not a question: list it under `Settled in the plan:` in this section, one line each with its reason. `None` when nothing is left for the user. Questions go here, never only in the appendix.
 4. **`## How it works today`** and **`## How it will work`.** Text-box flowcharts (below). One chart per flow the ticket touches.
 5. **`## What changes`.** A table with one row per behaviour: `| Area | Today | After | Why |`. Write what a user sees or what the system does, not what the code does.
 6. **`## Confirmed intent`.** The six `interview-me` restate lines (Outcome, User, Why now, Success, Constraint, Out of scope), or one line saying the intent was fully stated.
 7. **`## Steps`.** A checklist. Each step: one plain sentence, then `Files:` and `Done when:` lines. Steps are ordered so each one can be checked on its own. `Done when:` states the behaviour itself, never "the specs below": the approval stamp covers only Confirmed intent, Steps and Checks.
 8. **`## Tests`.** One line per test in plain words ("an admin with no buildings of their own sees the company average"), with the spec file at the end of the line.
 9. **`## Checks`.** The exact commands that prove the work, in a code block.
-10. **`## Risks and not doing`.** Two short lists: what could go wrong and how we guard it; what is deliberately out of scope.
+10. **`## Risks and not doing`.** Three short lists: what could go wrong and how we guard it; what is deliberately out of scope; `Follow-up ticket suggestions:` for pre-existing issues and out-of-scope improvements found while planning or reviewing, one line each with its evidence.
 11. **`## Appendix`.** Everything the builder or reviewer needs as proof: `### Root cause` with `file:line`, `### Overlap with open PRs`, `### Request (verbatim)` with the ticket text and screenshots, and any separate ticket suggestions.
 12. **Sections other skills own**, when they apply: `## Advisor opinions` and `## Review pre-check` (rethink), then `## Log` last.
 
 Keep the headings `## Confirmed intent`, `## Steps`, `## Checks` and `## Log` exactly as written: other tools read those sections by name.
+
+## Scope
+
+Steps cover the task and what it depends on, nothing else. A step belongs in the plan only when the ticket's text asks for it, or the ticket's change would break, lose data, send twice or miss its "Done when" without it. Pre-existing issues, hardening of neighbouring code, extra filters or fallbacks and refactors go to `Follow-up ticket suggestions`, not to Steps. The same test applies to every suggestion from an advisor or a plan review: take it when it passes, otherwise list it as a follow-up.
 
 ## Text-box flowcharts
 

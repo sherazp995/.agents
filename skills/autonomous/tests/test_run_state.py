@@ -97,6 +97,19 @@ class RunStateTests(unittest.TestCase):
         self.assertEqual((entry['status'], entry['commit']), ('done', git(tree, 'rev-parse', 'HEAD')))
         self.assertEqual(entry['stages']['qa-video']['skip_reason'], 'nothing a user sees')
 
+    def test_qa_output_in_a_gitignored_tmp_folder_keeps_the_tree(self):
+        # Rails repos ignore tmp/*: naming an existing ignored folder in a pathspec made git refuse the add.
+        self.init(write_plan(self.root / 'plan.md', self.repo))
+        tree = self.worktree('plan')
+        (tree / '.gitignore').write_text('/tmp/*\n')
+        self.advance('plan', 'worktree', 'build', 'review', worktree=tree)
+        (tree / 'tmp' / 'visual-qa').mkdir(parents=True)
+        (tree / 'tmp' / 'visual-qa' / 'index.html').write_text('report')
+        self.assertEqual(self.rs('next', 'plan').stdout.strip(), 'qa-visual')
+        self.rs('start', 'plan', 'qa-visual')
+        self.rs('finish', 'plan', 'qa-visual')
+        self.assertEqual(self.rs('next', 'plan').stdout.strip(), 'qa-video')
+
     def test_a_plan_edited_mid_run_stops_its_task(self):
         plan = write_plan(self.root / 'plan.md', self.repo)
         self.init(plan)

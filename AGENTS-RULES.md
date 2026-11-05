@@ -256,6 +256,10 @@ Full integration runs happen once per phase in a dedicated task, not in every in
 ### 43. Run git from inside the repo, never with `git -C <path>`
 `cd` into the repo once, then run git there. (The `git-guard` hook enforces this in Claude Code and Codex: it denies `git -C` with the same command rewritten as `cd <dir> && git ...`, so the agent reruns it without asking the user.)
 
+Never put a multi-line script with quotes (Python or Ruby with triple quotes) in a Bash heredoc: the Bash safety hook refuses it as unparseable. Use the Edit tool for text replacements, or write the script to `/tmp` with Write and run the file.
+
+The Claude Code Bash tool runs zsh, which never word-splits a variable: `$FILES` holding a file list, or `$R` holding `mise exec --`, reaches the command as one word. Pass lists as a zsh array (`"${F[@]}"`), write the prefix out, or run the line with `bash -c '...'`.
+
 ### 44. Review every code change; the full protocol runs on request
 Every code change gets one end check before it is "done": `done-check` (doing-substantial-work step 7), or its checker prompt run once by hand where the hook is not installed. The Unified Review Protocol is the `general-review` skill, sections 1 to 6 of its SKILL.md (phases P0 to P6, verdict and report template); it runs when the user asks for a review or before a PR is opened.
 

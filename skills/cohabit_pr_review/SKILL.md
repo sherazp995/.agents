@@ -41,7 +41,7 @@ Before cleanup or any write, identify the **host running this skill**, not a rev
   - If the target lock already exists, skip only that target: "a review of <KEY> is already running (run <run_id from the lock>, lock <path>)". Other targets continue.
   - Renaming a branch record to its PR key (step 2) holds both the branch key's lock and the PR key's lock.
   - Cleanup lock: `LEDGER_ROOT/agents/<RUNNER>.cleanup.lock/`, taken with `mkdir` before starting the cleanup agent and removed when it finishes. If it exists, skip cleanup for this run and say so.
-  - Only remove a lock acquired by this run. Never steal or remove an existing lock, even if it appears stale; show the user its path and run ID instead. A lock error other than "already exists" is a setup failure for that target, not proof another run owns it.
+  - Only remove a lock acquired by this run. Never steal or remove an existing lock, even if it appears stale; show the user its path and run ID instead. Remove your own lock with guarded variables, `rm -r "${L:?}/${KEY:?}.lock"`, or a literal path; the safety check blocks an unguarded `"$L/$K.lock"`. A lock error other than "already exists" is a setup failure for that target, not proof another run owns it.
   - A pre-existing per-runner lock `LEDGER_ROOT/agents/<RUNNER>.lock/` comes from an older version of this skill; it does not block any target.
 - Ledger mutations for a target happen only while this run holds that target's lock. If a current record is absent, a prior record from this runner or the legacy root may be copied into `L` for a recheck. Copy matching proof specs too and rewrite the copied record's `repro:` path to this run's destination; never rename or delete the source. If a source is being updated, skip importing it and do a fresh review. Label inherited records with their source path and recorded runner, or `unknown` for legacy records.
 - Use `<scratchpad>/pr-review/<RUN_ID>/<KEY>-<short-sha>` for each target's work directory. Generate a unique `TEST_ENV_NUMBER` per target, such as `_agent_<32 UUID hex digits>`, and ensure the complete database name fits PostgreSQL's 63-byte limit. Never reuse a PR-only or branch-only database name.
@@ -118,7 +118,7 @@ A headless session cannot count on another turn: if its turn ends while children
    - FOCUS = the bullets from step 5
 7. Tell the user in 3-5 lines: RUNNER and RUN_ID, which targets run, in which mode, against which `origin/<base>` SHA, and which were skipped and why. While waiting, give a one-line update when a lead reports or when asked. Never guess results.
 8. **Spot-check before relaying,** like a lead engineer.
-   - For each CRITICAL or HIGH finding, and for each finding that says "regression" or "caused by this PR", read only the cited lines: `cd <repo> && git show <HEAD_SHA>:<file> | sed -n '<line-10>,<line+10>p'`.
+   - For each CRITICAL or HIGH finding, and for each finding that says "regression" or "caused by this PR", read only the cited lines: `cd <repo> && git show <HEAD_SHA>:<file> | sed -n '<line-10>,<line+10>p'`. Write the SHA literally or as `"${H}:<file>"`; in zsh `$H:app/...` is read as a history modifier.
    - If the code does not support the claim, or a dropped finding looks real, send the lead one question with SendMessage before relaying.
    - Check that every earlier OPEN finding in the ledger got a status.
 9. Relay each lead's report as it is (it already follows the style), plus one line for anything you corrected in step 8. Relay the cleanup agent's short list.

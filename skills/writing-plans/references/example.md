@@ -11,12 +11,9 @@ A strata admin who has no buildings of their own sees "Not enough data" for heal
 
 ## Decisions for you
 
-### 1. Dashboard speed for admins with large portfolios
+None. Settled in the plan:
 
-- Option A: work out health scores for every company building on each dashboard load, and measure load time on a large company before the PR.
-- Option B: also add caching in this ticket.
-- **We recommend A**, because caching is a bigger change the ticket does not ask for.
-- If you approve without choosing: we build A and report the numbers in the PR.
+- Health scores are worked out for every company building on each dashboard load, and load time is measured on a large company before the PR: the ticket asks for correct numbers, not caching.
 
 ## How it works today
 
@@ -92,10 +89,13 @@ bundle exec rubocop app/controllers/dashboard_controller.rb spec/controllers/das
 ## Risks and not doing
 
 Risks:
-- Slow dashboard for a large company: measured before the PR (decision 1).
+- Slow dashboard for a large company: measured before the PR (settled in Decisions).
 
 Not doing:
 - Caching dashboard numbers.
+
+Follow-up ticket suggestions:
+- Cache dashboard health scores if the measured load time on large companies is too slow.
 
 ## Appendix
 

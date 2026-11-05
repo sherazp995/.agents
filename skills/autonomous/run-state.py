@@ -89,7 +89,11 @@ def tree_hash(worktree):
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(scratch) / 'index'))
         git(worktree, 'read-tree', 'HEAD', env=env)
         git(worktree, 'rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', *OUTPUT_DIRS, env=env)
-        git(worktree, 'add', '-A', '--', '.', *(f':(exclude){d}' for d in OUTPUT_DIRS), env=env)
+        # An ignored output folder is already skipped by `add -A`, and naming an existing ignored
+        # path in a pathspec makes git refuse the add, so only the unignored ones are excluded.
+        unignored = [d for d in OUTPUT_DIRS
+                     if subprocess.run(['git', 'check-ignore', '-q', d], cwd=worktree).returncode != 0]
+        git(worktree, 'add', '-A', '--', '.', *(f':(exclude){d}' for d in unignored), env=env)
         return git(worktree, 'write-tree', env=env)
 
 

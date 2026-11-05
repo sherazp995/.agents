@@ -19,6 +19,10 @@
 - **We recommend A**, because <reason>.
 - If you approve without choosing: <what the build does>.
 
+Settled in the plan:
+
+- <straightforward choice>: <one-line reason (ticket text, repo pattern, dependency, safe default)>
+
 ## How it works today
 
 <One-line caption for the flow.>
@@ -86,6 +90,9 @@ Risks:
 
 Not doing:
 - <out of scope item>
+
+Follow-up ticket suggestions:
+- <pre-existing issue or out-of-scope improvement>: `path:line`
 
 ## Appendix
 

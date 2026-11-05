@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Enforce the writing-plans skill when an agent writes a plan.
+"""Enforce the writing-plans skill and the planning steps when an agent writes a plan.
 
-Reads the normalized hook event (see ../adapters/run.py) for a file-editing tool. A plan is a
-Markdown file in a plan folder: ~/.agents/tmp/plans/, or a client's own plans/ folder such as
+Reads the normalized hook event (see ../adapters/run.py) for a file-editing or shell tool. A plan is
+a Markdown file in a plan folder: ~/.agents/tmp/plans/, or a client's own plans/ folder such as
 ~/.claude/plans/, where Claude's plan mode writes its plan before ExitPlanMode. For a plan it:
-  * delivers the writing-plans skill the first time a session writes one (answer: {"context": ...});
+  * delivers the writing-plans skill the first time a session writes one, and the planning steps
+    checklist the first time a session writes each plan file, so a plan started or picked up after
+    a chat summary still gets them (answer: {"context": ...});
   * checks the whole plan, not just the edit, for the title, the Status: line and the required
-    sections in order, and reports what is missing (answer: {"decision": "deny", "reason": ...}).
+    sections in order, and reports what is missing (answer: {"decision": "deny", "reason": ...});
+  * once the plan says it is ready to show (Status: Waiting for ...), also checks that the planning
+    steps left their marks: the follow-up list, the Log with the context-free plan review, the
+    archify diagram when archify is installed, and rethink's sections when it ran.
+A shell command can edit a plan without naming it (a script), so after a shell tool every plan file
+in ~/.agents/tmp/plans/ changed in the last RECENT seconds is checked, once per saved version.
 Judgment (plain wording, what the charts show, step quality) stays with the skill.
 """
 import json
@@ -18,13 +25,28 @@ import time
 
 HUB = Path(__file__).resolve().parents[2]
 SKILL = HUB / 'skills' / 'writing-plans' / 'SKILL.md'
+ARCHIFY = Path(os.environ.get('PLAN_GUARD_ARCHIFY', '~/.agents/skills/archify')).expanduser()
 SEEN = HUB / 'chats' / 'plan-guard-sessions'  # machine-local, git-ignored
-PLAN_FOLDERS = (HUB / 'tmp' / 'plans',)
+PLAN_FOLDERS = (Path(os.environ.get('PLAN_GUARD_PLANS', HUB / 'tmp' / 'plans')),)
 CLIENT_DIR = re.compile(r'^\.(claude|codex)\w*$')
+SHELL_TOOLS = {'Bash', 'shell', 'exec_command'}
+RECENT = 600
 
 # The writing-plans sections that every plan has, in this order (references/template.md).
 REQUIRED = ['In short', 'Decisions for you', 'How it works today', 'How it will work', 'What changes',
             'Confirmed intent', 'Steps', 'Tests', 'Checks', 'Risks and not doing']
+
+CHECKLIST = """Planning steps for this plan (doing-substantial-work step 2, writing-plans, rethink):
+1. interview-me short form, unless the request states all six intent lines.
+2. Scope test: a step only for what the ticket asks for or needs to work; pre-existing and \
+out-of-scope items go to "Follow-up ticket suggestions:"; straightforward choices go under \
+"Settled in the plan:", real product questions stay in Decisions.
+3. ## Review pre-check with the sibling sweep and its search evidence.
+4. rethink with the other model when the plan hits its Risk list or the user asks; on a usage \
+limit, rerun on every login in `agents-hub account list` before calling it unavailable.
+5. A context-free plan review by a fresh agent, recorded in ## Log.
+6. An archify diagram of today and after, linked under ### Diagram in the Appendix.
+Only then set "Status: Waiting for approval" and show the plan."""
 
 
 def is_plan_path(path, cwd):
@@ -45,6 +67,21 @@ def edited_paths(data):
     return [m.group(1).strip() for m in re.finditer(r'^\*\*\* (?:Add|Update) File: (.+)$', str(patch), re.M)]
 
 
+def section(lines, heading, level='## '):
+    """The lines under a heading, up to the next heading of the same or a higher level."""
+    stop = ('# ', '## ') if level == '## ' else ('# ', '## ', '### ')
+    body, inside = [], False
+    for line in lines:
+        if line.startswith(level) and line[len(level):].strip() == heading:
+            inside = True
+            continue
+        if inside and line.startswith(stop):
+            break
+        if inside:
+            body.append(line)
+    return body if inside else None
+
+
 def problems_in(text):
     """What the plan lacks against the writing-plans shape; [] when it has it all."""
     lines = text.splitlines()
@@ -61,21 +98,57 @@ def problems_in(text):
     expected = [name for name in REQUIRED if name in present]
     if present != expected:
         problems.append('sections out of order: ' + ' > '.join(present) + '; the order is ' + ' > '.join(expected))
+    if ready_to_show(lines):
+        problems.extend(step_problems(lines, headings))
     return problems
 
 
-def first_time_in_session(session_id):
+def ready_to_show(lines):
+    return any(re.match(r'^-?\s*Status:\s*Waiting for', line) for line in lines[:15])
+
+
+def step_problems(lines, headings):
+    """The planning steps a plan waiting for the user must show it took."""
+    problems = []
+    if not any(line.strip().startswith('Follow-up ticket suggestions') for line in lines):
+        problems.append('no "Follow-up ticket suggestions:" list under ## Risks and not doing (write "None" when empty)')
+    log = section(lines, 'Log')
+    if log is None:
+        problems.append('no "## Log" section')
+    elif not any(re.search(r'context-free', line, re.I) for line in log):
+        problems.append('## Log does not record the context-free plan review (doing-substantial-work step 2)')
+    advisor = next((line for line in lines[:15] if re.match(r'^-?\s*Advisor status:', line)), None)
+    if advisor:
+        if 'Review pre-check' not in headings:
+            problems.append('an Advisor status line but no "## Review pre-check" (rethink)')
+        if 'Advisor opinions' not in headings and 'unavailable' not in advisor:
+            problems.append('an Advisor status line but no "## Advisor opinions" (rethink)')
+    if ARCHIFY.is_dir():
+        diagram = section(lines, 'Diagram', level='### ')
+        links = [Path(m.group(0)).expanduser() for line in diagram or [] for m in re.finditer(r'[~/][^\s`)<>]*\.html', line)]
+        if not links:
+            problems.append('no archify diagram linked under "### Diagram" in the Appendix')
+        elif not any(link.is_file() for link in links):
+            problems.append('the "### Diagram" link points to no file: ' + str(links[0]))
+    return problems
+
+
+def remember(session_id, key):
+    """True the first time this session sees key; the session's keys are lines in its marker file."""
     if not session_id:
         return True
-    marker = SEEN / re.sub(r'[^A-Za-z0-9_.-]', '_', str(session_id))
-    if marker.exists():
-        return False
     SEEN.mkdir(parents=True, exist_ok=True)
-    week_ago = time.time() - 7 * 86400
-    for old in SEEN.iterdir():  # one marker per session; old sessions are done
-        if old.stat().st_mtime < week_ago:
-            old.unlink(missing_ok=True)
-    marker.touch()
+    marker = SEEN / re.sub(r'[^A-Za-z0-9_.-]', '_', str(session_id))
+    if not marker.exists():
+        week_ago = time.time() - 7 * 86400
+        for old in SEEN.iterdir():  # one marker per session; old sessions are done
+            if old.stat().st_mtime < week_ago:
+                old.unlink(missing_ok=True)
+    seen = marker.read_text().splitlines() if marker.exists() else []
+    if key in seen:
+        return False
+    with marker.open('a') as out:
+        out.write(key + '\n')
     return True
 
 
@@ -84,6 +157,14 @@ def plans_in(event):
     data = event.get('input') or {}
     cwd = event.get('cwd') or os.getcwd()
     plans = {}
+    if event.get('tool') in SHELL_TOOLS:
+        cutoff = time.time() - RECENT
+        for folder in PLAN_FOLDERS:
+            for full in sorted(folder.glob('*.md')) if folder.is_dir() else []:
+                mtime = full.stat().st_mtime
+                if mtime >= cutoff and remember(event.get('session_id'), f'version {full} {mtime}'):
+                    plans[str(full)] = full.read_text(errors='replace')
+        return plans
     for path in edited_paths(data):
         full = Path(cwd, path).expanduser()
         if is_plan_path(path, cwd) and full.is_file():  # the edit already ran: check the whole file
@@ -96,10 +177,16 @@ def verdict(event):
     if not plans:
         return None
     result = {}
-    if first_time_in_session(event.get('session_id')) and SKILL.is_file():
-        result['context'] = ('You are writing a plan. Every plan uses this format (the writing-plans skill); '
-                             'write it to the plan file and show its summary and path for approval:\n\n'
-                             + SKILL.read_text())
+    session = event.get('session_id')
+    context = []
+    if remember(session, 'skill') and SKILL.is_file():
+        context.append('You are writing a plan. Every plan uses this format (the writing-plans skill); '
+                       'write it to the plan file and show its summary and path for approval:\n\n' + SKILL.read_text())
+    new_plans = [label for label in plans if remember(session, f'plan {Path(label).expanduser().resolve()}')]
+    if new_plans:
+        context.append(f'{", ".join(new_plans)}: {CHECKLIST}')
+    if context:
+        result['context'] = '\n\n'.join(context)
     problems = [f'{label}: {problem}' for label, text in plans.items() for problem in problems_in(text)]
     if problems:
         result.update(decision='deny', reason='Plan format (writing-plans skill): ' + '; '.join(problems)

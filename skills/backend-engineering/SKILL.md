@@ -15,6 +15,7 @@ What fails, how often, what the blast radius is, and how it recovers. Assume the
 
 - An "eventually consistent" claim with no concrete bound.
 - A retry without an idempotency key.
+- A failure path that runs after the main operation already committed and reports the whole operation as failed ("try again"), so a retry repeats work that landed: warn and carry on instead.
 - A queue consumer without a dead-letter strategy.
 - A non-trivial Postgres query without an index plan (`EXPLAIN ANALYZE`).
 - A new service for what a module would solve.

@@ -141,7 +141,7 @@ agent stops or is blocked unexpectedly, one of these is usually why.
 | `git-guard` | before a shell command | enforces rules 43, 48 and 54: git run inside the repo (`cd`, not `git -C`), one-line commit messages, one unpushed commit per branch; a denial says what to run instead |
 | `no-remote-writes` | before a tool call | in an autonomous run only, blocks remote writes (`git push`, `gh` writes and the like); other sessions pass untouched |
 | `spec-guard` | after a test edit | delivers the `writing-specs` skill once and reports breaks a script can find |
-| `plan-guard` | after a plan file edit | delivers `writing-plans` and lists missing plan sections |
+| `plan-guard` | after a plan file edit, or a shell command that changed one | delivers `writing-plans` once per session and the planning steps per plan file; lists missing sections, and for a plan waiting for the user, missing steps (follow-ups, Log with the context-free review, archify diagram, rethink sections) |
 | `related-tests` | at stop | runs only the tests for files changed this turn; a failure blocks the stop once |
 | `done-check` | at stop, when a task says it is done | makes the agent run a fresh checker for completion, correctness, rules 59 and 60, and saved memories, ending with `DONE-CHECK: PASS` or `OPEN` |
 | `workstream-context`, `workstream-check` | start and stop | show and update shared workstreams |

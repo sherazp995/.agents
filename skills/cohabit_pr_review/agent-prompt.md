@@ -27,10 +27,11 @@ TARGET
 HARD RULES
 - Never commit, push, or post to GitHub or Slack. Your final message is the only output.
 - Only report problems this change introduces, or a caller or sibling it should have changed and missed. Pre-existing issues in untouched code are out of scope.
-- Never call real external services. Stub payment providers, Sentry, mailers and workers.
+- Never call real external services. Use payment stubs, test mail delivery, fake workers, and the existing Sentry disabled sending or dummy transport. Block outbound HTTP with WebMock; never globally stub Sentry.capture_exception or Sentry.capture_message because event assertions must run.
 
 ENV: right after step 1, build `{WORKDIR}/ruby-env.sh` once. Then prefix every ruby/bundle/rails/rspec/rubocop command with `source {WORKDIR}/ruby-env.sh;`.
 - Read the wanted version from the worktree's `.ruby-version` (drop any `ruby-` prefix).
+- Run every Ruby-manager/version probe with the command working directory set to `{WORKDIR}/wt`. Never reuse a successful probe from the source checkout: manager activation can resolve a different Ruby in the review clone. Confirm `ruby -v` there again after sourcing `ruby-env.sh`, before `bundle check`.
 - Find a Ruby manager that gives exactly that version. Test each candidate in a fresh shell, in this order, and keep the first one where `ruby -v` matches:
   1. Ruby already on PATH: nothing to add.
   2. mise: `eval "$(mise activate bash --shims)"`
@@ -70,8 +71,8 @@ STEPS
      - In recheck mode, add one line to each prompt: "Focus on the new commits; the earlier findings were: <the finding lines from the ledger>".
      - If you have no Agent tool, do the three lenses yourself one after another, and say so in the report.
 4. **Test run, while the reviewers work:**
-   - `bin/rails db:create db:schema:load`, plus `db:migrate` if the change adds migrations.
-   - Run the change's specs plus the specs for every changed app file. Run JS tests if JS changed. Run rubocop (and eslint) on the changed files.
+   - `bin/rails db:create db:schema:load`, plus `db:migrate` if the change adds migrations. Before database tasks, disable runtime `ActiveRecord.dump_schema_after_migration`; redirect migration `SCHEMA` output into the run scratch directory. Disable automatic schema maintenance in the review spec harness. Verify the pinned `db/schema.rb` hash after setup so database tasks cannot silently rewrite reviewed source.
+   - Run the change's specs plus the specs for every changed app file. Run JS tests if JS changed. Run rubocop (and eslint) on the changed files. For explicit Ruby file lists, use RuboCop --force-exclusion --no-server with a writable --cache-root so generated files excluded by the repository remain excluded.
    - For any failure, check it on plain {BASE_SHA} in a second worktree, and label it "pre-existing" or "caused by PR".
 5. **Merge:** wait for all four reviewers. Put their findings into one list, merge duplicates, and note the sources for each item.
 6. **Verify every finding by running code:**

@@ -1,66 +1,73 @@
 ---
 name: status-update
 description: >-
-  Write a status update on PRs and tasks in the house format: one "Opened PR:"/"Updated PR:"/
-  "Finalized and merged PR:"/"WIP branch:"/task heading per item (draft PRs marked), followed by past-tense lines
-  saying what was done, plus one "Reviewed PRs:" list of other people's PRs the user reviewed, on GitHub or in local
-  Claude/Codex review sessions. Use whenever the
-  user asks for a status update, a standup update, "what did I do", "write up the PRs",
-  "summarise this work for the team", or invokes /status-update. Also use before posting
-  progress to Slack, a ticket, or a colleague. If the current project has its own
-  status-update skill, use that one instead.
+  Write a status update on PRs and tasks in the house format, as Slack friendly Markdown the
+  user can paste straight into Slack: bold section headings ("Reviewed PRs:", "Finalized and
+  merged PRs:", "Opened PRs:", "Updated PRs:", "WIP branches:", "Tasks:"), one bullet per item
+  with the PR title linked to the PR, and past-tense sub-bullets saying what was done. Reviewed
+  PRs are other people's PRs the user reviewed, on GitHub or in local Claude/Codex review
+  sessions. Use whenever the user asks for a status update, a standup update, "what did I do",
+  "write up the PRs", "summarise this work for the team", or invokes /status-update. Also use
+  before posting progress to Slack, a ticket, or a colleague. If the current project has its
+  own status-update skill, use that one instead.
 ---
 
 # Status update
 
 ## Format
 
-One block per PR or task. A blank line between blocks. Nothing else: no preamble, no
-summary paragraph, no closing note.
+Slack friendly Markdown, ready to paste into Slack as is. The reply is the update and
+nothing else: no preamble, no summary paragraph, no closing note, no code fence around it.
+
+One bold heading per section, then one bullet per item. The item's title is a Markdown link
+to the PR or branch. Each item's body lines are sub-bullets under it, indented two spaces.
+Sections go in this order, and an empty section is left out:
 
 ```
-Opened PR: <pr title> [pr link]
-<past tense line about what was done>
-<another past tense line>
+**Reviewed PRs:**
+- [<pr title> #<number>](<pr link>)
 
-Updated draft PR: <pr title> [pr link]
-<past tense line>
-<another past tense line>
+**Finalized and merged PRs:**
+- [<pr title>](<pr link>)
+  - <past tense line>
+  - <another past tense line>
 
-Finalized and merged PR: <pr title> [pr link]
-<past tense line>
+**Opened PRs:**
+- [<pr title>](<pr link>) (draft)
+  - <past tense line>
 
-WIP branch: <branch name> [branch link]
-<past tense line>
-<another past tense line>
+**Updated PRs:**
+- [<pr title>](<pr link>)
+  - <past tense line>
 
-<task title, no link>
-<past tense line>
-<another past tense line>
+**WIP branches:**
+- [<branch name>](<branch link>)
+  - <past tense line>
 
-Reviewed PRs:
-<pr title> #<number> [pr link]
-<pr title> #<number> [pr link]
+**Tasks:**
+- <task title, no link>
+  - <past tense line>
 ```
 
-Headings:
+Sections:
 
-- `Opened PR:` for a PR raised in this period.
-- `Updated PR:` for a PR that already existed and got new commits or changes.
-- Add `draft` before `PR` when the PR is a draft: `Opened draft PR:`, `Updated draft PR:`.
-- `Finalized and merged PR:` for a PR merged in this period. This replaces Opened or
-  Updated, even if it was also opened or changed in the same period.
-- `Reviewed PRs:` is one list, always the last block, of other people's PRs the user reviewed
-  in this period, on GitHub or in a local Claude or Codex review session. One line per PR:
-  the title, `#<number>`, then the PR link in square brackets. No body lines, no approved/commented split.
-  Each PR appears once. Leave the block out when the list is empty.
+- `Reviewed PRs:` lists other people's PRs the user reviewed in this period, on GitHub or in
+  a local Claude or Codex review session. One bullet per PR: the title and `#<number>`, both
+  inside the link text. No sub-bullets, no approved/commented split. Each PR appears once.
 - The user's own PRs never go in `Reviewed PRs:`, even when the user ran local reviews on them
   or a teammate approved them.
-- `WIP branch: <branch name> [branch link]` for a pushed branch with work in this period but no PR yet.
-  The link is the branch on GitHub: `https://github.com/<owner>/<repo>/tree/<branch>`.
-  Skip branches that were never pushed.
-- For anything that is not a PR or branch, just the task name on the heading line, no
-  prefix, no link.
+- `Finalized and merged PRs:` for PRs merged in this period. This replaces Opened or Updated,
+  even if the PR was also opened or changed in the same period.
+- `Opened PRs:` for PRs raised in this period.
+- `Updated PRs:` for PRs that already existed and got new commits or changes.
+- Add ` (draft)` after the link when the PR is a draft.
+- `WIP branches:` for pushed branches with work in this period but no PR yet. The link is the
+  branch on GitHub: `https://github.com/<owner>/<repo>/tree/<branch>`. Skip branches that were
+  never pushed.
+- `Tasks:` for anything that is not a PR or branch: the task name, no link.
+
+Links are always `[text](url)` with the full `https://` URL. Never paste a bare URL, never put
+the link in square brackets after the title, and never use Slack's `<url|text>` syntax.
 
 Body lines describe what the change does for the person using the app, e.g. "The form
 now checks that both passwords match while you type." Leave out housekeeping such as
@@ -69,33 +76,37 @@ If a PR had only housekeeping in the period, describe what the PR does overall.
 
 **Example:**
 ```
-Opened PR: Expert invitation form blocks mismatched passwords before submitting
-The expert invitation form now checks that both passwords match while you type.
-The browser now blocks the submit and shows "Passwords don't match" when they differ.
-Before this, the form was sent and the server rejected it.
+**Reviewed PRs:**
+- [Broker renewals list sorts by expiry date #3812](https://github.com/cohabitplatforms/cohabit-web/pull/3812)
+- [Strata dashboard shows the company logo #3815](https://github.com/cohabitplatforms/cohabit-web/pull/3815)
 
-Updated draft PR: Broker cannot create a second open new business opportunity for the same building
-Each New Business row now shows the building address under the plan number, so rows with the same plan number can be told apart.
-The Filters panel now closes when a modal opens, so it no longer covers the modal and blocks its clicks.
-Renamed the submit button in the new opportunity modal from "Add building" to "Add opportunity".
+**Finalized and merged PRs:**
+- [Fix production errors on the broker new business JSON URL and /users/edit](https://github.com/cohabitplatforms/cohabit-web/pull/3790)
+  - Error pages now show as normal web pages instead of crashing.
+  - The resend confirmation page now loads.
 
-WIP branch: fix/expert-company-profile-no-company [https://github.com/cohabitplatforms/cohabit-web/tree/fix/expert-company-profile-no-company]
-Expert admins with no company now see a clear message instead of an error page.
-Experts created by staff in the backend are now linked to the Cohabit company automatically.
+**Opened PRs:**
+- [Expert invitation form blocks mismatched passwords before submitting](https://github.com/cohabitplatforms/cohabit-web/pull/3811)
+  - The expert invitation form now checks that both passwords match while you type.
+  - The browser now blocks the submit and shows "Passwords don't match" when they differ.
+  - Before this, the form was sent and the server rejected it.
 
-Finalized and merged PR: Fix production errors on the broker new business JSON URL and /users/edit
-Error pages now show as normal web pages instead of crashing.
-The resend confirmation page now loads.
+**Updated PRs:**
+- [Broker cannot create a second open new business opportunity for the same building](https://github.com/cohabitplatforms/cohabit-web/pull/3805) (draft)
+  - Each New Business row now shows the building address under the plan number, so rows with the same plan number can be told apart.
+  - The Filters panel now closes when a modal opens, so it no longer covers the modal and blocks its clicks.
+  - Renamed the submit button in the new opportunity modal from "Add building" to "Add opportunity".
 
-Reviewed PRs:
-Broker renewals list sorts by expiry date #3812 [https://github.com/cohabitplatforms/cohabit-web/pull/3812]
-Strata dashboard shows the company logo #3815 [https://github.com/cohabitplatforms/cohabit-web/pull/3815]
+**WIP branches:**
+- [fix/expert-company-profile-no-company](https://github.com/cohabitplatforms/cohabit-web/tree/fix/expert-company-profile-no-company)
+  - Expert admins with no company now see a clear message instead of an error page.
+  - Experts created by staff in the backend are now linked to the Cohabit company automatically.
 ```
 
 Body lines:
 
 - Past tense, one thing per line. "Added", "Fixed", "Traced", "Confirmed".
-- Plain lines, not bullets. No leading `-` or `*`.
+- Each body line is a sub-bullet (`  - `) under its item.
 - One complete sentence per line. Never split a sentence across two lines to make it shorter.
 - No word cap. A line runs as long as the sentence needs, and stops there.
 
@@ -164,7 +175,7 @@ user's explicit instruction: one complete sentence per line, never split to hit 
 Never guess a title, a link, or a state. Read them.
 
 - `gh pr view <n> --repo <owner/repo> --json number,title,url,state,isDraft,createdAt,updatedAt,mergedAt`
-  (`isDraft` picks the draft heading, `mergedAt` in the period picks Finalized and merged).
+  (`isDraft` adds the (draft) mark, `mergedAt` in the period picks Finalized and merged).
 - WIP branches: `git fetch`, then `git log --remotes --author=<user> --since=<start> --format='%h %D %s'`
   and keep the remote branches with no PR (`gh pr list --head <branch> --state all`).
 - `gh pr diff <n> --repo <owner/repo>` for what actually changed.
@@ -191,5 +202,5 @@ Never guess a title, a link, or a state. Read them.
 If `gh` fails with "Could not resolve to a Repository", the wrong account is active. Check
 `gh auth status` and `gh auth switch --user <login>`.
 
-Blockers go on their own line under the block they belong to, in the same past-tense voice,
-or as a plain sentence after the last block if it applies to everything.
+Blockers go on their own sub-bullet under the item they belong to, in the same past-tense voice,
+or as a plain sentence after the last section if it applies to everything.

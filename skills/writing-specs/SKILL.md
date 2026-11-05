@@ -187,7 +187,7 @@ end
 When a spec file already uses matchers and the team keeps them, match the file's style rather than mixing two styles for the same kind of check.
 
 ### 50. Every new test must be able to fail
-A test that cannot fail is noise. Before calling a test done, break the code it covers once (remove the guard, flip the boundary, drop the config) and watch the test go red, then restore. Record the mutation in the review or PR.
+A test that cannot fail is noise. Before calling a test done, break the code it covers once (remove the guard, flip the boundary, drop the config) and watch the test go red, then restore. Record the mutation in the review or PR. Build mode too: break the line in a throwaway worktree (`git worktree add /tmp/<name> HEAD`, its own test database), never with sed and a backup on the real checkout, where a crash before the restore leaves a mutated file to be committed.
 
 A mutation counts when the example fails *because of the behaviour you changed*: an assertion failure, or a runtime error the change itself causes (turning `user&.name` into `user.name` and getting `NoMethodError` on nil is a valid result). Judge by the failure's cause, not the count: a single-example run is supposed to go fully red. The mutation is invalid, so redo it and don't report it, when the output is a `SyntaxError`, a load error, RSpec's "errors occurred outside of examples", or an error unrelated to the behaviour (a dangling `.first` after deleting part of a chain, a stray `end`, a typo'd name). Run `ruby -c <file>` on the mutated file when in doubt.
 
