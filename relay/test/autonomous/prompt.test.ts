@@ -27,13 +27,21 @@ describe('WORKER_BRIEF', () => {
     expect(WORKER_BRIEF).toContain('Use `gh` only for what git cannot do on GitHub')
   })
 
-  it('asks long work to edit one status message in place and post the final report as a new message', () => {
+  it('asks long work to edit one status message in place, and keeps the answer in the turn text, not in say', () => {
     expect(WORKER_BRIEF).toContain('update that one status message in place')
-    expect(WORKER_BRIEF).toContain('Post the final report as a new message')
+    expect(WORKER_BRIEF).toContain('Write the answer as your turn text, not with say')
+    expect(WORKER_BRIEF).toContain('Use say only for the ack and the status message')
+    expect(WORKER_BRIEF).not.toContain('Post the final report as a new message')
   })
 
-  it('says the final message is the report, and to ack long work in its own words but answer a quick question directly', () => {
-    expect(WORKER_BRIEF).toContain('posted in the thread as the report')
+  it('says every text of the turn is the report and Slack sees nothing else, and to ack long work in its own words but answer a quick question directly', () => {
+    expect(WORKER_BRIEF).toContain('Every text you write this turn is posted in the thread as the report')
+    expect(WORKER_BRIEF).toContain('Slack sees nothing else')
+    expect(WORKER_BRIEF).toContain('Never point to a message the thread may not show')
+    expect(WORKER_BRIEF).toContain('If a say or edit command exits non-zero, that text was not posted')
+    expect(WORKER_BRIEF).toContain('never leave anything the user must read only in the status message')
+    expect(WORKER_BRIEF).toContain('do not repeat the ack in your turn text')
+    expect(WORKER_BRIEF).not.toContain('Your final message each turn is posted')
     expect(WORKER_BRIEF).toContain('does not acknowledge messages for you')
     expect(WORKER_BRIEF).toContain('more than about a minute, first post one short ack in your own words')
     expect(WORKER_BRIEF).toContain('For a quick question, just answer: no ack.')

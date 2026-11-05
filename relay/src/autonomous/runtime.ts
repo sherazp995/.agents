@@ -68,9 +68,7 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   const { pool, workspaceId, dispatcher, log, config, relayHome } = options
   const installedCodexVersion = codexVersion(config.codex_bin).catch(() => 'unknown')
   const taskDir = (taskId: string): string => join(relayHome, 'tasks', taskId)
-  const post = async (action: ChatAction, executor?: PoolClient): Promise<void> => {
-    await dispatcher.enqueue(action, workspaceId, executor)
-  }
+  const post = (action: ChatAction, executor?: PoolClient): Promise<string> => dispatcher.enqueue(action, workspaceId, executor)
   const replyRef = async (task: AutonomousTask): Promise<ChatRef> => {
     const { rows } = await pool.query<{ thread_ref: string }>('SELECT thread_ref FROM sessions WHERE id = $1', [task.sessionId])
     return threadChatRef(rows[0]?.thread_ref ?? '')

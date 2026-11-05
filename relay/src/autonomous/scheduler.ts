@@ -47,6 +47,7 @@ import {
   type TaskUpdate,
 } from './store.js'
 import type { TurnInbox, TurnOutcome } from './worker.js'
+import { splitForSlack } from '../chat/slack/split.js'
 
 export const DEFAULT_LEASE_TTL_MS = 60_000
 export const DEFAULT_TICK_MS = 2_000
@@ -96,8 +97,8 @@ export type SchedulerDeps = {
   workspaceId: string
   /** This daemon's lease owner name. */
   owner: string
-  /** Queues a post; with `executor`, inside that transaction. */
-  post: (action: ChatAction, executor?: PoolClient) => Promise<void>
+  /** Queues an action, inside `executor`'s transaction when given; for a post, returns its dispatch id, which a later post can name as `after`. */
+  post: (action: ChatAction, executor?: PoolClient) => Promise<string>
   /** Where the task's thread replies go. */
   replyRef: (task: AutonomousTask) => Promise<ChatRef>
   /** Re-reads the kill switch (an engage from the CLI) and answers whether it is engaged. */
@@ -381,7 +382,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     await inTransaction(deps.pool, async (client) => {
       if (Object.keys(update).length > 0 && !(await updateTask(client, lease, update))) return
       if (!(await consumeTurnInput(client, lease, input))) return
-      if (text.trim() !== '') await deps.post({ kind: 'post', ref, text: scrubSecrets(text), markdown: true }, client)
+      if (text.trim() === '') return
+      // A whole turn's text can pass one Slack message's limit: post it in parts, each sent only after the one before it.
+      let after: string | undefined
+      for (const part of splitForSlack(scrubSecrets(text))) {
+        after = await deps.post({ kind: 'post', ref, text: part, markdown: true, ...(after !== undefined ? { after } : {}) }, client)
+      }
     })
   }
 

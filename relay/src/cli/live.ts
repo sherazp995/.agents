@@ -25,6 +25,7 @@ import {
   releaseLiveControl,
   waitForMessage,
 } from '../live/control.js'
+import { queueStampedPost } from '../dispatch/outbound.js'
 import { findActiveSession } from '../sessions/store.js'
 import { composeThreadRef, MARKDOWN_BLOCK_MAX_CHARS } from '../chat/slack/adapter.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
@@ -212,6 +213,27 @@ export async function runLiveDrain(pool: Pool, workspaceId: string): Promise<str
   return blocks.join('\n\n')
 }
 
+/**
+ * Queues a text post stamped the way the daemon's own posts are (one
+ * transaction, through queueStampedPost), so the daemon records the Slack ts
+ * against its dispatch id and a later `relay live edit` can name it. Returns
+ * the outbox row id, which say prints as the status id.
+ */
+async function queueStatusPost(pool: Pool, workspaceId: string, ref: { channel: string; thread: string }, text: string): Promise<string> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { outboxId } = await queueStampedPost(client, { workspaceId, adapterName: 'slack', action: { kind: 'post', ref, text, markdown: true }, at: new Date() })
+    await client.query('COMMIT')
+    return outboxId
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined)
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 export type LiveSayParams = LiveClaimParams & { readonly text: string; readonly file?: string }
 
 /**
@@ -227,11 +249,7 @@ export async function runLiveSay(params: LiveSayParams): Promise<string> {
   // Read before anything is queued, so a bad path posts nothing.
   const file = params.file !== undefined ? await readUploadFile(params.file) : undefined
   const ref = { channel: params.channel, thread: params.thread }
-  let statusId: string | undefined
-  if (text !== '') {
-    const { rows } = await params.pool.query<{ id: string }>(`INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, 'slack', $2, now()) RETURNING id`, [params.workspaceId, { kind: 'post', ref, text, markdown: true }])
-    statusId = rows[0]?.id
-  }
+  const statusId = text === '' ? undefined : await queueStatusPost(params.pool, params.workspaceId, ref, text)
   if (file) await queueUpload(params.pool, params.workspaceId, ref, file)
   const threadRef = composeThreadRef(params.channel, params.thread)
   // A file alone gets no id: only a text post can be edited later.
@@ -239,27 +257,24 @@ export async function runLiveSay(params: LiveSayParams): Promise<string> {
   return `queued ${statusId} for ${threadRef}; the relay daemon posts it. Edit it later with: ${buildEditCommand(ref, statusId)}`
 }
 
-/** How long `edit` waits for the post it rewrites to be delivered, so an edit straight after a say still finds the message. */
-export const EDIT_SEND_WAIT_MS = 30_000
-const EDIT_POLL_MS = 500
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-export type LiveEditParams = LiveClaimParams & { readonly id: string; readonly text: string; readonly sendWaitMs?: number }
+export type LiveEditParams = LiveClaimParams & { readonly id: string; readonly text: string }
 
 type StatusRow = {
   workspace_id: string
   adapter: string
-  action: { kind?: string; ref?: { channel?: string; thread?: string } }
+  action: { kind?: string; ref?: { channel?: string; thread?: string; message?: string } }
   status: string
-  sent_ref: { channel?: string; message?: string } | null
 }
 
 /**
  * Rewrites, in place, a message `relay live say` posted, through the outbox
  * like say. Only relay's own text posts in this same thread and workspace
  * can be edited, so a worker can never reach another thread's messages.
- * The id is the post's outbox row, so the edit waits until that row is sent
- * and targets the ts Slack gave it.
+ * The id is the post's outbox row; the edit names the post's dispatch id,
+ * which the daemon resolves to the Slack ts once the post is sent, and
+ * defers the edit until then (src/dispatch/outbound.ts).
  */
 export async function runLiveEdit(params: LiveEditParams): Promise<string> {
   await resolveSessionId(params)
@@ -271,28 +286,24 @@ export async function runLiveEdit(params: LiveEditParams): Promise<string> {
   const notEditable = new Error(`${params.id} is not a message relay posted in ${threadRef}; edit only an id relay live say printed for this thread`)
   if (!UUID_PATTERN.test(params.id)) throw notEditable
 
-  const deadline = Date.now() + (params.sendWaitMs ?? EDIT_SEND_WAIT_MS)
-  for (;;) {
-    const { rows } = await params.pool.query<StatusRow>('SELECT workspace_id, adapter, action, status, sent_ref FROM outbox WHERE id = $1', [params.id])
-    const row = rows[0]
-    const ownPost =
-      row !== undefined &&
-      row.workspace_id === params.workspaceId &&
-      row.adapter === 'slack' &&
-      row.action.kind === 'post' &&
-      row.action.ref?.channel === params.channel &&
-      row.action.ref.thread === params.thread
-    if (!ownPost) throw notEditable
-    if (row.status === 'failed') throw new Error(`${params.id} was never posted: its delivery failed, so there is nothing to edit; post a new message with relay live say`)
-    const sent = row.sent_ref
-    if (row.status === 'sent' && sent?.channel && sent.message) {
-      const ref = { channel: sent.channel, thread: params.thread, message: sent.message }
-      await params.pool.query(`INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, 'slack', $2, now())`, [params.workspaceId, { kind: 'edit', ref, text, markdown: true }])
-      return `queued an edit of ${params.id} in ${threadRef}; the relay daemon updates it.`
-    }
-    if (Date.now() >= deadline) throw new Error(`${params.id} has not been posted yet, so it cannot be edited; is the relay daemon running? Try again once it is posted.`)
-    await new Promise((resolve) => setTimeout(resolve, EDIT_POLL_MS))
+  const { rows } = await params.pool.query<StatusRow>('SELECT workspace_id, adapter, action, status FROM outbox WHERE id = $1', [params.id])
+  const row = rows[0]
+  const ownPost =
+    row !== undefined &&
+    row.workspace_id === params.workspaceId &&
+    row.adapter === 'slack' &&
+    row.action.kind === 'post' &&
+    row.action.ref?.channel === params.channel &&
+    row.action.ref.thread === params.thread
+  if (!ownPost) throw notEditable
+  if (row.status === 'failed') throw new Error(`${params.id} was never posted: its delivery failed, so there is nothing to edit; post a new message with relay live say`)
+  const dispatchId = row.action.ref?.message
+  if (dispatchId === undefined || !UUID_PATTERN.test(dispatchId)) {
+    throw new Error(`${params.id} was posted by an older relay that cannot edit it; post a new message with relay live say`)
   }
+  const ref = { channel: params.channel, thread: params.thread, message: dispatchId }
+  await params.pool.query(`INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, 'slack', $2, now())`, [params.workspaceId, { kind: 'edit', ref, text, markdown: true }])
+  return `queued an edit of ${params.id} in ${threadRef}; the relay daemon updates it.`
 }
 
 export type LiveReactParams = LiveClaimParams & { readonly message: string; readonly name: string }

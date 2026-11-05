@@ -82,7 +82,7 @@ export const SLACK_APP_TOKEN_SECRET = 'relay-slack-app-token'
  * Slack's 40,000 CHARACTER limit: any text within 40,000 bytes has at most
  * 40,000 characters, never more.
  */
-const SLACK_MAX_MESSAGE_BYTES = 40_000
+export const SLACK_MAX_MESSAGE_BYTES = 40_000
 
 /**
  * Capabilities a real Slack app can honestly deliver with the granted

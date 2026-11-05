@@ -173,15 +173,50 @@ describe('runWorkerTurn', () => {
     expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi') }))).toEqual({ kind: 'reply', text: 'first answer\n\nsecond answer', sessionId: 's1' })
   })
 
+  // Shaped like a real `claude -p --output-format stream-json --verbose` capture: one assistant event per content block.
+  const assistant = (blocks: readonly unknown[], parent: string | null = null) => `echo '${JSON.stringify({ type: 'assistant', message: { content: blocks }, parent_tool_use_id: parent, session_id: 's1' })}'`
+  const text = (value: string) => ({ type: 'text', text: value })
+
+  it('reports every text the chat wrote in the turn, in order, not only the last one', async () => {
+    const bin = script(tempDir(), 'claude', [
+      assistant([text('The answer is 42.')]),
+      assistant([{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'echo hi' } }]),
+      assistant([{ type: 'thinking', thinking: 'checking' }]),
+      assistant([null, 'stray', text('As above.')]),
+      claudeResult('As above.'),
+    ].join('; '))
+    expect(await runWorkerTurn(turn({ bin, account: CLAUDE }))).toEqual({ kind: 'reply', text: 'The answer is 42.\n\nAs above.', sessionId: 's1' })
+  })
+
+  it("leaves out a subagent's text and reports each text once across a second result", async () => {
+    const bin = script(tempDir(), 'claude', [
+      'read -r a',
+      assistant([text('Starting.')]),
+      assistant([text('subagent notes')], 'tu-agent'),
+      assistant([text('first answer')]),
+      claudeResult('first answer'),
+      assistant([text('second answer')]),
+      claudeResult('second answer'),
+    ].join('; '))
+    expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi') }))).toEqual({ kind: 'reply', text: 'Starting.\n\nfirst answer\n\nsecond answer', sessionId: 's1' })
+  })
+
   it('classifies a usage-limit exit as a blocked account', async () => {
     const bin = script(tempDir(), 'claude', 'echo "Claude usage limit reached" >&2; exit 1')
     expect(await runWorkerTurn(turn({ bin, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'usage_limit' })
   })
 
-  it('reads a codex reply from its last agent message', async () => {
+  it('reads a codex reply from its agent message', async () => {
     const message = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'hi there' } })
     const bin = script(tempDir(), 'codex', `echo '{"type":"thread.started","thread_id":"t1"}'; echo '${message}'; echo '{"type":"turn.completed"}'`)
     expect(await runWorkerTurn(turn({ bin, account: CODEX }))).toEqual({ kind: 'reply', text: 'hi there', sessionId: 't1' })
+  })
+
+  it('reports every codex agent message of the turn, in order, around a command', async () => {
+    const said = (value: string) => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: value } })
+    const command = JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command: 'echo hi', aggregated_output: 'hi' } })
+    const bin = script(tempDir(), 'codex', `echo '{"type":"thread.started","thread_id":"t1"}'; echo '${said('The answer is 42.')}'; echo '${command}'; echo '${said('As above.')}'; echo '{"type":"turn.completed"}'`)
+    expect(await runWorkerTurn(turn({ bin, account: CODEX }))).toEqual({ kind: 'reply', text: 'The answer is 42.\n\nAs above.', sessionId: 't1' })
   })
 
   it('fails a codex turn that failed after a message, and a claude error result', async () => {

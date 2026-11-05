@@ -41,10 +41,14 @@
  *     `dependencyDeadlineMs` of when the dispatch id was first observed: it
  *     throws `OutboxDeferError` (src/chat/outbox.ts), which reschedules the
  *     row without spending any of its `maxAttempts` budget, exactly what
- *     fix round 1's finding 2 asked for. Past the deadline: it throws a
- *     plain error instead, which does spend a real attempt and can reach
- *     Outbox's ordinary terminal 'failed' state, so a genuinely
- *     undeliverable edit still terminates rather than deferring forever.
+ *     fix round 1's finding 2 asked for. Past the deadline it keeps
+ *     deferring while the post's own outbox row is still pending (a Slack
+ *     outage retries that row without limit, so the edit must not give up
+ *     first). Once the post has failed or never existed, it throws a plain
+ *     error instead, which does spend a real attempt and can reach Outbox's
+ *     ordinary terminal 'failed' state, so a genuinely undeliverable edit
+ *     still terminates rather than deferring forever. A post queued `after`
+ *     another post waits on it the same way.
  *
  * "Unresolved" covers two distinct row shapes, deliberately treated the
  * same way rather than merely coerced into looking the same: a placeholder
@@ -78,11 +82,11 @@
  * COST, stated plainly rather than implied away. An edit whose post has not
  * landed yet costs one `OutboxDeferError` reschedule per drain() cycle it
  * is attempted in, for as long as `dependencyDeadlineMs` allows (ten
- * minutes by default); that is deliberately generous, because the whole
- * point of fix round 1 is that a busy shared adapter can legitimately take
- * a while to get back around to a delayed post. Past the deadline, the
- * edit starts spending Outbox's ordinary maxAttempts budget and can reach
- * terminal 'failed', same as any other genuine delivery failure. A retried
+ * minutes by default), and past it while the post is still pending in the
+ * outbox, plus one lookup of that row per cycle once past the
+ * deadline. Once the post has failed or never existed, the edit starts
+ * spending Outbox's ordinary maxAttempts budget and can reach terminal
+ * 'failed', same as any other genuine delivery failure. A retried
  * post also costs a second, idempotent write to `outbound_dispatch_refs`
  * under the same dispatch id (a plain UPDATE, not a crash): if a perform()
  * call times out per Outbox's `performTimeoutMs` but the platform actually
@@ -130,21 +134,23 @@ import type {
   ChatEvent,
   ChatRef,
 } from '../chat/contract.js'
-import { Outbox, OutboxDeferError } from '../chat/outbox.js'
+import { insertOutboxRow, Outbox, OutboxDeferError } from '../chat/outbox.js'
 import type { OutboxDrainResult, OutboxOptions } from '../chat/outbox.js'
 import type { Logger } from '../obs/logger.js'
 
 /**
- * How long, at most, an edit will keep deferring (via OutboxDeferError,
- * spending no attempts) while its dependency has not resolved yet, before
- * it starts spending Outbox's own maxAttempts budget instead. Ten minutes
+ * How long an edit (or a post queued `after` another) keeps deferring (via
+ * OutboxDeferError, spending no attempts) while its dependency has not
+ * resolved yet, before it starts spending Outbox's own maxAttempts budget
+ * instead, unless the dependency's post is still pending in the outbox, in
+ * which case it keeps deferring until that post is sent or fails. Ten minutes
  * is deliberately generous: it exists to absorb a busy shared adapter
  * taking several drain() cycles to get back around to a delayed post, not
  * to bound how fast a healthy system delivers.
  */
 const DEFAULT_DEPENDENCY_DEADLINE_MS = 10 * 60 * 1000
 
-/** How long a deferred edit waits before its next attempt. Short and fixed, not exponential backoff: a defer is not a failure, so there is no reason to back off the way a real error would. */
+/** How long a deferred edit or ordered post waits before its next attempt. Short and fixed, not exponential backoff: a defer is not a failure, so there is no reason to back off the way a real error would. */
 const DEFAULT_DEPENDENCY_RETRY_MS = 2000
 
 export type OutboundDispatcherOptions = OutboxOptions & {
@@ -202,7 +208,7 @@ function buildResolvedEditRef(
  * suggestion of a third. The behavior is genuinely identical either way:
  * both "never enqueued" and "enqueued but not yet delivered" defer, on the
  * same deadline, for the same reason, and every caller of this type
- * (decorateAdapter's 'edit' branch) treats them identically too, so a
+ * (decorateAdapter's edit and ordered-post paths) treats them identically too, so a
  * third type variant would exist purely to be immediately collapsed back
  * by its only consumer. The type's job is to make the compiler enforce
  * "only a real ref may be acted on"; it is not the right place to also
@@ -258,6 +264,26 @@ async function insertPlaceholder(
      VALUES ($1, $2, $3)`,
     [dispatchId, workspaceId, dispatchedAt],
   )
+}
+
+/**
+ * Queues a post-type action stamped with a fresh dispatch id: its
+ * placeholder and its outbox row, on the caller's executor, so a caller in a
+ * transaction gets both or neither. The one place that stamps a post:
+ * OutboundDispatcher.perform and .enqueue use it, and so does `relay live
+ * say`, which has no dispatcher of its own. Returns the outbox row id and the
+ * dispatch id a later edit, or a post queued `after` it, names.
+ */
+export async function queueStampedPost(
+  executor: PoolClient,
+  params: { workspaceId: string; adapterName: string; action: DispatchableAction; at: Date; log?: Logger | undefined },
+): Promise<{ outboxId: string; dispatchId: string }> {
+  const dispatchId = randomUUID()
+  await insertPlaceholder(executor, dispatchId, params.workspaceId, params.at)
+  const stamped = { ...params.action, ref: { ...params.action.ref, message: dispatchId } } as ChatAction
+  const outboxId = await insertOutboxRow(executor, params.workspaceId, params.adapterName, stamped, params.at)
+  params.log?.info({ outboxId, workspaceId: params.workspaceId, actionKind: stamped.kind, dispatchId }, 'enqueued outbox action')
+  return { outboxId, dispatchId }
 }
 
 async function storeResolvedRef(
@@ -382,8 +408,8 @@ async function lookupDispatchState(
         'the tenant boundary',
     )
     throw new Error(
-      `outbound dispatch ${dispatchId} does not belong to workspace ${workspaceId}; the edit ` +
-        'that references it can never be delivered',
+      `outbound dispatch ${dispatchId} does not belong to workspace ${workspaceId}; the edit or post ` +
+        'that depends on it can never be delivered',
     )
   }
   log?.warn(
@@ -399,6 +425,7 @@ export class OutboundDispatcher implements ChatAdapter {
   readonly #workspaceId: string
   readonly #outbox: Outbox
   readonly #now: () => Date
+  readonly #log: Logger | undefined
 
   readonly name: string
   readonly capabilities: AdapterCapabilities
@@ -419,6 +446,7 @@ export class OutboundDispatcher implements ChatAdapter {
     // The same clock Outbox itself reads, resolved once here so the
     // dispatcher and its Outbox can never end up reading different clocks.
     this.#now = options.now ?? (() => new Date())
+    this.#log = options.log
     this.#outbox = new Outbox(
       pool,
       decorateAdapter({
@@ -470,11 +498,7 @@ export class OutboundDispatcher implements ChatAdapter {
    */
   async perform(action: ChatAction): Promise<ChatActionResult> {
     if (needsDispatchId(action)) {
-      const dispatchId = randomUUID()
-      const dispatchedAt = this.#now()
-      const stampedRef: ChatRef = { ...action.ref, message: dispatchId }
-      const stamped = { ...action, ref: stampedRef } as ChatAction
-
+      let dispatchId: string
       const client = await this.#pool.connect()
       try {
         await client.query('BEGIN')
@@ -482,8 +506,7 @@ export class OutboundDispatcher implements ChatAdapter {
         // ever handed back to a caller: see lookupDispatchState's doc
         // comment for what this guarantees, and what it does not, about a
         // later edit's lookup.
-        await insertPlaceholder(client, dispatchId, this.#workspaceId, dispatchedAt)
-        await this.#outbox.enqueue(stamped, this.#workspaceId, client)
+        ;({ dispatchId } = await queueStampedPost(client, { workspaceId: this.#workspaceId, adapterName: this.#realAdapter.name, action, at: this.#now(), log: this.#log }))
         await client.query('COMMIT')
       } catch (error) {
         await client.query('ROLLBACK').catch(() => {
@@ -499,7 +522,7 @@ export class OutboundDispatcher implements ChatAdapter {
       // Only returned after the transaction above has committed: the
       // synthetic ref this hands back must never describe a placeholder
       // that might not durably exist.
-      return { ref: stampedRef }
+      return { ref: { ...action.ref, message: dispatchId } }
     }
 
     await this.#outbox.enqueue(action, this.#workspaceId)
@@ -516,9 +539,7 @@ export class OutboundDispatcher implements ChatAdapter {
     if (workspaceId !== this.#workspaceId) throw new Error('OutboundDispatcher.enqueue: an action for another workspace')
     if (executor === undefined) return (await this.perform(action)).ref.message ?? ''
     if (!needsDispatchId(action)) return this.#outbox.enqueue(action, workspaceId, executor)
-    const dispatchId = randomUUID()
-    await insertPlaceholder(executor, dispatchId, workspaceId, this.#now())
-    await this.#outbox.enqueue({ ...action, ref: { ...action.ref, message: dispatchId } } as ChatAction, workspaceId, executor)
+    const { dispatchId } = await queueStampedPost(executor, { workspaceId, adapterName: this.#realAdapter.name, action, at: this.#now(), log: this.#log })
     return dispatchId
   }
 
@@ -536,6 +557,18 @@ export class OutboundDispatcher implements ChatAdapter {
   async drainUploads(): Promise<OutboxDrainResult> {
     return this.#outbox.drain({ lane: 'uploads' })
   }
+}
+
+/** Whether the post stamped with this dispatch id is still queued in this workspace's outbox, so it may yet be sent. */
+async function dependencyStillPending(pool: Pool, dispatchId: string, workspaceId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    // Only the post itself: an edit of it (including the one asking) carries the same dispatch id in its ref.
+    `SELECT 1 FROM outbox
+     WHERE workspace_id = $1 AND status = 'pending' AND action->>'kind' IN ('post', 'post_approval_card') AND action->'ref'->>'message' = $2
+     LIMIT 1`,
+    [workspaceId, dispatchId],
+  )
+  return rows.length > 0
 }
 
 type DecorateAdapterOptions = {
@@ -562,31 +595,41 @@ function decorateAdapter(options: DecorateAdapterOptions): ChatAdapter {
     start: (handler) => real.start(handler),
     stop: () => real.stop(),
     async perform(action: ChatAction): Promise<ChatActionResult> {
-      if (action.kind === 'edit') {
-        const dispatchId = action.ref.message
+      /**
+       * The real ref of an earlier post this action (an edit, or a post queued `after` it) depends on. Defers while
+       * that post is unsent: always within the deadline, and past it for as long as the post's outbox row is still
+       * pending (a Slack outage retries it without limit), so nothing fails while its post can still land. Gives up
+       * once the deadline has passed and the post failed or never existed.
+       */
+      const resolvedDependency = async (dispatchId: string): Promise<ChatRef> => {
         const state = await lookupDispatchState(pool, dispatchId, workspaceId, now, log)
-
-        if (state.status === 'resolved') {
-          const ref = buildResolvedEditRef(action.ref, state.ref)
-          return real.perform({ ...action, ref })
-        }
-
+        if (state.status === 'resolved') return state.ref
         const elapsedMs = now().getTime() - state.dispatchedAt.getTime()
-        if (elapsedMs < dependencyDeadlineMs) {
+        if (elapsedMs < dependencyDeadlineMs || (await dependencyStillPending(pool, dispatchId, workspaceId))) {
           throw new OutboxDeferError(
             `outbound dispatch ${dispatchId} has not been delivered yet, deferring`,
             dependencyRetryMs,
           )
         }
+        // The post may have been sent between the two reads above.
+        const settled = await lookupDispatchState(pool, dispatchId, workspaceId, now, log)
+        if (settled.status === 'resolved') return settled.ref
         throw new Error(
-          `outbound dispatch ${dispatchId} has not resolved within ${dependencyDeadlineMs}ms; ` +
+          `outbound dispatch ${dispatchId} has not resolved within ${dependencyDeadlineMs}ms and its post is no longer queued; ` +
             'giving up rather than deferring indefinitely',
         )
       }
 
+      if (action.kind === 'edit') {
+        const ref = buildResolvedEditRef(action.ref, await resolvedDependency(action.ref.message))
+        return real.perform({ ...action, ref })
+      }
+
       if (needsDispatchId(action)) {
         const dispatchId = action.ref.message
-        const strippedAction = { ...action, ref: withoutDispatchMessage(action.ref) } as ChatAction
+        if (action.kind === 'post' && action.after !== undefined) await resolvedDependency(action.after)
+        const { after: _after, ...unordered } = action as ChatAction & { after?: string }
+        const strippedAction = { ...unordered, ref: withoutDispatchMessage(action.ref) } as ChatAction
         const result = await real.perform(strippedAction)
         if (dispatchId) await storeResolvedRef(pool, dispatchId, workspaceId, result.ref)
         return result

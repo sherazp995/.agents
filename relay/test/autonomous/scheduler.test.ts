@@ -64,13 +64,15 @@ describe('autonomous scheduler', () => {
     effects: SchedulerEffects
     turns: TurnRequestContext[]
     posts: string[]
+    /** The `after` each post named, in order; undefined for a post that waits on nothing. */
+    after: (string | undefined)[]
     /** Whether each post was sent as agent Markdown. */
     markdown: boolean[]
     cleaned: string[]
   }
 
   function harness(turns: ((context: TurnRequestContext) => Promise<TurnResult>)[], overrides: Partial<SchedulerEffects> = {}): Harness {
-    const h: Harness = { turns: [], posts: [], markdown: [], cleaned: [], effects: undefined as never }
+    const h: Harness = { turns: [], posts: [], after: [], markdown: [], cleaned: [], effects: undefined as never }
     h.effects = {
       async runTurn(context) {
         h.turns.push(context)
@@ -97,6 +99,8 @@ describe('autonomous scheduler', () => {
       post: async (action) => {
         if (action.kind === 'post') h.posts.push(action.text)
         if (action.kind === 'post') h.markdown.push(action.markdown === true)
+        if (action.kind === 'post') h.after.push(action.after)
+        return `dispatch-${h.posts.length}`
       },
       replyRef: async () => ({ channel: 'C1', thread: '1.1' }),
       isKillSwitchEngaged: async () => options.engaged?.() ?? false,
@@ -116,7 +120,22 @@ describe('autonomous scheduler', () => {
     expect(h.turns[0]?.prompt).toContain('fix the login bug')
     expect(h.posts).toEqual(['Fixed it, *tests pass*.'])
     expect(h.markdown).toEqual([true])
+    expect(h.after).toEqual([undefined])
     expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [], nextWakeupAt: null, engineSessionId: 'sess-1', accountKey: 'claude' })
+  })
+
+  it('posts a reply too long for one Slack message in parts, each after the one before', async () => {
+    const { workspaceId } = await newTask()
+    const paragraph = 'word '.repeat(1000).trim()
+    const long = Array.from({ length: 6 }, () => paragraph).join('\n\n')
+    const h = harness([async () => reply(long)])
+
+    await scheduler(workspaceId, h).tick()
+
+    expect(h.posts.length).toBeGreaterThan(1)
+    expect(h.posts.join('\n\n')).toBe(long)
+    expect(h.after).toEqual([undefined, ...h.posts.slice(1).map((_, index) => `dispatch-${index + 1}`)])
+    expect(h.markdown.every(Boolean)).toBe(true)
   })
 
   it('sends the new message into an open terminal chat and starts no headless turn', async () => {

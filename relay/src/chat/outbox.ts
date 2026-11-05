@@ -182,6 +182,24 @@ type OutboxRow = {
 }
 
 /**
+ * The shared INSERT that queues an action: Outbox.enqueue uses it, and so
+ * does queueStampedPost in src/dispatch/outbound.ts, for the dispatcher and
+ * `relay live say`. (A few older CLI paths still write their own INSERT.)
+ * Returns the outbox row id.
+ */
+export async function insertOutboxRow(executor: Pool | PoolClient, workspaceId: string, adapterName: string, action: ChatAction, at: Date): Promise<string> {
+  const { rows } = await executor.query<{ id: string }>(
+    `INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id`,
+    [workspaceId, adapterName, serializeAction(action), at],
+  )
+  const id = rows[0]?.id
+  if (!id) throw new Error('insertOutboxRow: INSERT ... RETURNING id returned no row')
+  return id
+}
+
+/**
  * `ChatAction`'s `upload` variant carries `bytes: Uint8Array`. JSON has no
  * binary type, so a plain `JSON.stringify` on a Uint8Array serializes it as
  * an index keyed object ({"0":1,"1":2,...}) and never comes back as a
@@ -257,14 +275,7 @@ export class Outbox {
    * own the instant this call returns.
    */
   async enqueue(action: ChatAction, workspaceId: string, executor: Pool | PoolClient = this.#pool): Promise<string> {
-    const { rows } = await executor.query<{ id: string }>(
-      `INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id`,
-      [workspaceId, this.#adapter.name, serializeAction(action), this.#now()],
-    )
-    const id = rows[0]?.id
-    if (!id) throw new Error('Outbox.enqueue: INSERT ... RETURNING id returned no row')
+    const id = await insertOutboxRow(executor, workspaceId, this.#adapter.name, action, this.#now())
     this.#log?.info(
       { outboxId: id, workspaceId, actionKind: action.kind },
       'enqueued outbox action',

@@ -13,6 +13,8 @@ import { provisionPrincipal } from '../../src/tenancy/principals.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 describe('relay live say', () => {
   let pool: Pool
 
@@ -35,7 +37,10 @@ describe('relay live say', () => {
     const out = await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '1.1', text: ' Done. ' })
 
     const { rows } = await pool.query<{ id: string; action: unknown }>('SELECT id, action FROM outbox WHERE workspace_id = $1', [workspaceId])
-    expect(rows.map((row) => row.action)).toEqual([{ kind: 'post', ref: { channel: 'D1', thread: '1.1' }, text: 'Done.', markdown: true }])
+    expect(rows.map((row) => row.action)).toEqual([{ kind: 'post', ref: { channel: 'D1', thread: '1.1', message: expect.stringMatching(UUID) }, text: 'Done.', markdown: true }])
+    // The dispatch id on the post has its placeholder, so the daemon records the Slack ts against it and an edit can name it.
+    const { rows: placeholders } = await pool.query('SELECT 1 FROM outbound_dispatch_refs WHERE dispatch_id = $1 AND workspace_id = $2', [(rows[0]?.action as { ref: { message: string } }).ref.message, workspaceId])
+    expect(placeholders).toHaveLength(1)
     // The printed status id is the post's outbox row, which relay live edit resolves.
     expect(out).toBe(
       `queued ${rows[0]?.id} for D1:1.1; the relay daemon posts it. Edit it later with: relay live edit --channel D1 --thread 1.1 --id ${rows[0]?.id} --text "<new status>"`,
