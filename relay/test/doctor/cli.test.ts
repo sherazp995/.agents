@@ -1,3 +1,4 @@
+// relay-test-needs: services (relay doctor checks the real Postgres, Redis and Keychain)
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { beforeAll, describe, expect, it } from 'vitest'

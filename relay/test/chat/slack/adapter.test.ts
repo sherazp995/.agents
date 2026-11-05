@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { unwrapForAudit } from '../../../src/agent/untrusted.js'
 import type { AdapterCapabilities, ChatAction, ChatActionResult, ChatEvent } from '../../../src/chat/contract.js'
 import { IntakeFailedError, sessionRefFor } from '../../../src/chat/contract.js'
-import { MARKDOWN_BLOCK_MAX_CHARS, SlackAdapter, composeThreadRef } from '../../../src/chat/slack/adapter.js'
+import { MARKDOWN_BLOCK_MAX_CHARS, SlackAdapter } from '../../../src/chat/slack/adapter.js'
+import { composeThreadRef } from '../../../src/chat/slack/events.js'
 import type {
   DirectCommandRequest,
   ApprovalInteractionRequest,
@@ -23,7 +24,7 @@ import type {
   SlackViewListener,
   SlackViewSubmissionEnvelope,
   SlackViewSubmissionResponse,
-} from '../../../src/chat/slack/adapter.js'
+} from '../../../src/chat/slack/types.js'
 import { SecretNotFoundError } from '../../../src/secrets/provider.js'
 import type { SecretProvider } from '../../../src/secrets/provider.js'
 import type { ResolveApprovalResult } from '../../../src/approvals/store.js'

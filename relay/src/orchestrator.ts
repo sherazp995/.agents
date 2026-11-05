@@ -26,7 +26,8 @@
 
 import { startAutonomousRuntime, type AutonomousRuntime, type AutonomousRuntimeOptions } from './autonomous/runtime.js'
 import type { Pool } from 'pg'
-import type { Capability, AgentLoopLimits, AgentLoopResult, Engine } from './agent/loop.js'
+import type { AgentLoopLimits, AgentLoopResult } from './agent/loop.js'
+import type { Capability, Engine } from './agent/engine.js'
 import { runAgentLoop } from './agent/loop.js'
 // Fix round 1 addendum, item 1: an explicit call, not a bare side-effect
 // import. registerBuiltinCapabilities() (src/capabilities/wiring.ts) is
@@ -45,9 +46,10 @@ import type { OutboxDrainResult } from './chat/outbox.js'
 import { ProgressReporter, truncateToBytes } from './chat/progress.js'
 import { resolvePrincipal } from './chat/principals.js'
 import type { SecretProvider } from './secrets/provider.js'
-import { SLACK_BOT_TOKEN_SECRET, SlackAdapter, composeThreadRef } from './chat/slack/adapter.js'
+import { SLACK_BOT_TOKEN_SECRET, SlackAdapter } from './chat/slack/adapter.js'
+import { composeThreadRef } from './chat/slack/events.js'
 import { createRealAttachThreadToSession, listRecentEngineSessions } from './chat/slack/session-attach.js'
-import type { SlackAdapterCreateOptions } from './chat/slack/adapter.js'
+import type { SlackAdapterCreateOptions } from './chat/slack/types.js'
 import { OutboundDispatcher } from './dispatch/outbound.js'
 import type { OutboundDispatcherOptions } from './dispatch/outbound.js'
 import type { Logger } from './obs/logger.js'

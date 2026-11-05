@@ -24,7 +24,7 @@ import {
   BROWSER_CAPABILITY_NAME,
   createBrowserCapability,
 } from '../../src/agent/capabilities/browser.js'
-import type { Capability } from '../../src/agent/loop.js'
+import type { Capability } from '../../src/agent/engine.js'
 import { CapabilityRegistry } from '../../src/capabilities/registry.js'
 import { startFixtureSite } from './fixture-site.js'
 import type { FixtureSite } from './fixture-site.js'

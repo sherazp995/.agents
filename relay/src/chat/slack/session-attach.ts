@@ -31,6 +31,11 @@ import type { EngineSession } from '../../sessions/discovery.js'
 import { listEngineSessions } from '../../sessions/discovery.js'
 import { attachSessionToEngineChat, findOrCreateSession } from '../../sessions/store.js'
 import type { Pool } from 'pg'
+import type { Logger } from '../../obs/logger.js'
+import { OWNER_ONLY_REPLY } from '../../tenancy/access.js'
+import type { ChatEvent } from '../contract.js'
+import { composeThreadRef } from './events.js'
+import type { SlackApiClient, SlackBlockActionEnvelope } from './types.js'
 
 export const SESSION_ATTACH_ACTION_ID = 'session_attach_pick'
 
@@ -306,4 +311,152 @@ export function createRealAttachThreadToSession(
 /** Real implementation for SlackAdapterOptions.listRecentSessions: the operator's own terminal chats only (no `claude -p` runs, no subagents), machine-wide (no workspace scoping, since it reads the operator's own filesystem directly, not a Postgres table AP-8 governs). */
 export function listRecentEngineSessions(limit: number): Promise<readonly EngineSession[]> {
   return listEngineSessions({ limit, interactiveOnly: true })
+}
+
+/** What the sessions command and the Attach handler need from SlackAdapter. */
+export type SessionAttachContext = {
+  apiClient: SlackApiClient
+  resolvePrincipalId: (platformUserId: string) => Promise<string | null>
+  isOwner: (platformUserId: string) => Promise<boolean>
+  listRecentSessions: (limit: number) => Promise<readonly EngineSession[]>
+  attachThreadToSession: (params: AttachThreadToSessionParams) => Promise<AttachThreadToSessionResult | undefined>
+  log: Logger | undefined
+}
+
+/**
+ * FR-ATT-5's "sessions" command: lists recent Claude Code sessions in the
+ * thread the command arrived in, as a Block Kit message with one Attach
+ * button per session. `channel`/`thread` are taken from chatEvent.ref,
+ * per composeThreadRef's own convention (`ref.thread` for a reply,
+ * `ref.message` for the message that starts a thread), and encoded into
+ * each button's own value so handleSessionAttachButton never has to
+ * reconstruct them from a click envelope.
+ *
+ * A ctx.listRecentSessions failure is reported into the thread rather than
+ * only logged, matching handleApprovalButton (approval-interactions.ts)'s own standard: the
+ * operator asked for something and deserves to know it did not work,
+ * not silence indistinguishable from Relay ignoring them.
+ */
+export async function handleSessionsCommand(ctx: SessionAttachContext, chatEvent: ChatEvent, platformUserId: string | undefined): Promise<void> {
+  const channel = chatEvent.ref.channel
+  const thread = chatEvent.ref.thread ?? chatEvent.ref.message
+  if (thread === undefined) {
+    ctx.log?.error('SlackAdapter: sessions command carried no message ref to thread from; ignoring')
+    return
+  }
+  try {
+    if (platformUserId === undefined || !(await ctx.isOwner(platformUserId))) {
+      ctx.log?.warn({ platformUserId }, 'SlackAdapter: refused a sessions message from someone who is not an owner')
+      await ctx.apiClient.postMessage({ channel, thread, text: OWNER_ONLY_REPLY })
+      return
+    }
+    const sessions = await ctx.listRecentSessions(MAX_LISTED_SESSIONS)
+    const { text, blocks } = renderSessionList(sessions, channel, thread)
+    await ctx.apiClient.postMessage({ channel, thread, text, blocks })
+  } catch (error) {
+    ctx.log?.error({ err: error }, 'SlackAdapter: listing sessions failed')
+    const { text, blocks } = renderAttachFailure('could not list sessions right now')
+    await ctx.apiClient.postMessage({ channel, thread, text, blocks }).catch(() => {})
+  }
+}
+
+/**
+ * Handles one selection on the session picker.
+ *
+ * ONLY the session id travels in the payload. The thread comes from the
+ * click envelope, and the working directory is re-derived from discovery
+ * by that id, so a crafted payload can name neither an arbitrary thread
+ * nor an arbitrary path. An undecodable value (a stale message from a
+ * redeployed version, a forged payload) is ignored rather than trusted,
+ * matching handleApprovalButton (approval-interactions.ts)'s own decode failures staying silent,
+ * since there is no legitimate click that produces one.
+ *
+ * FR-ATT-30's unmediated label is posted here, on success, the moment the
+ * attachment actually takes effect: renderAttachConfirmation, not a bare
+ * "done." A denied attach (`ctx.attachThreadToSession` returning
+ * `undefined`, whether because it is not wired or because the resolver
+ * refused an unmapped principal) and a thrown error both report failure
+ * back into the thread, the same standard handleApprovalButton (approval-interactions.ts) holds
+ * itself to for anything past the point a channel/thread ref is known.
+ */
+export async function handleSessionAttachButton(ctx: SessionAttachContext, envelope: SlackBlockActionEnvelope): Promise<void> {
+  const action = envelope.actions[0]
+  // A dropdown puts the payload in `selected_option.value`; a button puts
+  // it in `value`. Both are read so the handler works whichever element
+  // the list was rendered with, and an older message already in the
+  // channel keeps working after the renderer changes.
+  const rawValue = action?.selected_option?.value ?? action?.value
+  if (!rawValue) {
+    ctx.log?.warn('SlackAdapter: session attach click carried no value; ignoring')
+    return
+  }
+  const decoded = decodeSessionAttachValue(rawValue)
+  if (!decoded) {
+    ctx.log?.error('SlackAdapter: session attach value was not a valid SessionAttachValue; ignoring')
+    return
+  }
+  const { engineSessionId } = decoded
+
+  // AP-2: a button's value is outside content. Slack guarantees it
+  // delivered the payload, never that Relay authored it, so the only
+  // fields trusted here are the ones Slack itself stamps on the click
+  // envelope. Taking the channel and thread from the button's own value
+  // would let a crafted payload bind ANY thread to a session, and an
+  // attached session runs unmediated in the operator's own directory
+  // with the operator's own permissions (§24), so that is the most
+  // consequential binding in the product.
+  const channel = envelope.channel?.id
+  const thread = envelope.message?.ts
+  if (!channel || !thread) {
+    ctx.log?.error('SlackAdapter: session attach click carried no channel or message ts; ignoring')
+    return
+  }
+
+  try {
+    // FR-CA-4: fail closed on an unmapped principal. Attaching is not a
+    // read, it decides where an ungoverned engine runs, so an actor Relay
+    // cannot name must never reach it.
+    const principalId = await ctx.resolvePrincipalId(envelope.user.id)
+    if (principalId === null) {
+      // Unmapped senders get no reply anywhere; the log names them for `relay principals add`.
+      ctx.log?.warn({ platformUserId: envelope.user.id }, 'SlackAdapter: ignored a session attach click from an unmapped principal')
+      return
+    }
+    if (!(await ctx.isOwner(envelope.user.id))) {
+      ctx.log?.warn({ platformUserId: envelope.user.id }, 'SlackAdapter: refused a session attach click from a member')
+      await ctx.apiClient.postMessage({ channel, thread, text: OWNER_ONLY_REPLY })
+      return
+    }
+
+    // The working directory is re-derived from discovery by session id
+    // rather than taken from the payload, for the same reason as above:
+    // it determines where a process executes. Re-deriving also handles
+    // the ordinary case of a card that has sat in a thread for a week
+    // whose session has since moved or been deleted, turning it into a
+    // clean refusal instead of an attachment to a path that no longer
+    // means what it meant when the button was drawn.
+    const discovered = (await ctx.listRecentSessions(MAX_LISTED_SESSIONS)).find(
+      (session) => session.sessionId === engineSessionId,
+    )
+    if (!discovered) {
+      const { text, blocks } = renderAttachFailure('that session no longer exists on this machine')
+      await ctx.apiClient.postMessage({ channel, thread, text, blocks })
+      return
+    }
+    const engineCwd = discovered.cwd
+
+    const threadRef = composeThreadRef(channel, thread)
+    const result = await ctx.attachThreadToSession({ threadRef, principalId, engineSessionId, engineCwd })
+    if (!result) {
+      const { text, blocks } = renderAttachFailure('attaching sessions is not available right now')
+      await ctx.apiClient.postMessage({ channel, thread, text, blocks })
+      return
+    }
+    const { text, blocks } = renderAttachConfirmation(engineCwd)
+    await ctx.apiClient.postMessage({ channel, thread, text, blocks })
+  } catch (error) {
+    ctx.log?.error({ err: error }, 'SlackAdapter: session attach handler threw')
+    const { text, blocks } = renderAttachFailure('an unexpected error occurred')
+    await ctx.apiClient.postMessage({ channel, thread, text, blocks }).catch(() => {})
+  }
 }

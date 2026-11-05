@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { threadChatRef } from '../../src/autonomous/operations.js'
-import { composeThreadRef } from '../../src/chat/slack/adapter.js'
+import { composeThreadRef } from '../../src/chat/slack/events.js'
 
 describe('threadChatRef', () => {
   it('reads back the channel and thread composeThreadRef stored', () => {

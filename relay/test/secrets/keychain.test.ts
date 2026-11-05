@@ -1,3 +1,4 @@
+// relay-test-needs: macos
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'

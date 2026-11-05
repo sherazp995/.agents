@@ -26,6 +26,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:ci": "vitest run -c vitest.ci.config.ts",
     "test:watch": "vitest",
     "dev": "tsc -p tsconfig.json && node dist/src/cli.js",
     "slack:smoke": "tsc -p tsconfig.json && node dist/scripts/slack-smoke.js",

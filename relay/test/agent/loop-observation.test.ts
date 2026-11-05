@@ -11,7 +11,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { MAX_OBSERVATION_CHARACTERS, buildStepObservation } from '../../src/agent/loop.js'
+import { MAX_OBSERVATION_CHARACTERS, buildStepObservation } from '../../src/agent/planner.js'
 import { UNTRUSTED_DATA_TAG, renderForModel, unwrapForAudit } from '../../src/agent/untrusted.js'
 import { registerSecretValue, resetSecretScrubberForTests } from '../../src/secrets/scrubber.js'
 

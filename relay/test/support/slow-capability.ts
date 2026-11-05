@@ -30,7 +30,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import type { Capability } from '../../src/agent/loop.js'
+import type { Capability } from '../../src/agent/engine.js'
 
 export type SlowCapabilityInput = { readonly seconds: number }
 

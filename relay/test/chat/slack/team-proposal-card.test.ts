@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { IntakeOutbox } from '../../../src/autonomous/store.js'
 import type { ChatAction } from '../../../src/chat/contract.js'
-import type { SlackBlockActionEnvelope } from '../../../src/chat/slack/adapter.js'
+import type { SlackBlockActionEnvelope } from '../../../src/chat/slack/types.js'
 import {
   failCutOffProposals,
   handleProposalClick,

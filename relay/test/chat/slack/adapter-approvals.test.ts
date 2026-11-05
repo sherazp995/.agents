@@ -41,7 +41,7 @@ import type {
   SlackViewListener,
   SlackViewSubmissionEnvelope,
   SlackViewSubmissionResponse,
-} from '../../../src/chat/slack/adapter.js'
+} from '../../../src/chat/slack/types.js'
 import type { SecretProvider } from '../../../src/secrets/provider.js'
 import {
   APPROVAL_ACTION_IDS,

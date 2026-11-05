@@ -10,7 +10,7 @@
  */
 
 import type { Pool } from 'pg'
-import { composeThreadRef } from '../chat/slack/adapter.js'
+import { composeThreadRef } from '../chat/slack/events.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
 import { claimLiveControl } from '../live/control.js'
 import { attachSessionToEngineChat, findOrCreateSession } from '../sessions/store.js'

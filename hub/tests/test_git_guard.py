@@ -111,6 +111,20 @@ class GitGuardTests(unittest.TestCase):
         self.assertIn('single line', self.guard(heredoc) or '')
         self.assertIn('attribution', self.guard("git commit -m 'Fix Co-Authored-By: Claude <x>'"))
 
+    def test_a_subject_over_120_characters_is_denied_in_every_message_form(self):
+        self.assertIsNone(self.guard(f"git commit -m '{'a' * 120}'"))
+        for command in (f"git commit -m '{'a' * 121}'", f"git commit --message='{'a' * 121}'",
+                        f"git commit -m'{'a' * 121}'", f"git commit --mess='{'a' * 121}'"):
+            self.assertIn('rule 48: the commit subject is 121 characters, over the 120 limit',
+                          self.guard(command) or '', command)
+
+    def test_a_feature_tag_counts_toward_the_subject_limit(self):
+        self.per_feature()
+        tagged = '[billing] ' + 'a' * 110
+
+        self.assertIsNone(self.guard(f"git commit -m '{tagged}'"))
+        self.assertIn('121 characters', self.guard(f"git commit -m '{tagged}a'") or '')
+
     def test_git_dash_c_is_denied_with_cd_rewrites_that_keep_home_and_variables_live(self):
         self.assertIn('rule 43', self.guard(f'git -C {self.repo} status'))
         self.assertIn('`cd ~/repo && git log`', self.guard('git -C ~/repo log'))

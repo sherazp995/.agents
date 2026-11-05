@@ -36,7 +36,7 @@ import { loadPolicy } from '../../../config/load.js'
 import { defaultPolicyPath, resolveRelayHome } from '../../../config/paths.js'
 import { checkPathScope } from './scope.js'
 import { moveToTrash } from './trash.js'
-import type { Capability } from '../../loop.js'
+import type { Capability } from '../../engine.js'
 import type { CapabilityDefinition } from '../../../capabilities/registry.js'
 
 export const FILES_CAPABILITY_NAME = 'files'

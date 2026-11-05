@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { composeThreadRef } from '../src/chat/slack/adapter.js'
+import { composeThreadRef } from '../src/chat/slack/events.js'
 import { KillSwitchEngagedError } from '../src/killswitch.js'
 import { listEngineSessions } from '../src/sessions/discovery.js'
 import { SESSION_ATTACH_ACTION_ID } from '../src/chat/slack/session-attach.js'
@@ -35,8 +35,9 @@ import { APPROVAL_ACTION_IDS } from '../src/approvals/blockkit.js'
 import { createRun } from '../src/runs/store.js'
 import { z } from 'zod'
 import { echo } from '../src/agent/capabilities/echo.js'
-import { PLAN_JSON_SCHEMA } from '../src/agent/loop.js'
-import type { AgentLoopResult, Engine } from '../src/agent/loop.js'
+import { PLAN_JSON_SCHEMA } from '../src/agent/planner.js'
+import type { AgentLoopResult } from '../src/agent/loop.js'
+import type { Engine } from '../src/agent/engine.js'
 import { unwrapForAudit, wrapUntrusted } from '../src/agent/untrusted.js'
 import { MockAdapter } from '../src/chat/mock.js'
 import { OutboundDispatcher } from '../src/dispatch/outbound.js'
@@ -60,7 +61,7 @@ import type {
   SlackPostMessageArgs,
   SlackUpdateMessageArgs,
   SlackUploadFileArgs,
-} from '../src/chat/slack/adapter.js'
+} from '../src/chat/slack/types.js'
 import {
   buildFinalReport,
   createProductionSlackAdapter,

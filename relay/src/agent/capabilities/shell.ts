@@ -37,7 +37,7 @@ import { loadPolicy } from '../../config/load.js'
 import { defaultPolicyPath, resolveRelayHome } from '../../config/paths.js'
 import { runSandboxed, sandboxAvailability } from '../../sandbox/exec.js'
 import { startEgressProxy } from '../../sandbox/proxy.js'
-import type { Capability } from '../loop.js'
+import type { Capability } from '../engine.js'
 import type { CapabilityDefinition } from '../../capabilities/registry.js'
 
 export const SHELL_CAPABILITY_NAME = 'shell'

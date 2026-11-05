@@ -23,7 +23,7 @@ import type { Logger } from '../../obs/logger.js'
 import { approveProposal, failRunningProposals, getProposal, hasNewPersonas, recordProposalCard, rejectProposal, type Proposal, type ProposedRow, type SupersededCard } from '../../projects/proposals.js'
 import { StoreConflict } from '../../projects/store.js'
 import { isOwner } from '../../tenancy/roles.js'
-import type { SlackBlockActionEnvelope } from './adapter.js'
+import type { SlackBlockActionEnvelope } from './types.js'
 
 export const TEAM_PROPOSAL_ACTION_IDS = { approve: 'team_proposal_approve', reject: 'team_proposal_reject' } as const
 export type TeamProposalDecision = keyof typeof TEAM_PROPOSAL_ACTION_IDS

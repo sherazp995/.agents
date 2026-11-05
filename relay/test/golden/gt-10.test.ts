@@ -35,7 +35,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { buildStepObservation } from '../../src/agent/loop.js'
+import { buildStepObservation } from '../../src/agent/planner.js'
 import { UNTRUSTED_DATA_TAG, renderForModel } from '../../src/agent/untrusted.js'
 import { registerSecretValue, resetSecretScrubberForTests } from '../../src/secrets/scrubber.js'
 import { FIXTURE_INJECTION_PAYLOAD, FIXTURE_LEAKED_TOKEN } from '../support/fixture-site.js'

@@ -27,7 +27,8 @@ import {
 } from '../live/control.js'
 import { queueStampedPost } from '../dispatch/outbound.js'
 import { findActiveSession } from '../sessions/store.js'
-import { composeThreadRef, MARKDOWN_BLOCK_MAX_CHARS } from '../chat/slack/adapter.js'
+import { MARKDOWN_BLOCK_MAX_CHARS } from '../chat/slack/adapter.js'
+import { composeThreadRef } from '../chat/slack/events.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
 import { queueUpload, readUploadFile } from './upload.js'
 

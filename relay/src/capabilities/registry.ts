@@ -29,7 +29,7 @@
  */
 
 import { z } from 'zod'
-import type { Capability } from '../agent/loop.js'
+import type { Capability } from '../agent/engine.js'
 
 /**
  * Risk tier, per §10.1 of the requirements. Governs default policy

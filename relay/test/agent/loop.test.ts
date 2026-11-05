@@ -56,15 +56,12 @@ import { createRun, listSteps } from '../../src/runs/store.js'
 import { registerSecretValue, resetSecretScrubberForTests } from '../../src/secrets/scrubber.js'
 import { UNTRUSTED_DATA_TAG, wrapUntrusted } from '../../src/agent/untrusted.js'
 import type { Untrusted } from '../../src/agent/untrusted.js'
-import {
-  DECISION_JSON_SCHEMA,
-  EngineCwdError,
-  PLAN_JSON_SCHEMA,
-  runAgentLoop,
-  runClaudeEngine,
-  validateEngineCwd,
-} from '../../src/agent/loop.js'
-import type { AgentLoopLimits, Capability, Engine, EngineInvocation, EngineResult, PlanResponse } from '../../src/agent/loop.js'
+import { runAgentLoop } from '../../src/agent/loop.js'
+import type { AgentLoopLimits } from '../../src/agent/loop.js'
+import { EngineCwdError, runClaudeEngine, validateEngineCwd } from '../../src/agent/engine.js'
+import type { Capability, Engine, EngineInvocation, EngineResult } from '../../src/agent/engine.js'
+import { DECISION_JSON_SCHEMA, PLAN_JSON_SCHEMA } from '../../src/agent/planner.js'
+import type { PlanResponse } from '../../src/agent/planner.js'
 import { echo } from '../../src/agent/capabilities/echo.js'
 import { registerBuiltinCapabilities } from '../../src/capabilities/wiring.js'
 import {

@@ -47,7 +47,7 @@ import { defaultConfigPath, defaultPolicyPath, defaultProfilesPath } from '../..
 
 import { z } from 'zod'
 
-import type { Capability } from '../loop.js'
+import type { Capability } from '../engine.js'
 import type { CapabilityDefinition } from '../../capabilities/registry.js'
 import { loadPolicy, loadProfileRegistryIfPresent } from '../../config/load.js'
 import type { Policy } from '../../config/schema.js'

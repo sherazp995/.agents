@@ -85,7 +85,8 @@ vi.mock('node:child_process', () => {
 // Imported AFTER vi.mock: Vitest hoists the vi.mock call above every import
 // in this file regardless of source order, but writing it this way keeps
 // the dependency honest to read.
-const { runClaudeEngine, DECISION_JSON_SCHEMA } = await import('../../src/agent/loop.js')
+const { runClaudeEngine } = await import('../../src/agent/engine.js')
+const { DECISION_JSON_SCHEMA } = await import('../../src/agent/planner.js')
 
 describe('runClaudeEngine: argv and environment (gate fix, High 3)', () => {
   const originalEnv = { ...process.env }

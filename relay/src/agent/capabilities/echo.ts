@@ -7,7 +7,7 @@
  */
 
 import { z } from 'zod'
-import type { Capability } from '../loop.js'
+import type { Capability } from '../engine.js'
 import type { CapabilityDefinition } from '../../capabilities/registry.js'
 
 export const echo: Capability = async (input: unknown): Promise<unknown> => input

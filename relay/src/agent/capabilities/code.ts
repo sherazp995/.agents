@@ -32,7 +32,7 @@ import { defaultReposPath } from '../../config/paths.js'
 import { checkRepoOperation, resolveRepo } from '../../repos/resolve.js'
 import { createWorktree } from '../../repos/worktree.js'
 import { runEngine, verify } from '../../repos/engine.js'
-import type { Capability } from '../loop.js'
+import type { Capability } from '../engine.js'
 import type { CapabilityDefinition } from '../../capabilities/registry.js'
 
 export const CODE_CAPABILITY_NAME = 'code'

@@ -22,3 +22,7 @@ config/repos.yaml
 /bin/*
 !/bin/relay
 !/bin/relay-update
+
+# Runtime data Relay writes under its home: task dirs (inbox downloads, QA checkouts) and team run personas.
+/tasks/
+/team-runs/

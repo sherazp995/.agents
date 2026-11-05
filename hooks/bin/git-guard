@@ -292,6 +292,7 @@ def commit_messages(args):
 
 
 MODES = ('single', 'per-feature')
+SUBJECT_LIMIT = 120
 
 
 def commit_mode(directory):
@@ -334,9 +335,13 @@ def branch_start(directory):
 
 def check_commit(directory, args):
     problems = []
-    messages = commit_messages(args)
+    messages = commit_messages(expand_long_options(args))
     if len(messages) > 1 or any('\n' in m.strip() for m in messages):
         problems.append(Correction('rule 48: the commit message must be a single line. Rerun it with one `-m "<one line>"`'))
+    subject = messages[0].strip().split('\n')[0] if messages else ''
+    if len(subject) > SUBJECT_LIMIT:
+        problems.append(Correction(f'rule 48: the commit subject is {len(subject)} characters, over the {SUBJECT_LIMIT} '
+                                   'limit. Rerun it with a shorter one-line subject'))
     if any(ATTRIBUTION.search(m) for m in messages):
         problems.append(Correction('rule 48: no Claude attribution in commits. Rerun it without the attribution line'))
     if not os.path.isdir(directory):
