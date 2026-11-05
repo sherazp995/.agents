@@ -1,3 +1,4 @@
+// relay-test-needs: macos (asserts Chrome's macOS default profile directory)
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

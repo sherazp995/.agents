@@ -1,3 +1,4 @@
+// relay-test-needs: macos (asserts Chrome's macOS default profile directory)
 import { describe, expect, it } from 'vitest'
 
 import { loadProfileRegistry } from '../../src/config/load.js'

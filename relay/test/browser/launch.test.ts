@@ -1,3 +1,4 @@
+// relay-test-needs: macos (asserts Chrome's macOS default profile directory)
 import { join } from 'node:path'
 
 import { describe, expect, it, vi } from 'vitest'
