@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createAutonomousGuard, remoteWrites, type GuardDeps, type ShellWriteAnswer } from '../../src/autonomous/guard.js'
 import type { AutonomousTask } from '../../src/autonomous/store.js'
+import type { Assignment } from '../../src/teams/types.js'
 import type { HookDecisionRequest } from '../../src/engine/hook-bridge.js'
 
 const TASK = { id: 't1', workspaceId: 'w1', leaseGeneration: 2, cancelRequestedAt: null } as AutonomousTask
@@ -59,6 +60,26 @@ describe('the guard', () => {
     expect(requested).toEqual([])
   })
 
+  it('denies relay ui however it is wrapped, without asking, even when approvals would pass', async () => {
+    const { guard, requested } = guardWith({ kind: 'approved' })
+    for (const command of ['relay ui', '/usr/local/bin/relay ui --no-open', 'env FOO=1 relay ui', 'echo x && relay ui', 'sh -c "relay ui"', 'relay --verbose ui']) {
+      expect(await guard.decide(bash(command), CONTEXT)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('relay ui') })
+    }
+    // Other relay commands and the word "ui" elsewhere still run.
+    expect(await guard.decide(bash('relay live say --text ui'), CONTEXT)).toMatchObject({ decision: 'allow' })
+    expect(await guard.decide(bash('ls ui && relay notify hi'), CONTEXT)).toMatchObject({ decision: 'allow' })
+    expect(requested).toEqual([])
+  })
+
+  it('lets relay team propose run without asking: it is not a remote write, and only the owner approves the proposal', async () => {
+    const { guard, requested } = guardWith({ kind: 'pending' })
+    for (const command of ['relay team propose', '/usr/local/bin/relay team propose']) {
+      expect(await guard.decide(bash(command), CONTEXT)).toMatchObject({ decision: 'allow' })
+    }
+    expect(await guard.decide(bash('relay ui team'), CONTEXT)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('relay ui') })
+    expect(requested).toEqual([])
+  })
+
   it('holds a push for approval, then lets the approved command run', async () => {
     const pending = guardWith({ kind: 'pending' })
     expect(await pending.guard.decide(bash('git push origin x'), CONTEXT)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('approval') })
@@ -87,5 +108,72 @@ describe('the guard', () => {
     expect(await guardWith({ kind: 'approved' }, { isKillSwitchEngaged: async () => true }).guard.decide(bash('ls'), CONTEXT)).toMatchObject({ decision: 'deny' })
     const stopped = guardWith({ kind: 'approved' }, { loadTask: async () => ({ ...TASK, cancelRequestedAt: new Date() }) })
     expect(await stopped.guard.decide(bash('ls'), CONTEXT)).toMatchObject({ decision: 'deny' })
+  })
+})
+
+describe('the guard for a team member', () => {
+  const ASSIGNMENT = { id: 'a1', workspaceId: 'w1', taskId: 't1', state: 'running', leaseGeneration: 5 } as Assignment
+  // The token carries the assignment's generation, not the lead's lease generation (2).
+  const MEMBER = { ...CONTEXT, leaseGeneration: 5, assignment: { id: 'a1', leaseGeneration: 5 } }
+
+  function memberGuard(answer: ShellWriteAnswer = { kind: 'approved' }, assignment: Assignment | undefined = ASSIGNMENT) {
+    return guardWith(answer, { loadAssignment: async (id) => (id === assignment?.id ? assignment : undefined) })
+  }
+
+  it('allows ordinary work and ask-lead while the lead holds a different lease generation', async () => {
+    const { guard } = memberGuard()
+    for (const command of ['pnpm test', 'git commit -m x', 'relay team ask-lead --text "which?"', 'echo relay notify-me']) {
+      expect(await guard.decide(bash(command), MEMBER)).toMatchObject({ decision: 'allow' })
+    }
+    expect(await guard.decide(bash('', 'Edit'), MEMBER)).toMatchObject({ decision: 'allow' })
+  })
+
+  it('refuses MCP tools, the Slack and setup commands, and the lead\'s team commands, however wrapped', async () => {
+    const { guard, requested } = memberGuard()
+    expect(await guard.decide(bash('', 'mcp__slack__post'), MEMBER)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('MCP') })
+    const refused = [
+      'relay live say --text hi',
+      'relay notify done',
+      '/usr/local/bin/relay upload f.png',
+      'relay ui',
+      'relay team propose',
+      'relay team assign --member Theo',
+      'relay team merge --assignment a1',
+      'env X=1 relay team start --title x',
+      'pnpm test && sh -c "relay notify hi"',
+      'relay "$(echo notify)" hi',
+    ]
+    for (const command of refused) {
+      expect(await guard.decide(bash(command), MEMBER)).toMatchObject({ decision: 'deny' })
+    }
+    expect(requested).toEqual([])
+  })
+
+  it('refuses every remote write outright, without an approval card', async () => {
+    const { guard, requested } = memberGuard({ kind: 'approved' })
+    for (const command of ['git push origin x', 'gh pr create --title x', 'gh api repos/o/r/issues -f title=x']) {
+      expect(await guard.decide(bash(command), MEMBER)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('never push') })
+    }
+    expect(requested).toEqual([])
+  })
+
+  it('denies a stale member generation, an assignment not running, another task\'s assignment, and a guard without the loader', async () => {
+    expect(await memberGuard().guard.decide(bash('ls'), { ...MEMBER, assignment: { id: 'a1', leaseGeneration: 4 } })).toMatchObject({ decision: 'deny', reason: expect.stringContaining('superseded') })
+    expect(await memberGuard(undefined, { ...ASSIGNMENT, state: 'waiting' }).guard.decide(bash('ls'), MEMBER)).toMatchObject({ decision: 'deny' })
+    expect(await memberGuard(undefined, { ...ASSIGNMENT, taskId: 't2' }).guard.decide(bash('ls'), MEMBER)).toMatchObject({ decision: 'deny' })
+    expect(await memberGuard().guard.decide(bash('ls'), { ...MEMBER, assignment: { id: 'gone', leaseGeneration: 5 } })).toMatchObject({ decision: 'deny' })
+    expect(await guardWith({ kind: 'approved' }).guard.decide(bash('ls'), MEMBER)).toMatchObject({ decision: 'deny' })
+    // The kill switch and a stopped task still apply to members.
+    expect(await guardWith({ kind: 'approved' }, { isKillSwitchEngaged: async () => true, loadAssignment: async () => ASSIGNMENT }).guard.decide(bash('ls'), MEMBER)).toMatchObject({ decision: 'deny' })
+    expect(await guardWith({ kind: 'approved' }, { loadTask: async () => ({ ...TASK, cancelRequestedAt: new Date() }), loadAssignment: async () => ASSIGNMENT }).guard.decide(bash('ls'), MEMBER)).toMatchObject({ decision: 'deny' })
+  })
+
+  it('leaves the lead as before: MCP tools and relay notify run, a push asks for the card', async () => {
+    const { guard, requested } = memberGuard({ kind: 'pending' })
+    expect(await guard.decide(bash('', 'mcp__slack__post'), CONTEXT)).toMatchObject({ decision: 'allow' })
+    expect(await guard.decide(bash('relay notify hi'), CONTEXT)).toMatchObject({ decision: 'allow' })
+    expect(await guard.decide(bash('relay team assign --member Theo'), CONTEXT)).toMatchObject({ decision: 'allow' })
+    expect(await guard.decide(bash('git push origin x'), CONTEXT)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('approval') })
+    expect(requested).toHaveLength(1)
   })
 })

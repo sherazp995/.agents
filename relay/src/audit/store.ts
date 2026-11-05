@@ -65,37 +65,7 @@ export async function appendAuditEntry(pool: Pool, workspaceId: string, entry: A
   const client: PoolClient = await pool.connect()
   try {
     await client.query('BEGIN')
-    // Serialises appenders against each other. Without it, two concurrent
-    // writers read the same head and both claim the next sequence, which
-    // breaks the chain through ordinary concurrency rather than tampering.
-    await client.query('LOCK TABLE audit_entries IN EXCLUSIVE MODE')
-
-    const head = await client.query(
-      'SELECT * FROM audit_entries WHERE workspace_id = $1 ORDER BY sequence DESC LIMIT 1',
-      [workspaceId],
-    )
-    const previous = head.rows.length === 0 ? undefined : rowToEntry(head.rows[0] as Record<string, unknown>)
-
-    // FR-AUD-3: redacted before it is written, never on the way out.
-    const redacted: AuditEntryInput = { ...entry, detail: redactDetail(entry.detail) as Record<string, unknown> }
-    const chained = chainEntry(redacted, previous)
-
-    await client.query(
-      `INSERT INTO audit_entries (workspace_id, sequence, run_id, kind, actor, detail, at, previous_hash, hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        workspaceId,
-        chained.sequence,
-        chained.runId,
-        chained.kind,
-        chained.actor,
-        JSON.stringify(chained.detail),
-        chained.at,
-        chained.previousHash,
-        chained.hash,
-      ],
-    )
-
+    const chained = await appendAuditEntryInTransaction(client, workspaceId, entry)
     await client.query('COMMIT')
     return chained
   } catch (error) {
@@ -104,6 +74,45 @@ export async function appendAuditEntry(pool: Pool, workspaceId: string, entry: A
   } finally {
     client.release()
   }
+}
+
+/**
+ * The same append, on a transaction the caller already opened, so a change
+ * and the entry that records it commit together or not at all (the web
+ * page's saves). The caller owns BEGIN, COMMIT and ROLLBACK.
+ */
+export async function appendAuditEntryInTransaction(client: PoolClient, workspaceId: string, entry: AuditEntryInput): Promise<ChainedAuditEntry> {
+  // Serialises appenders against each other. Without it, two concurrent
+  // writers read the same head and both claim the next sequence, which
+  // breaks the chain through ordinary concurrency rather than tampering.
+  await client.query('LOCK TABLE audit_entries IN EXCLUSIVE MODE')
+
+  const head = await client.query(
+    'SELECT * FROM audit_entries WHERE workspace_id = $1 ORDER BY sequence DESC LIMIT 1',
+    [workspaceId],
+  )
+  const previous = head.rows.length === 0 ? undefined : rowToEntry(head.rows[0] as Record<string, unknown>)
+
+  // FR-AUD-3: redacted before it is written, never on the way out.
+  const redacted: AuditEntryInput = { ...entry, detail: redactDetail(entry.detail) as Record<string, unknown> }
+  const chained = chainEntry(redacted, previous)
+
+  await client.query(
+    `INSERT INTO audit_entries (workspace_id, sequence, run_id, kind, actor, detail, at, previous_hash, hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      workspaceId,
+      chained.sequence,
+      chained.runId,
+      chained.kind,
+      chained.actor,
+      JSON.stringify(chained.detail),
+      chained.at,
+      chained.previousHash,
+      chained.hash,
+    ],
+  )
+  return chained
 }
 
 /** Reads the whole chain in order. Used by verification and by export. */

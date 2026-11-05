@@ -13,5 +13,9 @@ autonomous:
   # Every Slack conversation runs as an autonomous task: one thread is one
   # Claude Code chat, run without the sandbox.
   enabled: true
+ui:
+  # The local setup page for projects, personas and teams. Log in with `relay ui`.
+  enabled: true
+  port: 7766
 secrets:
   provider: keychain

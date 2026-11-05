@@ -7,7 +7,7 @@ import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
 import type { Account, CooldownStore } from '../../src/autonomous/accounts.js'
 import { acquireLease, intakeMention, type AutonomousTask } from '../../src/autonomous/store.js'
-import { runTurnOnPool, type SpawnPlanParams, type TurnRunnerDeps } from '../../src/autonomous/turn-runner.js'
+import { runTurnOnPool, taskSubject, type SpawnPlanParams, type TurnRunnerDeps } from '../../src/autonomous/turn-runner.js'
 import type { TurnRequestContext } from '../../src/autonomous/scheduler.js'
 import type { TurnOutcome, TurnRequest } from '../../src/autonomous/worker.js'
 import { getTestDatabaseUrl } from '../support/database.js'
@@ -170,5 +170,33 @@ describe('turn runner', () => {
     const { d } = deps([], { spawnPlan: async () => { throw new Error('no settings file') } })
     await expect(runTurnOnPool(d, ctx)).rejects.toThrow('no settings file')
     expect(await runStates(ctx.task.id)).toEqual(['failed'])
+  })
+
+  it('a subject bound to one client never picks the other client, waits when its logins are out, and carries its assignment in the token', async () => {
+    const ctx = await context()
+    const contexts: unknown[] = []
+    const subject = { ...taskSubject(ctx.task), client: 'codex' as const, engineSessionId: null, accountKey: null, cwd: '/wt', brief: 'member', noMcp: true, assignment: { id: 'a1', leaseGeneration: 4 } }
+    const { d, plans } = deps([() => REPLY], { issueToken: (invocation) => (contexts.push(invocation), 'token') })
+    const result = await runTurnOnPool(d, { ...ctx, subject })
+    expect(result).toMatchObject({ kind: 'outcome', accountKey: 'codex1' })
+    expect(plans[0]?.subject).toBe(subject)
+    expect(contexts[0]).toMatchObject({ taskId: ctx.task.id, assignment: { id: 'a1', leaseGeneration: 4 } })
+
+    const cooling = memoryCooldowns()
+    cooling.cooling.set('codex1', Date.now() + 60_000)
+    const out = deps([], { cooldowns: cooling })
+    const waiting = await runTurnOnPool(out.d, { ...ctx, subject })
+    expect(waiting.kind).toBe('no_account')
+    expect(out.plans).toHaveLength(0)
+  })
+
+  it("an unbound task subject crosses over as today and its token names no assignment", async () => {
+    const ctx = await context()
+    const contexts: Record<string, unknown>[] = []
+    const cooling = memoryCooldowns()
+    cooling.cooling.set('claude', Date.now() + 60_000)
+    const { d } = deps([() => REPLY], { cooldowns: cooling, issueToken: (invocation) => (contexts.push(invocation as Record<string, unknown>), 'token') })
+    expect(await runTurnOnPool(d, ctx)).toMatchObject({ kind: 'outcome', accountKey: 'codex1' })
+    expect(contexts[0]).not.toHaveProperty('assignment')
   })
 })

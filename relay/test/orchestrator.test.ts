@@ -1895,6 +1895,7 @@ describeDb('orchestrator', () => {
     it.each([
       ['runs "direct" in the channel folder', 'folder'],
       ['refuses "direct" when the description cannot be read', 'failed'],
+      ["runs \"direct\" in the channel project's folder, over the description", 'project'],
     ] as const)('%s', async (_label, kind) => {
       const teamId = `T_${randomUUID()}`
       const boltApp = new StubBoltApp()
@@ -1908,6 +1909,7 @@ describeDb('orchestrator', () => {
       const folder = mkdtempSync(join(tmpdir(), 'relay-direct-channel-'))
       const folderQuestions = new FolderQuestions({
         lookup: async () => (kind === 'folder' ? { kind: 'folder', path: folder } : { kind: 'failed', missingScope: false }),
+        ...(kind === 'project' ? { projectFolder: async () => folder } : {}),
       })
       const runClaude = async () => ({ stdout: JSON.stringify({ type: 'result', session_id: randomUUID(), result: 'Listed.' }), stderr: '', code: 0, timedOut: false })
       const { adapter, workspaceId } = await createProductionSlackAdapter(pool, fakeSecrets(), { boltApp, apiClient, folderQuestions, directSession: { runClaude } })
@@ -1921,7 +1923,7 @@ describeDb('orchestrator', () => {
       })
 
       const { rows } = await pool.query('SELECT mode, engine_cwd FROM sessions WHERE workspace_id = $1', [workspaceId])
-      if (kind === 'folder') {
+      if (kind !== 'failed') {
         expect(rows).toEqual([{ mode: 'direct', engine_cwd: folder }])
         expect(posts[0]).toContain(`runs in \`${folder}\`, not \`/tmp\``)
       } else {

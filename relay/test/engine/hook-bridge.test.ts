@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { Policy } from '../../src/config/schema.js'
 import {
+  HookBridgeServer,
   CLAUDE_CODE_TOOL_TIERS,
   resolveDeclaredTier,
   resolveHookDecision,
@@ -107,5 +108,72 @@ describe('resolveHookDecision: SELF-ATTACK: an internal failure must deny, never
     const hostileRequest = { ...buildRequest(), toolName: 123 } as unknown as HookDecisionRequest
     const result = resolveHookDecision(hostileRequest, { policy: buildPolicy() })
     expect(result.decision).toBe('deny')
+  })
+})
+
+describe('HookBridgeServer extra routes', () => {
+  const context = { workspaceId: 'w1', taskId: 't1', runId: 'r1', leaseGeneration: 3 }
+  let server: HookBridgeServer | undefined
+
+  afterEach(async () => {
+    await server?.stop()
+    server = undefined
+  })
+
+  async function start(routeDeadlineMs?: number) {
+    const seen: { context: unknown; body: unknown }[] = []
+    server = new HookBridgeServer({
+      decide: async () => ({ decision: 'allow', reason: 'ok' }),
+      ...(routeDeadlineMs !== undefined ? { routeDeadlineMs } : {}),
+      routes: {
+        '/echo': async (ctx, body) => {
+          seen.push({ context: ctx, body })
+          return { status: 202, body: { ok: true, message: 'done' } }
+        },
+        '/slow': () => new Promise((resolve) => setTimeout(() => resolve({ status: 200, body: {} }), 1_000)),
+        '/pre-tool-use': async () => ({ status: 200, body: { hijacked: true } }),
+      },
+    })
+    await server.start()
+    return { server, seen }
+  }
+
+  async function call(bridge: HookBridgeServer, path: string, token: string, method = 'POST') {
+    const response = await fetch(new URL(path, bridge.url), {
+      method,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      ...(method === 'POST' ? { body: JSON.stringify({ hello: 1 }) } : {}),
+    })
+    return { status: response.status, body: (await response.json().catch(() => undefined)) as unknown }
+  }
+
+  it('hands a turn token\'s context and the parsed body to the route', async () => {
+    const { server: bridge, seen } = await start()
+    const answer = await call(bridge, '/echo', bridge.issueToken(context))
+    expect(answer).toEqual({ status: 202, body: { ok: true, message: 'done' } })
+    expect(seen).toEqual([{ context, body: { hello: 1 } }])
+  })
+
+  it('refuses the instance token, a wrong or revoked token, and a GET, without calling the route', async () => {
+    const { server: bridge, seen } = await start()
+    expect((await call(bridge, '/echo', bridge.token)).status).toBe(403)
+    expect((await call(bridge, '/echo', 'f'.repeat(64))).status).toBe(401)
+    const revoked = bridge.issueToken(context)
+    bridge.revokeToken(revoked)
+    expect((await call(bridge, '/echo', revoked)).status).toBe(401)
+    expect((await call(bridge, '/echo', bridge.issueToken(context), 'GET')).status).toBe(404)
+    expect(seen).toEqual([])
+  })
+
+  it('keeps /pre-tool-use the decision route and answers 404 for a path it was not given', async () => {
+    const { server: bridge } = await start()
+    const token = bridge.issueToken(context)
+    expect((await call(bridge, '/pre-tool-use', token)).body).toMatchObject({ decision: 'allow' })
+    expect((await call(bridge, '/other', token)).status).toBe(404)
+  })
+
+  it('answers 504 when a route is slow', async () => {
+    const { server: bridge } = await start(50)
+    expect((await call(bridge, '/slow', bridge.issueToken(context))).status).toBe(504)
   })
 })

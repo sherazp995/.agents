@@ -33,6 +33,8 @@ import type { RelayConfig } from '../src/config/schema.js'
 import { createDaemonSecretProvider } from '../src/secrets/daemon.js'
 import { resolveDatabaseUrl } from '../src/config/database-url.js'
 import { defaultReposPath, resolveRelayHome } from '../src/config/paths.js'
+import { defaultPersonasDir } from '../src/projects/persona-files.js'
+import { DEFAULT_UI_PORT } from '../src/config/schema.js'
 import { createLogger, type Logger } from '../src/obs/logger.js'
 import { createRotatingLogDestination } from '../src/obs/rotation.js'
 import { createPool, closePool } from '../src/db/pool.js'
@@ -267,6 +269,13 @@ async function main(): Promise<void> {
         policy,
         ...(config.autonomous ? { autonomous: config.autonomous } : {}),
         ...(autonomousRuntime ? { autonomousRuntime } : {}),
+        ui: {
+          enabled: config.ui?.enabled ?? true,
+          port: config.ui?.port ?? DEFAULT_UI_PORT,
+          personasDir: defaultPersonasDir(),
+          reposPath: process.env.RELAY_REPOS_PATH ?? defaultReposPath(),
+          ...(config.autonomous ? { claudeBin: config.autonomous.claude_bin } : {}),
+        },
       }),
       STARTUP_DEADLINE_MS,
       log,

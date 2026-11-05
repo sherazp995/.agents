@@ -215,12 +215,18 @@ export function resolveHookDecision(request: HookDecisionRequest, context: HookD
  * `context` is the InvocationContext of the per-invocation token the request
  * authenticated with, or undefined for the instance's own single token.
  */
-/** Who a bridge token was issued to: one chat turn (its run) under one lease generation. */
+/**
+ * Who a bridge token was issued to: one chat turn (its run) under one lease
+ * generation. A team member's turn also names its assignment and that
+ * assignment's lease generation, which every check uses instead of the
+ * task's lease (the lead's).
+ */
 export type InvocationContext = {
   workspaceId: string
   taskId: string
   runId: string
   leaseGeneration: number
+  assignment?: { id: string; leaseGeneration: number }
 }
 
 export type HookDecide = (request: HookDecisionRequest, context: InvocationContext | undefined) => Promise<HookDecisionResult>
@@ -235,6 +241,19 @@ export type HookDecide = (request: HookDecisionRequest, context: InvocationConte
 export function governedDecide(policy: Policy, knownOrigins: readonly string[] = []): HookDecide {
   return async (request) => resolveHookDecision(request, { policy, knownOrigins })
 }
+
+/**
+ * An extra POST route a bridge's creator adds (the autonomous runtime's
+ * team proposal route), so this generic file imports no feature code. It is
+ * reached only with a per-invocation token: the bridge refuses the instance
+ * token before calling it. The route itself decides whether that invocation
+ * may act (a live turn, the right workspace); `signal` aborts at the
+ * deadline, as for `decide`.
+ */
+export type BridgeRoute = (context: InvocationContext, body: unknown, signal: AbortSignal) => Promise<{ status: number; body: unknown }>
+
+/** How long an extra route may take before the bridge answers 504. */
+export const DEFAULT_ROUTE_DEADLINE_MS = 15_000
 
 /** Below the hook script's own 8 s deadline, so the server's deny always reaches the script before the script gives up. */
 export const DEFAULT_DECISION_DEADLINE_MS = 5_000
@@ -261,9 +280,15 @@ export interface HookBridgeServerOptions {
    * exposure regardless of how the token is protected.
    */
   readonly host?: string
+  /** Extra POST routes by path (for example `/team-proposal`); `/pre-tool-use` cannot be replaced. */
+  readonly routes?: Readonly<Record<string, BridgeRoute>>
+  /** How long an extra route may take; defaults to DEFAULT_ROUTE_DEADLINE_MS. */
+  readonly routeDeadlineMs?: number
 }
 
 class DeadlineExceededError extends Error {}
+
+const PRE_TOOL_USE_PATH = '/pre-tool-use'
 
 /**
  * Resolves to `work`'s value, or rejects with DeadlineExceededError once `ms`
@@ -326,6 +351,8 @@ export class HookBridgeServer {
   private readonly logger: Pick<Logger, 'error'> | undefined
   private readonly host: string
   private readonly invocationTokens = new Map<string, InvocationContext>()
+  private readonly routes: ReadonlyMap<string, BridgeRoute>
+  private readonly routeDeadlineMs: number
   private boundUrl: string | undefined
 
   constructor(options: HookBridgeServerOptions) {
@@ -339,6 +366,8 @@ export class HookBridgeServer {
     this.deadlineMs = options.deadlineMs ?? DEFAULT_DECISION_DEADLINE_MS
     this.logger = options.logger
     this.host = options.host ?? '127.0.0.1'
+    this.routes = new Map(Object.entries(options.routes ?? {}).filter(([path]) => path !== PRE_TOOL_USE_PATH))
+    this.routeDeadlineMs = options.routeDeadlineMs ?? DEFAULT_ROUTE_DEADLINE_MS
     this.token = randomBytes(32).toString('hex')
     registerSecretValue(this.token)
     this.server = createServer((req, res) => this.handleRequest(req, res))
@@ -376,7 +405,7 @@ export class HookBridgeServer {
           reject(new Error('HookBridgeServer failed to bind a TCP port'))
           return
         }
-        this.boundUrl = `http://${this.host}:${address.port}/pre-tool-use`
+        this.boundUrl = `http://${this.host}:${address.port}${PRE_TOOL_USE_PATH}`
         resolve()
       })
     })
@@ -389,14 +418,21 @@ export class HookBridgeServer {
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    const path = (req.url ?? '').split('?')[0]
-    if (req.method !== 'POST' || path !== '/pre-tool-use') {
+    const path = (req.url ?? '').split('?')[0] ?? ''
+    const route = this.routes.get(path)
+    if (req.method !== 'POST' || (path !== PRE_TOOL_USE_PATH && route === undefined)) {
       res.writeHead(404).end()
       return
     }
     const auth = this.authenticate(req)
     if (!auth.ok) {
       this.respondJson(res, 401, { decision: 'deny', reason: 'unauthorized: missing or incorrect bearer token' })
+      return
+    }
+    const routeContext = auth.context
+    if (route !== undefined && routeContext === undefined) {
+      // The instance token belongs to no turn, so it can never act through a route.
+      this.respondJson(res, 403, { ok: false, message: 'This only works from a live Relay turn.' })
       return
     }
     const chunks: Buffer[] = []
@@ -428,7 +464,8 @@ export class HookBridgeServer {
         this.respondJson(res, 400, { decision: 'deny', reason: 'malformed JSON request body' })
         return
       }
-      this.answerPreToolUse(body, auth.context)
+      const answer = route !== undefined && routeContext !== undefined ? this.answerRoute(route, routeContext, body) : this.answerPreToolUse(body, auth.context)
+      answer
         .then(({ status, body: reply }) => this.respondJson(res, status, reply))
         .catch((error: unknown) => {
           this.logger?.error({ err: error, path }, 'hook bridge failed to answer a request')
@@ -450,6 +487,16 @@ export class HookBridgeServer {
       return { status: 200, body: result }
     } catch (error) {
       return { status: 200, body: { decision: 'deny', reason: failureReason(error) } }
+    }
+  }
+
+  private async answerRoute(route: BridgeRoute, context: InvocationContext, body: unknown): Promise<{ status: number; body: unknown }> {
+    try {
+      return await withinDeadline((signal) => route({ ...context }, body, signal), this.routeDeadlineMs)
+    } catch (error) {
+      if (error instanceof DeadlineExceededError) return { status: 504, body: { ok: false, message: 'Relay did not answer in time; try again.' } }
+      this.logger?.error({ err: error }, 'hook bridge route failed')
+      return { status: 500, body: { ok: false, message: 'Relay could not handle that request.' } }
     }
   }
 

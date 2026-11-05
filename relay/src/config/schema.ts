@@ -238,6 +238,9 @@ export type CapabilityScopeOverrides = z.infer<typeof capabilityScopeOverridesSc
 export type ApprovalTierPolicy = z.infer<typeof approvalTierPolicySchema>
 export type ApprovalPolicy = z.infer<typeof approvalPolicySchema>
 
+/** The setup page's port when the config names none. */
+export const DEFAULT_UI_PORT = 7766
+
 export const relayConfigSchema = z
   .object({
     model_provider: z
@@ -312,6 +315,16 @@ export const relayConfigSchema = z
         .strict()
         .optional(),
     ),
+    // The local setup page (relay ui): projects, the persona library and
+    // teams. Bound to 127.0.0.1 only; the fixed port lets `relay ui` build
+    // the login link. Absent means on, at the default port.
+    ui: z
+      .object({
+        enabled: z.boolean().default(true),
+        port: z.number().int().min(1024).max(65535).default(DEFAULT_UI_PORT),
+      })
+      .strict()
+      .optional(),
     secrets: z
       .object({ provider: z.enum(['keychain', 'libsecret']).default('keychain') })
       .strict() as z.ZodType<{

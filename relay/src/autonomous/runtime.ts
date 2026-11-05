@@ -17,6 +17,7 @@ import type { OutboundDispatcher } from '../dispatch/outbound.js'
 import { HookBridgeServer } from '../engine/hook-bridge.js'
 import type { KillSwitch } from '../killswitch.js'
 import type { Logger } from '../obs/logger.js'
+import type { TeamProposer } from '../projects/proposals.js'
 import { closeRedis, type Redis } from '../redis/client.js'
 import type { SecretProvider } from '../secrets/provider.js'
 import { classifyBlocked, COOLDOWN_MS, readAccountPool, RedisCooldownStore, type Account } from './accounts.js'
@@ -30,10 +31,18 @@ import { deliverViaCourier } from '../live/courier.js'
 import { findOpenSessionName } from '../live/open-session.js'
 import { WORKER_BRIEF } from './prompt.js'
 import { routeAutonomousEvent } from './router.js'
-import { createScheduler, stopAutonomousTask, type Scheduler } from './scheduler.js'
+import { TEAM_PROPOSAL_PATH, teamProposalRoute } from './team-proposal-route.js'
+import { createScheduler, killWorkerGroup, stopAutonomousTask, type Scheduler } from './scheduler.js'
 import { loadTask, loadTaskBySession, wakeTask, type AutonomousTask } from './store.js'
 import { renderThreadHistory, slackThreadReplies } from './thread-history.js'
 import { runTurnOnPool, type SpawnPlan, type SpawnPlanParams, type TurnRunnerDeps } from './turn-runner.js'
+import { defaultPersonasDir } from '../projects/persona-files.js'
+import { leadTurnSubject } from '../teams/lead-brief.js'
+import { teamRoute } from '../teams/route.js'
+import { createTeamScheduler } from '../teams/scheduler.js'
+import { loadAssignment } from '../teams/store.js'
+import { TEAM_PATH, type TeamHooks } from '../teams/types.js'
+import { ensureMemberWorktree, headOf } from '../teams/worktrees.js'
 import { buildClaudeSettings, buildCodexHookOverrides } from './worker-config.js'
 import { buildClaudeArgs, buildCodexArgs, buildWorkerEnv, claudeUserLine } from './worker.js'
 import type { AutonomousRouting } from '../orchestrator.js'
@@ -56,6 +65,10 @@ export type AutonomousRuntimeOptions = {
   distRoot: string
   /** policy.yaml's `approvals` section, for who may approve a remote write. */
   approvalPolicy?: ApprovalPolicy
+  /** Starts team proposals for `relay team propose`; without it that command is refused. */
+  teamProposer?: TeamProposer
+  /** The global persona library; Relay home's `personas/` unless set. */
+  personasDir?: string
 }
 
 export type AutonomousRuntime = {
@@ -83,37 +96,33 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   }
   const guard = createAutonomousGuard({
     loadTask: (taskId) => loadTask(pool, taskId),
+    loadAssignment: (assignmentId) => loadAssignment(pool, assignmentId),
     isKillSwitchEngaged: killSwitchCheck(options.killSwitch),
     requestShellWrite: (context, write) => requestShellWrite(pool, operationDeps, context, write),
   })
-  const bridge = new HookBridgeServer({ decide: guard.decide })
+  const bridge = new HookBridgeServer({
+    decide: guard.decide,
+    logger: log,
+    routes: {
+      [TEAM_PROPOSAL_PATH]: teamProposalRoute({ pool, workspaceId, ...(options.teamProposer ? { teamProposer: options.teamProposer } : {}) }),
+      [TEAM_PATH]: teamRoute({
+        pool,
+        workspaceId,
+        relayHome,
+        personasDir: options.personasDir ?? defaultPersonasDir(),
+        repo: (name) => loadRepoRegistryIfPresent(options.repoRegistryPath).repos.find((entry) => entry.name === name),
+        wake: () => team.wake(),
+        killGroups: async (pgids) => {
+          for (const pgid of pgids) await killWorkerGroup(pgid)
+        },
+      }),
+    },
+  })
   await bridge.start()
 
   // --- spawning ----------------------------------------------------------------
   const hookCommand = `'${process.execPath}' '${join(options.distRoot, 'scripts', 'hook-pretooluse.js')}'`
-  const spawnPlan = async (params: SpawnPlanParams): Promise<SpawnPlan> => {
-    const { context, account } = params
-    const env = buildWorkerEnv({ account, hookUrl: bridge.url, hookToken: params.hookToken })
-    // Set at intake for every task; the home folder only for one created before that.
-    const cwd = context.task.chatCwd ?? (process.env.HOME ?? '/')
-    const resume = params.resume !== undefined ? { resume: params.resume } : {}
-    if (account.client === 'claude') {
-      return {
-        bin: config.claude_bin,
-        args: buildClaudeArgs({ brief: WORKER_BRIEF, settingsJson: buildClaudeSettings({ hookCommand }), ...resume }),
-        input: claudeUserLine(context.prompt),
-        cwd,
-        env,
-      }
-    }
-    return {
-      bin: config.codex_bin,
-      // codex has no appended system prompt: the brief leads the prompt.
-      args: buildCodexArgs({ prompt: `${WORKER_BRIEF}\n\n${context.prompt}`, overrides: buildCodexHookOverrides({ hookCommand }), ...resume }),
-      cwd,
-      env,
-    }
-  }
+  const spawnPlan = async (params: SpawnPlanParams): Promise<SpawnPlan> => buildSpawnPlan({ claudeBin: config.claude_bin, codexBin: config.codex_bin, hookCommand, hookUrl: bridge.url }, params)
 
   const turnDeps: TurnRunnerDeps = {
     pool,
@@ -130,8 +139,18 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   // --- the scheduler -------------------------------------------------------------
   const botToken = await options.secrets.get(SLACK_BOT_TOKEN_SECRET)
   const threadReplies = slackThreadReplies(botToken)
-  const cleanupStopped = (task: AutonomousTask): Promise<void> => cancelTaskWork(pool, { outbox: dispatcher }, task)
+  const team = createTeamScheduler({
+    pool,
+    workspaceId,
+    owner: `relay-${process.pid}`,
+    runTurn: (context) => runTurnOnPool(turnDeps, context),
+    ensureWorktree: ensureMemberWorktree,
+    headOf,
+    log,
+  })
+  const cleanupStopped = withTeamStop(team, (task) => cancelTaskWork(pool, { outbox: dispatcher }, task))
   const scheduler: Scheduler = createScheduler({
+    team,
     pool,
     workspaceId,
     owner: `relay-${process.pid}`,
@@ -140,7 +159,8 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
     isKillSwitchEngaged: killSwitchCheck(options.killSwitch),
     log,
     effects: {
-      runTurn: (context) => runTurnOnPool(turnDeps, context),
+      // In a project channel whose team has a lead, the thread's agent leads it; otherwise the subject is today's.
+      runTurn: async (context) => runTurnOnPool(turnDeps, { ...context, subject: await leadTurnSubject(pool, context.task) }),
       downloadFiles: (task, lease) => {
         const inboxDir = join(taskDir(task.id), 'inbox')
         mkdirSync(inboxDir, { recursive: true, mode: 0o700 })
@@ -213,5 +233,43 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
       await bridge.stop()
       await closeRedis(options.redis)
     },
+  }
+}
+
+/**
+ * The CLI, arguments, folder and environment for one turn on one login. A
+ * member's subject brings its worktree, brief, model and no MCP servers; the
+ * task's own subject gives exactly today's single agent.
+ */
+export function buildSpawnPlan(setup: { claudeBin: string; codexBin: string; hookCommand: string; hookUrl: string }, params: SpawnPlanParams): SpawnPlan {
+  const { context, account, subject } = params
+  const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken })
+  // A member works in its worktree; a task's chat folder is set at intake, the home folder only for one created before that.
+  const cwd = subject.cwd ?? context.task.chatCwd ?? (process.env.HOME ?? '/')
+  const brief = subject.brief ?? WORKER_BRIEF
+  const flags = { ...(params.resume !== undefined ? { resume: params.resume } : {}), ...(subject.model !== null ? { model: subject.model } : {}), ...(subject.noMcp ? { noMcp: true } : {}) }
+  if (account.client === 'claude') {
+    return {
+      bin: setup.claudeBin,
+      args: buildClaudeArgs({ brief, settingsJson: buildClaudeSettings({ hookCommand: setup.hookCommand }), ...flags }),
+      input: claudeUserLine(context.prompt),
+      cwd,
+      env,
+    }
+  }
+  return {
+    bin: setup.codexBin,
+    // codex has no appended system prompt: the brief leads the prompt.
+    args: buildCodexArgs({ prompt: `${brief}\n\n${context.prompt}`, overrides: buildCodexHookOverrides({ hookCommand: setup.hookCommand }), ...flags }),
+    cwd,
+    env,
+  }
+}
+
+/** Stop's cleanup with the task's team members stopped first, so Stop and the kill switch reach every member. */
+export function withTeamStop(team: Pick<TeamHooks, 'stopTask'>, cleanup: (task: AutonomousTask) => Promise<void>): (task: AutonomousTask) => Promise<void> {
+  return async (task) => {
+    await team.stopTask(task.id)
+    await cleanup(task)
   }
 }

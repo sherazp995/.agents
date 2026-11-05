@@ -47,6 +47,8 @@ import {
   type TaskUpdate,
 } from './store.js'
 import type { TurnInbox, TurnOutcome } from './worker.js'
+import type { TurnSubject } from './turn-runner.js'
+import type { TeamHooks } from '../teams/types.js'
 import { splitForSlack } from '../chat/slack/split.js'
 
 export const DEFAULT_LEASE_TTL_MS = 60_000
@@ -64,6 +66,8 @@ export type TurnRequestContext = {
   signal: AbortSignal
   /** Fenced write of the worker's pid before its gate opens. */
   recordWorker: (pid: number, pgid: number) => Promise<boolean>
+  /** Whose turn this is; omitted for the task's own (taskSubject). */
+  subject?: TurnSubject
   /** Set by a worker that takes input while it runs. */
   inbox?: TurnInbox
   /** The messages already sent into this turn, rendered, for an account fallback to repeat in its prompt; '' when none. */
@@ -104,6 +108,8 @@ export type SchedulerDeps = {
   /** Re-reads the kill switch (an engage from the CLI) and answers whether it is engaged. */
   isKillSwitchEngaged: () => Promise<boolean>
   effects: SchedulerEffects
+  /** The project teams' members: run each tick, stopped with the daemon, killed by the kill switch, recovered at startup. */
+  team?: TeamHooks
   log: Logger
   leaseTtlMs?: number
   tickMs?: number
@@ -123,16 +129,21 @@ export type Scheduler = {
 export async function takeOverWorker(pool: Pool, task: Pick<AutonomousTask, 'id' | 'workerPgid'>): Promise<boolean> {
   const pgid = task.workerPgid
   if (pgid === null) return true
-  if (processGroupAlive(pgid) && looksLikeWorker(pgid)) {
-    killProcessGroup(pgid)
-    const deadline = Date.now() + GROUP_EXIT_TIMEOUT_MS
-    while (processGroupAlive(pgid)) {
-      if (Date.now() > deadline) return false
-      killProcessGroup(pgid)
-      await new Promise((resolve) => setTimeout(resolve, GROUP_EXIT_POLL_MS))
-    }
-  }
+  if (!(await killWorkerGroup(pgid))) return false
   await clearWorker(pool, task.id, pgid)
+  return true
+}
+
+/** Kills a recorded worker's process group when it is still one of relay's workers, and waits for it to exit; false when it would not. */
+export async function killWorkerGroup(pgid: number): Promise<boolean> {
+  if (!processGroupAlive(pgid) || !looksLikeWorker(pgid)) return true
+  killProcessGroup(pgid)
+  const deadline = Date.now() + GROUP_EXIT_TIMEOUT_MS
+  while (processGroupAlive(pgid)) {
+    if (Date.now() > deadline) return false
+    killProcessGroup(pgid)
+    await new Promise((resolve) => setTimeout(resolve, GROUP_EXIT_POLL_MS))
+  }
   return true
 }
 
@@ -183,6 +194,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     if (stopping) return
     if (await deps.isKillSwitchEngaged()) {
       for (const { controller } of running.values()) controller.abort()
+      // Members of every task, done and blocked ones included.
+      await deps.team?.killAll()
       for (const task of await listOpenTasks(deps.pool, deps.workspaceId)) {
         const stopped = await stopAutonomousTask(deps.pool, deps.effects, task.id)
         if (stopped) await post(stopped, 'Stopped: the kill switch is engaged.')
@@ -199,6 +212,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       })
       running.set(task.id, { controller, done: done.finally(() => running.delete(task.id)) })
     }
+    if (!stopping) await deps.team?.tick()
   }
 
   async function runStep(taskId: string, controller: AbortController): Promise<void> {
@@ -397,6 +411,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       for (const task of await listTasksWithWorker(deps.pool, deps.workspaceId)) {
         if (!(await takeOverWorker(deps.pool, task))) deps.log.error({ taskId: task.id }, 'a recorded worker did not exit at startup')
       }
+      await deps.team?.recover()
       timer = setInterval(() => this.wake(), tickMs)
       timer.unref()
       this.wake()
@@ -415,6 +430,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       for (const { controller } of running.values()) controller.abort()
       await Promise.all([...running.values()].map((entry) => entry.done))
       await ticking
+      await deps.team?.stop()
     },
     tick: async () => {
       await tick()

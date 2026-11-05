@@ -27,7 +27,8 @@ export function claudeUserLine(text: string): string {
 }
 
 /** The prompt goes on stdin (`claudeUserLine`), not in the arguments. */
-export function buildClaudeArgs(params: { brief: string; settingsJson: string; resume?: string }): string[] {
+/** `model` picks the model; `noMcp` starts with no MCP servers (none configured, and the user's ignored). */
+export function buildClaudeArgs(params: { brief: string; settingsJson: string; resume?: string; model?: string; noMcp?: boolean }): string[] {
   return [
     '-p',
     '--input-format',
@@ -41,18 +42,22 @@ export function buildClaudeArgs(params: { brief: string; settingsJson: string; r
     'bypassPermissions',
     '--settings',
     params.settingsJson,
+    ...(params.model !== undefined ? ['--model', params.model] : []),
+    ...(params.noMcp === true ? ['--strict-mcp-config'] : []),
     ...(params.resume !== undefined ? ['--resume', params.resume] : []),
   ]
 }
 
 /** Global options go before `resume`: codex-cli 0.164.0 rejects them after it. `overrides` carry the hook. */
-export function buildCodexArgs(params: { prompt: string; overrides: readonly string[]; resume?: string }): string[] {
+export function buildCodexArgs(params: { prompt: string; overrides: readonly string[]; resume?: string; model?: string; noMcp?: boolean }): string[] {
   return [
     'exec',
     '--json',
     '--skip-git-repo-check',
     '--dangerously-bypass-approvals-and-sandbox',
     ...params.overrides.flatMap((override) => ['-c', override]),
+    ...(params.noMcp === true ? ['-c', 'mcp_servers={}'] : []),
+    ...(params.model !== undefined ? ['-m', params.model] : []),
     ...(params.resume !== undefined ? ['resume', params.resume] : []),
     params.prompt,
   ]

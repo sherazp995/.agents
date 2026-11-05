@@ -96,6 +96,16 @@ export function orderForPreference(pool: readonly Account[], preference: Account
   return [...pool.filter((account) => account.client === preference), ...pool.filter((account) => account.client !== preference)]
 }
 
+/**
+ * The logins a turn may use, in order: a subject bound to one client gets
+ * only that client's (it waits rather than cross over); an unbound one gets
+ * every login, its preferred client first.
+ */
+export function orderForSubject(pool: readonly Account[], subject: { client: AccountClient | null; preference: AccountClient | null }): Account[] {
+  if (subject.client !== null) return pool.filter((account) => account.client === subject.client)
+  return orderForPreference(pool, subject.preference)
+}
+
 /** Parses "use codex", "start a claude session" and the like from a mention. */
 export function parseAgentPreference(text: string): AccountClient | null {
   const match = /\b(?:use|start|with|run)\s+(?:a\s+|an\s+)?(claude|codex)\b/i.exec(text)

@@ -41,6 +41,12 @@ export type GatedSpawnOptions = {
   onStdoutLine?: (line: string) => void
   /** Text the CLI reads first on stdin; stdin then stays open until `endInput()`. */
   input?: string
+  /**
+   * Once stdout and stderr together pass this many bytes, collecting stops
+   * and the process group is killed (`outputCapped` in the result). Omitted
+   * means no cap.
+   */
+  maxOutputBytes?: number
 }
 
 export type GatedSpawnResult = {
@@ -54,6 +60,8 @@ export type GatedSpawnResult = {
   started: boolean
   /** 'ENOENT' when the binary was not found. */
   spawnErrorCode?: string
+  /** True when the output passed `maxOutputBytes` and the group was killed. */
+  outputCapped?: boolean
 }
 
 export type GatedProcess = {
@@ -136,6 +144,18 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
     let stderr = ''
     let pendingLine = ''
     let timedOut = false
+    let outputBytes = 0
+    let outputCapped = false
+    /** False once the cap is passed: the text is dropped and the group killed. */
+    const underCap = (text: string): boolean => {
+      if (options.maxOutputBytes === undefined) return true
+      if (outputCapped) return false
+      outputBytes += Buffer.byteLength(text, 'utf8')
+      if (outputBytes <= options.maxOutputBytes) return true
+      outputCapped = true
+      kill()
+      return false
+    }
     const timer = setTimeout(() => {
       timedOut = true
       kill()
@@ -154,6 +174,7 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (text: string) => {
+      if (!underCap(text)) return
       stdout += text
       if (!options.onStdoutLine) return
       pendingLine += text
@@ -162,6 +183,7 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
       for (const line of lines) if (line.trim() !== '') emitLine(line)
     })
     child.stderr.on('data', (text: string) => {
+      if (!underCap(text)) return
       stderr += text
     })
     // A refused or killed gate closes stdin under the shell; that is expected.
@@ -186,7 +208,7 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
       if (options.onStdoutLine && pendingLine.trim() !== '') emitLine(pendingLine)
       // The shell's own message names the binary, so a CLI that itself exits 127 is not mistaken for a missing one.
       const notFound = code === SHELL_NOT_FOUND && stderr.includes(options.bin) && /not found|No such file/i.test(stderr)
-      resolve({ stdout, stderr, code, timedOut, killed, started, ...(notFound ? { spawnErrorCode: 'ENOENT' } : {}) })
+      resolve({ stdout, stderr, code, timedOut, killed, started, ...(notFound ? { spawnErrorCode: 'ENOENT' } : {}), ...(outputCapped ? { outputCapped } : {}) })
     })
   })
 

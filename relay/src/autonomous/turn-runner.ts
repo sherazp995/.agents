@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import type { Pool } from 'pg'
 import type { InvocationContext } from '../engine/hook-bridge.js'
 import { createRun, finishRun, startRun } from '../runs/store.js'
-import { chooseAccount, COOLDOWN_MS, orderForPreference, type Account, type AccountClient, type CooldownStore } from './accounts.js'
+import { chooseAccount, COOLDOWN_MS, orderForSubject, type Account, type AccountClient, type CooldownStore } from './accounts.js'
 import type { TurnRequestContext, TurnResult } from './scheduler.js'
 import { runWorkerTurn, type TurnOutcome, type TurnRequest } from './worker.js'
 
@@ -26,8 +26,49 @@ export type SpawnPlan = Pick<TurnRequest, 'bin' | 'args' | 'cwd' | 'env' | 'inpu
   dispose?: () => Promise<void>
 }
 
+/**
+ * Whose turn this is: the session, login and client binding it uses, and
+ * what its CLI is started with. A task is one subject (taskSubject); a team
+ * member's assignment is another, with its own session, login and lease.
+ */
+export type TurnSubject = {
+  engineSessionId: string | null
+  accountKey: string | null
+  /** The Claude Code chat a task took over; a member has none. */
+  chatSessionId: string | null
+  /** A client asked for in the thread: its logins go first, the others after. */
+  preference: AccountClient | null
+  /** Only this client's logins are used; when all are out, the turn waits. */
+  client: AccountClient | null
+  model: string | null
+  /** The folder the CLI runs in; null for the task's own. */
+  cwd: string | null
+  /** The appended system prompt; null for the thread agent's brief. */
+  brief: string | null
+  /** Starts the CLI with no MCP servers. */
+  noMcp: boolean
+  /** A member's assignment, carried in its hook token. */
+  assignment?: { id: string; leaseGeneration: number }
+}
+
+/** Today's single agent: the task's own session and login, any client, its own folder and brief. */
+export function taskSubject(task: TurnRequestContext['task']): TurnSubject {
+  return {
+    engineSessionId: task.engineSessionId,
+    accountKey: task.accountKey,
+    chatSessionId: task.chatSessionId,
+    preference: preferenceOf(task.agentPreference),
+    client: null,
+    model: null,
+    cwd: null,
+    brief: null,
+    noMcp: false,
+  }
+}
+
 export type SpawnPlanParams = {
   context: TurnRequestContext
+  subject: TurnSubject
   account: Account
   hookToken: string
   resume: string | undefined
@@ -58,8 +99,8 @@ async function claudeProjects(account: Account): Promise<string | null> {
 }
 
 /** Resumes on the account that owns the session, or on any Claude login sharing its projects folder; anything else starts fresh. */
-async function resumeFor(deps: TurnRunnerDeps, context: TurnRequestContext, account: Account): Promise<string | undefined> {
-  const { engineSessionId, accountKey, chatSessionId } = context.task
+async function resumeFor(deps: TurnRunnerDeps, subject: TurnSubject, account: Account): Promise<string | undefined> {
+  const { engineSessionId, accountKey, chatSessionId } = subject
   if (engineSessionId === null) return undefined
   if (accountKey === account.key) return engineSessionId
   const projectsDir = deps.projectsDir ?? claudeProjects
@@ -78,11 +119,11 @@ function preferenceOf(value: string | null): AccountClient | null {
 }
 
 export async function runTurnOnPool(deps: TurnRunnerDeps, context: TurnRequestContext): Promise<TurnResult> {
-  const { task } = context
+  const subject = context.subject ?? taskSubject(context.task)
   const pool = await deps.readAccounts()
   // The account holding the session goes first, so a resume stays possible.
-  const ordered = orderForPreference(pool, preferenceOf(task.agentPreference))
-  const owner = ordered.find((account) => account.key === task.accountKey)
+  const ordered = orderForSubject(pool, subject)
+  const owner = ordered.find((account) => account.key === subject.accountKey)
   const accounts = owner ? [owner, ...ordered.filter((account) => account !== owner)] : ordered
   const notes: string[] = []
   const tried: string[] = []
@@ -91,15 +132,16 @@ export async function runTurnOnPool(deps: TurnRunnerDeps, context: TurnRequestCo
     const choice = await chooseAccount(accounts, { cooldowns: deps.cooldowns, isCodexEligible: deps.isCodexEligible, exclude: tried })
     if (choice.kind === 'none') {
       const when = choice.wakeAtMs === null ? 'no account is usable' : `the next account frees up at ${new Date(choice.wakeAtMs).toISOString()}`
-      return { kind: 'no_account', wakeAtMs: choice.wakeAtMs, reason: `Every agent account is cooling down or unavailable; ${when}. I will continue then.` }
+      const which = subject.client === null ? 'agent account' : `${subject.client} login`
+      return { kind: 'no_account', wakeAtMs: choice.wakeAtMs, reason: `Every ${which} is cooling down or unavailable; ${when}. I will continue then.` }
     }
     const account = choice.account
     tried.push(account.key)
-    if (task.accountKey !== null && task.accountKey !== account.key && tried.length === 1) {
-      notes.push(`Continuing on ${account.key} (${account.client}); ${task.accountKey} is not available.`)
+    if (subject.accountKey !== null && subject.accountKey !== account.key && tried.length === 1) {
+      notes.push(`Continuing on ${account.key} (${account.client}); ${subject.accountKey} is not available.`)
     }
 
-    const result = await invokeOnce(deps, withSentSoFar(context), account)
+    const result = await invokeOnce(deps, withSentSoFar(context), subject, account)
     if (result.outcome.kind === 'account_blocked') {
       await deps.cooldowns.coolDown(account.key, Date.now() + COOLDOWN_MS[result.outcome.reason])
       notes.push(`${account.key} is blocked (${result.outcome.reason.replace('_', ' ')}); trying the next account.`)
@@ -120,18 +162,24 @@ function withSentSoFar(context: TurnRequestContext): TurnRequestContext {
 type InvokeResult = { outcome: TurnOutcome; runId: string }
 
 /** One turn on one account, recorded as a run. */
-async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, account: Account): Promise<InvokeResult> {
+async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, subject: TurnSubject, account: Account): Promise<InvokeResult> {
   const { task } = context
   const run = await createRun(deps.pool, { workspaceId: task.workspaceId, sessionId: task.sessionId, principalId: task.requesterPrincipalId })
-  const token = deps.issueToken({ workspaceId: task.workspaceId, taskId: task.id, runId: run.id, leaseGeneration: context.lease.generation })
+  const token = deps.issueToken({
+    workspaceId: task.workspaceId,
+    taskId: task.id,
+    runId: run.id,
+    leaseGeneration: context.lease.generation,
+    ...(subject.assignment ? { assignment: { ...subject.assignment } } : {}),
+  })
   let outcome: TurnOutcome
   let plan: SpawnPlan | undefined
   try {
     await startRun(deps.pool, run.id)
-    const resume = await resumeFor(deps, context, account)
+    const resume = await resumeFor(deps, subject, account)
     // A turn that cannot resume its own session needs the thread so far: a fresh session, or the taken-over chat after another session's turns.
-    const fresh = resume !== task.engineSessionId && context.freshPrompt ? { ...context, prompt: await context.freshPrompt() } : context
-    plan = await deps.spawnPlan({ context: fresh, account, hookToken: token, resume })
+    const fresh = resume !== subject.engineSessionId && context.freshPrompt ? { ...context, prompt: await context.freshPrompt() } : context
+    plan = await deps.spawnPlan({ context: fresh, subject, account, hookToken: token, resume })
     outcome = await (deps.runTurn ?? runWorkerTurn)({
       account,
       bin: plan.bin,

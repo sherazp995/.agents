@@ -141,10 +141,35 @@ the reply path; that command posts straight to Slack.
 
 ---
 
+### Setup page (teams phase 1, 2026-11-05)
+
+- The daemon serves `127.0.0.1:<ui.port>` (`src/ui/`); `relay ui` mints a one-time login link (`src/cli/ui.ts`). The requirement is FR-DATA-4b.
+- Tables in migration 0026: projects, project repos, personas, teams, team members, web login links and web sessions.
+- Personas are global per workspace, with files in `relayPath('personas')` (`src/projects/persona-files.ts`, `persona-library.ts`). The write order is temp file, then the DB commit with its audit entry, then rename.
+- Project routing: `FolderQuestions.forNewThread` asks `projectFolderForChannel` before the channel description, for normal and direct threads alike.
+- Teams run since phase 2 (below).
+- A config key the running build does not know crashes the daemon at its next restart (strict schema). Rebuild `dist` before adding one to `config/relay.config.yaml`.
+
+### Team proposals and the setup page redesign (2026-11-05)
+
+- Plan: `~/.agents/tmp/plans/agents-main-relay-teams-ui-redesign.md`. Migration 0027 adds `team_proposals` (one running per project, held by a partial unique index) and `personas.written_by_relay`.
+- `src/projects/team-proposer.ts` runs the read-only Claude proposal; `src/projects/proposals.ts` checks, stores and approves (one transaction: team lock, fingerprint, removals and lead unsets before adds, one audit entry). A running proposal is failed at daemon start.
+- Slack: the hook bridge takes `routes` from the runtime; `/team-proposal` (`src/autonomous/team-proposal-route.ts`) accepts only a live turn's own token in a project channel from an owner. Cards and clicks are in `src/chat/slack/team-proposal-card.ts`; a superseded card is edited to plain text when a newer proposal starts.
+- Page: `src/ui/pages/project-hub.ts`, `src/ui/pages/proposals.ts`, one stylesheet `src/ui/assets/app.css` (copied into `dist` by `scripts/copy-assets.mjs`). No scripts; the running status page refreshes every 5 seconds with a stop link.
+- New persona files are written after the commit; any that fail are named on the page and recreated from the approval's stored snapshot.
+
+---
+
 ## 4. What is next
 
 Counted from an audit of `src/`, not from memory. **Four phase-1 items and
 six later ones.**
+
+### Teams run a request (phase 2, 2026-11-05)
+
+- Plan: `~/.agents/tmp/plans/agents-main-relay-teams-phase2-run.md`. Migration 0028 adds `team_runs` (one open per task), `team_assignments` (own lease, pgid, session, login, notes) and `team_merges` (one per assignment and member commit), plus member `client` and `model` and team `member_limit`.
+- The lead is the thread's task: `src/teams/lead-brief.ts` builds its turn subject (lead member's client and model, team brief); `src/autonomous/turn-runner.ts` takes a `TurnSubject` (task or member) and `buildSpawnPlan` in `runtime.ts` starts each one.
+- Members: `src/teams/scheduler.ts` (limits, member turns, Stop, kill switch, recovery), `src/teams/brief.ts`, the `/team` route in `src/teams/route.ts` (role table in `src/teams/types.ts`), worktrees and merge in `src/teams/worktrees.ts` and `src/teams/merge.ts`, the CLI in `src/cli/team.ts`. The guard checks a member token against its assignment.
 
 ### Phase 1
 

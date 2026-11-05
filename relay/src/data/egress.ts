@@ -203,6 +203,9 @@ export const LOCAL_ONLY_SPAWN_BINARIES: Readonly<Record<string, string>> = {
   git:
     'only `git -C <path> rev-parse` and `symbolic-ref` from `relay repos add` (src/cli/repos.ts), which read the ' +
     'local repository to register it; neither subcommand contacts a remote',
+  open:
+    'the macOS `open` command from `relay ui` (src/cli.ts), which hands the setup page\'s 127.0.0.1 login link to ' +
+    'the local browser; the only connection it leads to is that loopback page',
 }
 
 /**

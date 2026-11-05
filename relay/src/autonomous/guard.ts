@@ -11,10 +11,16 @@
  * Every dependency failure throws out of here, and the bridge turns a throw
  * (or a slow answer) into deny.
  *
+ * A team member's token names its assignment: the member is checked
+ * against that assignment's lease (not the lead's), and is refused MCP
+ * tools, `relay live`, `notify`, `upload` and `ui`, the lead's `relay team`
+ * commands, and every remote write, with no approval card.
+ *
  * The shell parse reads quotes, separators, `$(...)`, backticks, `sh -c`
  * and `eval`, so an ordinary push cannot slip through by quoting or
- * chaining. It is not a boundary against a worker that hides git behind an
- * interpreter or a script it wrote.
+ * chaining. It is a speed bump, not a sandbox: it is no boundary against a
+ * worker (lead or member) that hides git or relay behind an interpreter or
+ * a script it wrote.
  */
 
 import { basename } from 'node:path'
@@ -22,11 +28,14 @@ import { z } from 'zod'
 import type { HookDecisionRequest, HookDecisionResult, InvocationContext } from '../engine/hook-bridge.js'
 import type { KillSwitch } from '../killswitch.js'
 import type { AutonomousTask } from './store.js'
+import { mayRun, type Assignment } from '../teams/types.js'
 
 export type ShellWriteAnswer = { kind: 'approved' } | { kind: 'pending' } | { kind: 'refused'; reason: string }
 
 export type GuardDeps = {
   loadTask(taskId: string): Promise<AutonomousTask | undefined>
+  /** A team member's assignment, for a token that names one. */
+  loadAssignment?(assignmentId: string): Promise<Assignment | undefined>
   /** Re-reads the durable kill switch; see `killSwitchCheck`. A rejection denies. */
   isKillSwitchEngaged(): Promise<boolean>
   /** Uses up an approval for this exact command, or reports or requests one. */
@@ -65,14 +74,25 @@ export function createAutonomousGuard(deps: GuardDeps): AutonomousGuard {
     const task = await deps.loadTask(context.taskId)
     if (task === undefined || task.workspaceId !== context.workspaceId) return deny('the task for this token no longer exists')
     if (task.cancelRequestedAt !== null) return deny('the task was stopped; finish without running anything else')
-    if (task.leaseGeneration !== context.leaseGeneration) return deny('this worker was superseded (stale lease generation)')
+    const member = context.assignment !== undefined
+    if (member) {
+      const stale = await staleMember(context, deps)
+      if (stale !== undefined) return deny(stale)
+    } else if (task.leaseGeneration !== context.leaseGeneration) return deny('this worker was superseded (stale lease generation)')
+    if (member && parsed.data.toolName.startsWith('mcp__')) return deny('team members have no MCP tools: your final text goes to the lead, who posts.')
     if (parsed.data.toolName !== 'Bash') return { decision: 'allow', reason: 'only shell commands are checked' }
     const input = shellInputSchema.safeParse(parsed.data.toolInput)
     if (!input.success) return deny('malformed Bash tool input: no command')
 
+    if (runsRelayUi(input.data.command)) return deny('relay ui makes an owner login link for the setup page; agents may not run it. Ask the user to run it themselves.')
+    if (member) {
+      const refused = memberRelayRefusals(input.data.command)
+      if (refused.length > 0) return deny(`team members may not run ${refused.join(', ')}: your final text goes to the lead; ask it with relay team ask-lead.`)
+    }
     const writes = remoteWrites(input.data.command)
     if ('error' in writes) return deny(`could not parse this command (${writes.error}); rewrite it plainly`)
     if (writes.length === 0) return { decision: 'allow', reason: 'no remote write' }
+    if (member) return deny(`team members never push or open pull requests (${writes.join(', ')}); commit locally and tell the lead in your report.`)
     if (writes.length > 1 || loneCommandWords(input.data.command) === undefined) {
       return deny(
         `This command holds a remote write (${writes.join(', ')}) together with other commands, so it cannot be approved as one action: ` +
@@ -89,6 +109,43 @@ export function createAutonomousGuard(deps: GuardDeps): AutonomousGuard {
   }
 
   return { decide }
+}
+
+/** Why a member's token is no longer good (its assignment gone, not running, or superseded); undefined when it is. */
+async function staleMember(context: InvocationContext, deps: GuardDeps): Promise<string | undefined> {
+  const claimed = context.assignment
+  if (claimed === undefined || deps.loadAssignment === undefined) return 'this call names a team assignment that cannot be checked'
+  const assignment = await deps.loadAssignment(claimed.id)
+  if (assignment === undefined || assignment.taskId !== context.taskId || assignment.workspaceId !== context.workspaceId) return 'the team assignment for this token no longer exists'
+  if (assignment.state !== 'running') return 'this team assignment is not running; finish without running anything else'
+  if (assignment.leaseGeneration !== claimed.leaseGeneration) return 'this member was superseded (stale assignment lease generation)'
+  return undefined
+}
+
+/** relay subcommands no team member may run; `relay team` ones are the lead's unless the role table gives them to members. */
+const MEMBER_REFUSED_RELAY = new Set(['live', 'notify', 'upload', 'ui'])
+
+/**
+ * The relay commands in `command` a team member may not run, by name. Like
+ * runsRelayUi, any word that is `relay` (or a path ending in it) starts one,
+ * so a wrapper cannot hide it. A command that does not parse is left to
+ * remoteWrites, which refuses it.
+ */
+export function memberRelayRefusals(command: string): string[] {
+  const found = findInCommand(command, (segment) =>
+    segment.words.flatMap((word, start) => {
+      if (basename(word.text) !== 'relay') return []
+      const rest = segment.words.slice(start + 1).filter((next) => !next.text.startsWith('-'))
+      if (rest[0]?.dynamic === true || (rest[0]?.text === 'team' && rest[1]?.dynamic === true)) return ['relay with a substituted subcommand']
+      const subcommand = rest[0]?.text
+      if (subcommand === undefined) return []
+      if (MEMBER_REFUSED_RELAY.has(subcommand)) return [`relay ${subcommand}`]
+      if (subcommand !== 'team') return []
+      const teamCommand = rest[1]?.text ?? ''
+      return mayRun('member', teamCommand) ? [] : [`relay team ${teamCommand}`.trim()]
+    }),
+  )
+  return 'error' in found ? [] : found
 }
 
 /**
@@ -118,6 +175,25 @@ const GH_BODY_FLAGS = new Set(['-f', '-F', '--field', '--raw-field', '--input'])
 
 /** The remote writes a command holds, by name (`git push`, `gh pr create`, `gh api POST`); empty when it holds none. */
 export function remoteWrites(command: string): string[] | { error: string } {
+  return findInCommand(command, writesIn)
+}
+
+/**
+ * Whether a command runs `relay ui`, which mints an owner's login link to
+ * the setup page: agents may never run it, approved or not. Any word that is
+ * `relay` (or a path ending in it) followed by `ui` counts, so a wrapper
+ * cannot hide it. A command that does not parse is left to remoteWrites,
+ * which refuses it.
+ */
+export function runsRelayUi(command: string): boolean {
+  const found = findInCommand(command, (segment) =>
+    segment.words.flatMap((word, start) => (basename(word.text) === 'relay' && segment.words.slice(start + 1).find((next) => !next.text.startsWith('-'))?.text === 'ui' ? ['relay ui'] : [])),
+  )
+  return !('error' in found) && found.length > 0
+}
+
+/** Every finding `inSegment` reports across the command's segments, nested commands included. */
+function findInCommand(command: string, inSegment: (segment: Segment) => string[]): string[] | { error: string } {
   const found: string[] = []
   const pending = [{ text: command, depth: 0 }]
   while (pending.length > 0) {
@@ -128,7 +204,7 @@ export function remoteWrites(command: string): string[] | { error: string } {
     if ('error' in tokens) return tokens
     pending.push(...tokens.nested.map((text) => ({ text, depth: next.depth + 1 })))
     for (const segment of tokens.segments) {
-      found.push(...writesIn(segment))
+      found.push(...inSegment(segment))
       pending.push(...innerCommands(segment).map((text) => ({ text, depth: next.depth + 1 })))
     }
   }

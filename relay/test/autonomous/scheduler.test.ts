@@ -1,3 +1,4 @@
+import type { TeamHooks } from '../../src/teams/types.js'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -91,7 +92,7 @@ describe('autonomous scheduler', () => {
     return h
   }
 
-  function scheduler(workspaceId: string, h: Harness, options: { engaged?: () => boolean; leaseTtlMs?: number; tickMs?: number } = {}) {
+  function scheduler(workspaceId: string, h: Harness, options: { engaged?: () => boolean; leaseTtlMs?: number; tickMs?: number; team?: TeamHooks } = {}) {
     return createScheduler({
       pool,
       workspaceId,
@@ -108,8 +109,35 @@ describe('autonomous scheduler', () => {
       log: createLogger('fatal'),
       ...(options.leaseTtlMs !== undefined ? { leaseTtlMs: options.leaseTtlMs } : {}),
       ...(options.tickMs !== undefined ? { tickMs: options.tickMs } : {}),
+      ...(options.team !== undefined ? { team: options.team } : {}),
     })
   }
+
+  function teamSpy(): TeamHooks & { calls: string[] } {
+    const calls: string[] = []
+    const record = (name: string) => async () => {
+      calls.push(name)
+    }
+    return { calls, tick: record('tick'), killAll: record('killAll'), recover: record('recover'), stop: record('stop'), stopTask: async (taskId: string) => void calls.push(`stopTask:${taskId}`) }
+  }
+
+  it("calls the team's hooks: recover at start, tick each pass, killAll on the kill switch (with Stop's cleanup per task), stop at shutdown", async () => {
+    const { workspaceId, task } = await newTask()
+    const h = harness([])
+    const team = teamSpy()
+    let engaged = false
+    const s = scheduler(workspaceId, h, { team, engaged: () => engaged })
+    await s.start()
+    await s.tick()
+    expect(team.calls).toContain('recover')
+    expect(team.calls.indexOf('recover')).toBeLessThan(team.calls.indexOf('tick'))
+    engaged = true
+    await s.tick()
+    expect(team.calls).toContain('killAll')
+    expect(h.cleaned).toContain(task.id)
+    await s.stop()
+    expect(team.calls.at(-1)).toBe('stop')
+  })
 
   it('runs a turn on the new message, posts the reply as is and parks', async () => {
     const { workspaceId, task } = await newTask()

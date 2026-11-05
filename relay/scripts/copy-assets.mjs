@@ -1,8 +1,8 @@
 /**
  * Copies non-TypeScript assets into `dist` after a build.
  *
- * `tsc` emits only JavaScript, so the `.sql` migrations stay behind in
- * `src/`. That is invisible while developing, because the source tree is
+ * `tsc` emits only JavaScript, so the `.sql` migrations (and the setup
+ * page's stylesheet) stay behind in `src/`. That is invisible while developing, because the source tree is
  * right there, and fatal once the package is installed somewhere else: the
  * migrations directory is simply absent.
  *
@@ -17,7 +17,12 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-const assets = [['src/db/migrations', 'dist/src/db/migrations']]
+// The setup page's stylesheet sits next to src/ui/server.ts, which serves it
+// from its own folder; without it every page renders unstyled.
+const assets = [
+  ['src/db/migrations', 'dist/src/db/migrations'],
+  ['src/ui/assets', 'dist/src/ui/assets'],
+]
 
 for (const [from, to] of assets) {
   const source = join(root, from)

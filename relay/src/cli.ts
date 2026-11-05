@@ -4,6 +4,10 @@ import { Command } from 'commander'
 import type { Pool } from 'pg'
 import { runPrincipalsAdd } from './cli/principals.js'
 import { runNotify } from './cli/notify.js'
+import { runUi } from './cli/ui.js'
+import { registerTeamCommands } from './cli/team.js'
+import { DEFAULT_UI_PORT } from './config/schema.js'
+import { spawn } from 'node:child_process'
 import { DEFAULT_PROFILES_PATH as PROFILE_LOGIN_PROFILES_PATH, runProfileLogin } from './cli/profile-login.js'
 import { formatChromeProfiles, listChromeProfiles, runProfileClone } from './cli/profile-clone.js'
 import { runInstallService, runUninstallService, serviceBinaries, serviceInstalled } from './cli/service.js'
@@ -675,6 +679,39 @@ program
       await closePool(pool)
     }
   })
+
+program
+  .command('ui')
+  .description('Print (and open) a one-time login link to the local setup page for projects, personas and teams')
+  .option('--as <slack user id>', 'the owner to log in as, when the workspace has more than one')
+  .option('--workspace-id <uuid>', 'the workspace, when more than one Slack workspace exists')
+  .option('--no-open', 'print the link without opening the browser')
+  .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
+  .action(async (options: { as?: string; workspaceId?: string; open: boolean; config: string }) => {
+    const config = loadRelayConfig(options.config)
+    if (config.ui?.enabled === false) {
+      process.stderr.write('relay ui failed: the setup page is off (ui.enabled is false in the config).\n')
+      process.exitCode = 1
+      return
+    }
+    const pool = createPool(await resolveOperatorDatabaseUrl(config, createSecretProvider(config)))
+    try {
+      const link = await runUi(pool, {
+        port: config.ui?.port ?? DEFAULT_UI_PORT,
+        ...(options.as !== undefined ? { as: options.as } : {}),
+        ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
+      })
+      process.stdout.write(`Log in as ${link.slackUserId} (works once, for 10 minutes):\n${link.url}\n`)
+      if (options.open && process.platform === 'darwin') spawn('open', [link.url], { detached: true, stdio: 'ignore' }).unref()
+    } catch (error) {
+      process.stderr.write(`relay ui failed: ${error instanceof Error ? error.message : String(error)}\n`)
+      process.exitCode = 1
+    } finally {
+      await closePool(pool)
+    }
+  })
+
+registerTeamCommands(program)
 
 const reposCommand = program.command('repos').description('Manage the repositories Relay may work in (config/repos.yaml)')
 

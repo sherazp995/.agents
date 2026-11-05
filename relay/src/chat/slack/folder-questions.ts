@@ -46,39 +46,51 @@ const MISSING_SCOPE_TEXT =
   'I could not read this channel\'s description, so I did not start: reinstall the Slack app from ' +
   '`docs/slack-app-manifest.yaml`, which now asks for `channels:read` and `groups:read`.'
 
-export function questionText(missing: string): string {
-  return `This channel's description names \`${missing}\`, which is not a folder on this machine. Reply here with the folder to use (for example \`~/code/project\`), or "stop" to drop the request.`
+export function questionText(missing: string, source: 'description' | 'project' = 'description'): string {
+  const named = source === 'project' ? `This channel's project (set up in relay ui) uses \`${missing}\`` : `This channel's description names \`${missing}\``
+  return `${named}, which is not a folder on this machine. Reply here with the folder to use (for example \`~/code/project\`), or "stop" to drop the request.`
 }
 
 type Waiting = { readonly request: WaitingRequest; readonly principalId: string; readonly expiresAt: number }
 
 export type FolderQuestionsDeps = {
   readonly lookup: (channel: string) => Promise<ChannelFolderLookup>
+  /** The folder of the project that owns the channel (set up in relay ui); it wins over the channel description. */
+  readonly projectFolder?: (channel: string) => Promise<string | undefined>
   readonly now?: () => number
   readonly home?: string
 }
 
 export class FolderQuestions {
   readonly #lookup: FolderQuestionsDeps['lookup']
+  readonly #projectFolder: NonNullable<FolderQuestionsDeps['projectFolder']>
   readonly #now: () => number
   readonly #home: string
   readonly #waiting = new Map<string, Waiting>()
 
   constructor(deps: FolderQuestionsDeps) {
     this.#lookup = deps.lookup
+    this.#projectFolder = deps.projectFolder ?? (async () => undefined)
     this.#now = deps.now ?? Date.now
     this.#home = deps.home ?? homedir()
   }
 
   /** Where a new thread's session runs. When the channel's folder is missing, `request` waits for `principalId` to name one. */
   async forNewThread(threadRef: string, channel: string, principalId: string, request: WaitingRequest): Promise<NewThreadFolder> {
+    // A project's folder wins; one that no longer exists is asked about like a missing described folder.
+    const project = await this.#projectFolder(channel)
+    if (project !== undefined) return isFolder(project) ? { kind: 'folder', path: project } : this.#ask(threadRef, principalId, request, project, 'project')
     const found = await this.#lookup(channel)
     if (found.kind === 'none') return { kind: 'today' }
     if (found.kind === 'failed') return { kind: 'refused', text: found.missingScope ? MISSING_SCOPE_TEXT : UNREADABLE_TEXT }
     if (isFolder(found.path)) return { kind: 'folder', path: found.path }
+    return this.#ask(threadRef, principalId, request, found.path, 'description')
+  }
+
+  #ask(threadRef: string, principalId: string, request: WaitingRequest, missing: string, source: 'description' | 'project'): NewThreadFolder {
     this.#prune()
     this.#waiting.set(threadRef, { request, principalId, expiresAt: this.#now() + WAITING_TTL_MS })
-    return { kind: 'asked', text: questionText(found.path) }
+    return { kind: 'asked', text: questionText(missing, source) }
   }
 
   isWaiting(threadRef: string): boolean {

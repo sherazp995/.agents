@@ -61,6 +61,15 @@ import { startDirectThread } from './live/direct-thread.js'
 import type { DirectSessionDependencies } from './live/direct-session.js'
 import { CANCELLED_TEXT, FolderQuestions, folderGate } from './chat/slack/folder-questions.js'
 import { lazySlackChannelPurpose, lookupChannelFolder } from './chat/slack/channel-folder.js'
+import { projectFolderForChannel } from './projects/store.js'
+import { listBotChannels, slackChannelPages } from './projects/slack-channels.js'
+import { startUiServer, type UiServer } from './ui/server.js'
+import type { TeamProposer } from './projects/proposals.js'
+import { createTeamProposer, repoLookupFromRegistry } from './projects/team-proposer.js'
+import { failCutOffProposals, handleProposalClick, proposalCardPoster, supersededCardCloser } from './chat/slack/team-proposal-card.js'
+import { isFolder } from './autonomous/folder.js'
+import { loadRepoRegistryIfPresent } from './config/load.js'
+import { homedir } from 'node:os'
 import { CancellationRegistry } from './runs/cancel.js'
 import {
   buildReplyCommand,
@@ -1257,6 +1266,8 @@ export type StartOrchestratorOptions = {
   drainIntervalMs?: number
   dispatcherOptions?: OutboundDispatcherOptions
   slackAdapterOptions?: CreateProductionSlackAdapterOptions
+  /** The local setup page (relay ui); absent or disabled starts no listener. */
+  ui?: { readonly enabled: boolean; readonly port: number; readonly personasDir: string; readonly reposPath: string; readonly claudeBin?: string }
 }
 
 /**
@@ -1305,7 +1316,12 @@ export async function startOrchestrator(
   let autonomousRuntime: AutonomousRuntime | undefined
   const botTokenSecret = options.slackAdapterOptions?.botTokenSecretName ?? SLACK_BOT_TOKEN_SECRET
   const fetchPurpose = lazySlackChannelPurpose(() => secrets.get(botTokenSecret))
-  const folderQuestions = new FolderQuestions({ lookup: (channel) => lookupChannelFolder(fetchPurpose, channel) })
+  // Bound once the workspace is known; a project's folder wins over the channel description.
+  let projectWorkspaceId: string | undefined
+  const folderQuestions = new FolderQuestions({
+    lookup: (channel) => lookupChannelFolder(fetchPurpose, channel),
+    projectFolder: async (channel) => (projectWorkspaceId === undefined ? undefined : projectFolderForChannel(pool, projectWorkspaceId, channel)),
+  })
   const { adapter, workspaceId } = await createProductionSlackAdapter(pool, secrets, {
     log,
     folderQuestions,
@@ -1320,6 +1336,8 @@ export async function startOrchestrator(
   // FR-POL-9, now live: built once the workspace is known, on the store the
   // `relay kill` CLI writes. Autonomous mode refuses to start without it, so
   // a store that cannot be read at startup is fatal there.
+  projectWorkspaceId = workspaceId
+
   const killSwitch = await createKillSwitch({
     runCanceller: cancellationRegistry,
     store: new PostgresKillSwitchStore(pool, workspaceId),
@@ -1333,6 +1351,28 @@ export async function startOrchestrator(
     log,
     ...options.dispatcherOptions,
   })
+
+  // Relay's read-only team proposals (src/projects/team-proposer.ts). They
+  // need the persona library and repo registry, so they exist with the
+  // setup page's options; a run cut off by the last shutdown has failed.
+  const uiOptions = options.ui
+  let teamProposer: TeamProposer | undefined
+  if (uiOptions) {
+    const cardDeps = { pool, workspaceId, outbox: dispatcher, uiPort: uiOptions.port, log }
+    await failCutOffProposals(cardDeps)
+    teamProposer = createTeamProposer({
+      pool,
+      log,
+      personasDir: uiOptions.personasDir,
+      repos: repoLookupFromRegistry(uiOptions.reposPath),
+      ...(uiOptions.claudeBin ? { claudeBin: uiOptions.claudeBin } : {}),
+      onSettled: proposalCardPoster(cardDeps),
+      onSuperseded: supersededCardCloser(cardDeps),
+    })
+    adapter.onTeamProposalClick((envelope, decision) =>
+      handleProposalClick({ pool, workspaceId, personasDir: uiOptions.personasDir, outbox: dispatcher, log }, envelope, decision),
+    )
+  }
 
   // Gate fix, Medium 1: every in-flight handleChatEvent call is tracked
   // here, so stop() below can wait for them rather than tearing everything
@@ -1350,6 +1390,7 @@ export async function startOrchestrator(
       config: options.autonomous,
       killSwitch,
       secrets,
+      ...(teamProposer ? { teamProposer } : {}),
       ...(options.policy.approvals ? { approvalPolicy: options.policy.approvals } : {}),
     })
   }
@@ -1384,6 +1425,28 @@ export async function startOrchestrator(
   const drainOptions = { log, ...(options.drainIntervalMs !== undefined ? { intervalMs: options.drainIntervalMs } : {}) }
   const drainScheduler = scheduleOutboxDrain(dispatcher, drainOptions)
   const uploadDrainScheduler = scheduleOutboxDrain({ drain: () => dispatcher.drainUploads() }, drainOptions)
+
+  const uiServer: UiServer | undefined =
+    uiOptions?.enabled === true
+      ? await startUiServer({
+          pool,
+          workspaceId,
+          port: uiOptions.port,
+          log,
+          deps: {
+            personasDir: uiOptions.personasDir,
+            ...(teamProposer ? { proposer: teamProposer } : {}),
+            repoNames: () => loadRepoRegistryIfPresent(uiOptions.reposPath).repos.map((repo) => repo.name),
+            listChannels: (() => {
+              const fetchPage = slackChannelPages(() => secrets.get(botTokenSecret))
+              return () => listBotChannels(fetchPage)
+            })(),
+            isFolder,
+            home: homedir(),
+            now: () => new Date(),
+          },
+        })
+      : undefined
 
   return {
     /**
@@ -1428,6 +1491,8 @@ export async function startOrchestrator(
     async stop(): Promise<void> {
       drainScheduler.stop()
       uploadDrainScheduler.stop()
+      await uiServer?.close()
+      await teamProposer?.stop()
       cancellationRegistry.cancelAll('orchestrator is shutting down')
       // Kills every running worker tree before leases are released.
       await autonomousRuntime?.stop()

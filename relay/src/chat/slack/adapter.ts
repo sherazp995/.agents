@@ -59,6 +59,7 @@ import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from '.
 import type { EngineSession } from '../../sessions/discovery.js'
 import { OWNER_ONLY_REPLY } from '../../tenancy/access.js'
 import { DIRECT_COMMAND_WORD } from '../../live/session-mode.js'
+import { TEAM_PROPOSAL_ACTION_IDS, type TeamProposalDecision } from './team-proposal-card.js'
 
 /** Slack's cumulative limit for markdown blocks in one message; a longer agent post goes out as plain text. */
 export const MARKDOWN_BLOCK_MAX_CHARS = 12_000
@@ -964,6 +965,11 @@ export class SlackAdapter implements ChatAdapter {
 
     await this.#boltApp.start()
     this.#started = true
+  }
+
+  /** The team proposal card's Approve and Reject (src/chat/slack/team-proposal-card.ts); the handler catches its own errors. */
+  onTeamProposalClick(handler: (envelope: SlackBlockActionEnvelope, decision: TeamProposalDecision) => Promise<unknown>): void {
+    for (const decision of ['approve', 'reject'] as const) this.#boltApp.action(TEAM_PROPOSAL_ACTION_IDS[decision], async (envelope) => void (await handler(envelope, decision)))
   }
 
   /**

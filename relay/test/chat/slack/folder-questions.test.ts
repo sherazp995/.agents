@@ -39,6 +39,36 @@ describe('FolderQuestions.forNewThread', () => {
   })
 })
 
+describe('FolderQuestions.forNewThread for a project channel', () => {
+  function projectQuestions(projectFolder: string | undefined, lookups: string[]) {
+    return new FolderQuestions({
+      lookup: async (channel) => {
+        lookups.push(channel)
+        return { kind: 'folder', path: join(home, "team's repo") }
+      },
+      projectFolder: async (channel) => (channel === 'C1' ? projectFolder : undefined),
+      home,
+      now: () => 0,
+    })
+  }
+
+  it("uses the project's folder over the description, and leaves other channels to the description", async () => {
+    const lookups: string[] = []
+    const folders = projectQuestions(join(home, 'web'), lookups)
+    expect(await folders.forNewThread('C1:1', 'C1', 'P1', request)).toEqual({ kind: 'folder', path: join(home, 'web') })
+    expect(lookups).toEqual([])
+    expect(await folders.forNewThread('C2:1', 'C2', 'P1', request)).toEqual({ kind: 'folder', path: join(home, "team's repo") })
+    expect(lookups).toEqual(['C2'])
+  })
+
+  it("asks about a project folder that no longer exists, naming the project, and the requester's answer still wins", async () => {
+    const folders = projectQuestions(missing, [])
+    expect(await folders.forNewThread('C1:1', 'C1', 'P1', request)).toEqual({ kind: 'asked', text: questionText(missing, 'project') })
+    expect(questionText(missing, 'project')).toContain('project (set up in relay ui)')
+    expect(folders.answer('C1:1', 'P1', '~/web')).toEqual({ kind: 'claimed', request, folder: join(home, 'web') })
+  })
+})
+
 describe('FolderQuestions.answer', () => {
   async function waiting(clock = { now: 0 }) {
     const folders = questions({ kind: 'folder', path: missing }, clock)

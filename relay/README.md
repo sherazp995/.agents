@@ -306,6 +306,75 @@ The waiting request lives in memory, so after a Relay restart send it
 again. A channel whose description names no folder, and a DM, work as
 before.
 
+### Projects, personas and teams (setup page)
+
+The daemon serves a setup page on `http://127.0.0.1:7766` (the `ui` block
+in `config/relay.config.yaml`: `enabled`, `port`). Run `relay ui` in a
+terminal for a one-time login link (it opens the browser on macOS; pass
+`--as <slack user id>` when the workspace has more than one owner). The
+link works once, for ten minutes; it cannot be run from inside an agent's
+turn.
+
+- **Projects** tie a Slack channel the bot is in to a folder and registry
+  repos. A new thread in that channel starts in the project's folder, ahead
+  of the channel description. If the folder is gone, Relay asks in the
+  thread, as it does for a described folder.
+- **Personas** are one library for the whole workspace, each a Markdown
+  file in `~/.agents/relay/personas/` (git-ignored). Editing one changes it
+  on every team that uses it; one still on a team cannot be removed, and a
+  removed one is moved to `personas/.removed/`.
+- **Teams** belong to a project and pick members from the persona library,
+  with one lead. "Start from template" adds Lead, Developer, Reviewer and QA
+  personas if missing and a five-member roster. Each member runs on Claude
+  or Codex (with an optional model), and the team has a member limit (1 to
+  6, default 3). Each project has one hub page: its facts, the roster
+  (edit, make lead, remove), add member, the team proposal and the last
+  team request.
+- **Proposed teams.** "Propose team" on a project's hub (or asking Relay in
+  the project's Slack channel, which runs `relay team propose`) starts one
+  read-only Claude run in the project folder: read tools only, the repos'
+  off-limits paths denied, no hooks or MCP servers, ten minutes at most.
+  Relay then shows each proposed member as Add, Change, Keep or Remove
+  with its reason. Nothing changes until an owner approves: in the page,
+  where rows can be unticked or edited and new personas are shown in full
+  (and marked "written by Relay"), or from the Slack card when the
+  proposal adds no new persona. An approval is refused if the team, its
+  repos or a persona's text changed since Relay proposed.
+
+### A team runs a request
+
+In a project channel whose team has a lead, the thread's agent is the
+lead. It answers questions and small asks itself; a large task (build a
+ticket, create a PR, review a PR) becomes a team request:
+
+- The lead posts the task list, then runs `relay team start` (with
+  `--repo <name>` only when the message named another linked repo, or
+  `--pr <number>` for a review). A build gets a request worktree next to
+  the repo, `<repo>-<title>-<id>` on branch `relay/<id>-<title>`, from the
+  local default branch's head. Unnamed, the repo is the project folder's
+  own git repo, even when it is not linked. A PR review checks the PR's head and merges
+  nothing.
+- The lead hands out work with `relay team assign`. Each member works in
+  its own worktree under `~/.agents/relay/worktrees/`, on its own client's
+  logins only (it waits when they are all out, and the lead is told), with
+  no MCP servers. At most the team's limit of members run at once, and 6
+  across the machine; the lead never waits for a slot.
+- A stuck member runs `relay team ask-lead` and waits; the lead answers
+  with `relay team answer`, asking you only for product calls.
+- Members never post in Slack: their reports reach the lead as notes. The
+  lead merges each build with `relay team merge` (a recorded operation, so
+  a retry or a restart never merges twice), then has the reviewer and QA
+  check the merged commit, with two repair rounds at most.
+- Commits stay local. Members cannot push or open PRs at all; the lead's
+  push or PR still shows you the approval card.
+- Stop and the kill switch stop the lead and every member. A daemon
+  shutdown stops running members and queues them again; after a restart,
+  a member that was working runs once more, then is marked failed. The guard is a speed bump, not a sandbox: members have
+  the same machine rights as the single agent.
+
+A team with no lead, an empty team and a channel with no project keep the
+single agent.
+
 Each person who wants their own assistant runs their own Relay with their
 own Slack app and tokens. Two machines sharing one app split its events
 between them. An app made from an older manifest still has `/relay`,
