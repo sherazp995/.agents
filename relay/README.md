@@ -19,9 +19,12 @@ you (Slack)  ──▶  Relay daemon  ──▶  claude -p (headless)
 
 **macOS is the fully supported platform.** Linux runs Slack and approvals,
 with `secrets.provider: libsecret` (the Secret Service, through
-`secret-tool`), and `relay setup` works the same there. What Linux
-does not have is the sandbox, which is built on macOS `sandbox-exec`, so
-`shell` calls there fail closed rather than running unconfined (FR-SH-7).
+`secret-tool`), and `relay setup` works the same there. Coding runs
+(`shell`, `code`, a repository's tests) are confined by macOS `sandbox-exec`
+on a Mac, and on Linux by bubblewrap and pasta, which you install yourself
+(`sudo dnf install bubblewrap passt`, or `sudo apt install bubblewrap passt`).
+Without them, or on a processor other than x86_64 and arm64, those runs fail
+closed rather than running unconfined (FR-SH-7); `relay doctor` says why.
 Windows is unsupported.
 
 Tokens live in an OS keystore on both platforms and never in an environment
@@ -434,8 +437,11 @@ Worth reading before you trust it with anything.
 - **The secret scrubber only redacts values Relay itself brokered.** It
   cannot catch a key you pasted into a prompt.
 - **Commands run under OS-level confinement.** Every `shell` call goes through
-  a generated `sandbox-exec` profile: it may write only inside the working
-  directory you name, and the kernel denies it any direct network. Its only
+  a generated `sandbox-exec` profile on macOS, or pasta and bubblewrap on
+  Linux: it may write only inside the working directory you name, and the
+  kernel denies it any direct network. On Linux a kernel filter also refuses
+  to open any new local (Unix) socket, and your login files (`~/.ssh`, `~/.config/gh`,
+  Claude's `.credentials.json` and others) are hidden from it. Its only
   route out is Relay's own loopback proxy, which terminates a connection to
   any host outside the run's declared list and logs every attempt.
   `relay doctor` proves this on your machine rather than reporting that it is
@@ -465,8 +471,6 @@ Stated plainly so nobody discovers it the hard way.
   handed a repository and asked to open a pull request.
 - **The filesystem capability.** `shell` deliberately refuses `rm`, pointing
   at a preview-and-trash path (FR-SH-3, FR-SH-4) that does not exist yet.
-- **Linux confinement.** The keystore works; the sandbox does not exist
-  there, so `shell` is refused. It would need bubblewrap or an equivalent.
 - **The Linux keystore has not been run on a real Linux machine.** Its logic
   is covered by tests to the same standard as the macOS one, but nobody has
   watched it work against a live Secret Service.

@@ -226,9 +226,12 @@ export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
     '`relay db create`. Both connect only to the Postgres named by database.url, and the command refuses any host ' +
     'that is not local (isLocalHost), so the spawn reaches this machine\'s own database and nothing else.',
   'src/sandbox/exec.ts':
-    'Spawns /usr/bin/sandbox-exec, the macOS confinement wrapper, which then execs the command it was given ' +
-    '(FR-SH-6). sandbox-exec is not itself a network destination, and the process it wraps is the most tightly ' +
-    'constrained one in this codebase: the generated profile denies ALL direct outbound networking at the kernel, ' +
+    'Spawns the confinement wrapper, which then execs the command it was given (FR-SH-6): /usr/bin/sandbox-exec ' +
+    'on macOS, or on Linux /usr/bin/pasta running /bin/sh, which opens the socket filter and execs /usr/bin/bwrap ' +
+    '(src/sandbox/bwrap.ts builds that command line, and probes it once with spawnSync at startup). None of the ' +
+    'three is a network destination: pasta is started with --splice-only and forwards one loopback port, the ' +
+    'proxy\'s, and nothing else. The process they wrap is the most tightly constrained one in this codebase: ' +
+    'it has no direct outbound networking at the kernel (on Linux, a network namespace holding only loopback), ' +
     "so a confined run cannot reach any host on its own. Its only route out is Relay's own enforcing egress proxy " +
     '(src/sandbox/proxy.ts) on loopback, which terminates any connection to a host outside the run\'s declared ' +
     'destination list and records every attempt. Where a confined run is permitted to go therefore falls under the ' +

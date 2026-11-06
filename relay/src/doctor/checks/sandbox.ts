@@ -4,11 +4,12 @@
  * connection, refusing to start if either succeeds."
  *
  * This is the doctor half. It runs the REAL self-test against the real
- * `sandbox-exec`, rather than reporting that a sandbox module exists,
+ * confinement (`sandbox-exec` on macOS, pasta and bubblewrap on Linux),
+ * rather than reporting that a sandbox module exists,
  * because the entire value of the requirement is that confinement is
  * verified on this machine rather than assumed from configuration.
  *
- * A platform without `sandbox-exec` is reported as `failed`, not `ok`.
+ * A machine without that confinement is reported as `failed`, not `ok`.
  * Elsewhere in this doctor an absent optional dependency is fine, but this
  * one is different: coding runs are refused outright without it (FR-SH-7
  * fails closed), so reporting it as a healthy state would tell the operator

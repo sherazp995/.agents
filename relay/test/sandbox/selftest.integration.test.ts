@@ -1,8 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
+import { buildLinuxLaunch } from '../../src/sandbox/bwrap.js'
 import { runSandboxed, sandboxAvailability } from '../../src/sandbox/exec.js'
 import { runSandboxSelfTest } from '../../src/sandbox/selftest.js'
 
@@ -169,16 +171,101 @@ describeIfSandboxed('the sandbox actually confines, on this machine', () => {
   }, 40_000)
 })
 
+const describeIfLinuxSandboxed = available && process.platform === 'linux' ? describe : describe.skip
+
+/** One BPF instruction, `return ALLOW`: a filter that filters nothing. */
+const ALLOW_ALL_FILTER = Buffer.from([0x06, 0, 0, 0, 0x00, 0x00, 0xff, 0x7f])
+
+describeIfLinuxSandboxed('the Linux layers, each proven to matter', () => {
+  it('fails the self-test, naming the local socket, when the socket filter lets everything through', async () => {
+    const outcome = await runSandboxSelfTest({ linux: { unixSocketFilter: () => ALLOW_ALL_FILTER } })
+
+    expect(outcome.outcome).toBe('failed')
+    if (outcome.outcome !== 'failed') return
+    expect(outcome.reason).toContain('local (Unix) socket')
+  }, 40_000)
+
+  it('fails the self-test, naming the forbidden write, when the root is bound writable', async () => {
+    const outcome = await runSandboxSelfTest({
+      linux: {
+        buildLaunch: (request, deps) => {
+          const launch = buildLinuxLaunch(request, deps)
+          const args = [...launch.args]
+          const at = args.findIndex((arg, i) => arg === '--ro-bind' && args[i + 1] === '/' && args[i + 2] === '/')
+          args[at] = '--bind'
+          return { command: launch.command, args }
+        },
+      },
+    })
+
+    expect(outcome.outcome).toBe('failed')
+    if (outcome.outcome !== 'failed') return
+    expect(outcome.reason).toContain('OUTSIDE the worktree, SUCCEEDED')
+  }, 40_000)
+
+  it('leaves no process behind when a run is cancelled, even one that started its own session', async () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'relay-sb-cancel-'))
+    const controller = new AbortController()
+    try {
+      const run = runSandboxed({
+        spec: { worktree },
+        command: '/bin/sh',
+        args: ['-c', 'setsid sleep 3071 & sleep 3071'],
+        timeoutMs: 20_000,
+        signal: controller.signal,
+      })
+      // Whole lines: a substring would also match any shell whose command text mentions it.
+      const sleepers = (): number =>
+        execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).split('\n').filter((line) => line.trim() === 'sleep 3071').length
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      expect(sleepers()).toBe(2)
+      controller.abort()
+      await run
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      expect(sleepers()).toBe(0)
+    } finally {
+      rmSync(worktree, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('hides login files from a run unless it is the engine, which needs its own', async () => {
+    const worktree = mkdtempSync(join(tmpdir(), 'relay-sb-logins-'))
+    const home = mkdtempSync(join(homedir(), '.relay-sb-home-'))
+    mkdirSync(join(home, '.ssh'))
+    writeFileSync(join(home, '.ssh', 'id_test'), 'PRIVATE-KEY-MARKER')
+    const read = { command: '/bin/sh', args: ['-c', `cat "${join(home, '.ssh', 'id_test')}" 2>/dev/null; echo DONE`], timeoutMs: 20_000 }
+    try {
+      const hidden = await runSandboxed({ spec: { worktree }, ...read }, { linux: { home } })
+      const exposed = await runSandboxed({ spec: { worktree, exposeLogins: true }, ...read }, { linux: { home } })
+
+      expect(hidden.outcome === 'ran' && hidden.stdout).toBe('DONE\n')
+      expect(exposed.outcome === 'ran' && exposed.stdout).toBe('PRIVATE-KEY-MARKERDONE\n')
+    } finally {
+      rmSync(worktree, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, 30_000)
+})
+
 describe('confinement availability is reported with a reason', () => {
-  it('refuses on a non-darwin platform rather than running unconfined', () => {
+  it('refuses on a platform with no confinement rather than running unconfined', () => {
     // FR-SH-7: a run cannot execute with confinement unavailable; it fails
     // closed with a stated reason. A fallback to unconfined is the path that
     // would eventually always run.
-    const result = sandboxAvailability({ platform: 'linux' })
+    const result = sandboxAvailability({ platform: 'win32' })
 
     expect(result.available).toBe(false)
     if (result.available) return
     expect(result.reason).toContain('FR-SH-7')
+  })
+
+  it('refuses on Linux when bubblewrap is missing', () => {
+    const result = sandboxAvailability({ platform: 'linux', pathExists: () => false })
+
+    expect(result.available).toBe(false)
+    if (result.available) return
+    expect(result.reason).toContain('bubblewrap')
   })
 
   it('refuses when sandbox-exec is missing', () => {
@@ -190,7 +277,7 @@ describe('confinement availability is reported with a reason', () => {
   it('never returns a result that would let a caller run unconfined by accident', async () => {
     const outcome = await runSandboxed(
       { spec: { worktree: tmpdir() }, command: '/bin/echo', args: ['hi'] },
-      { platform: 'linux' },
+      { platform: 'win32' },
     )
 
     expect(outcome.outcome).toBe('unavailable')

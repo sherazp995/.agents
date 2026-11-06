@@ -1,7 +1,7 @@
 {
   "name": "relay",
   "version": "0.1.0",
-  "description": "Chat-driven computer-use agent: message Slack, Relay runs the work on your Mac under policy and answers in the thread.",
+  "description": "Chat-driven computer-use agent: message Slack, Relay runs the work on your Mac or Linux machine under policy and answers in the thread.",
   "license": "UNLICENSED",
   "type": "module",
   "engines": {

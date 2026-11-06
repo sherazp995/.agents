@@ -203,9 +203,10 @@ six later ones.**
 7. Document parsing and structured output (FR-CAP-20, 21).
 8. §24's tmux and pty-proxy attachment. Read §24.0 and §24.0.1 first: the
    shipped pull-based mechanism is *safer* than the specified push design.
-9. Linux confinement. The keystore works there; the sandbox is
-   `sandbox-exec` and has no Linux equivalent, so `shell` and `code` fail
-   closed. It would need bubblewrap or similar.
+9. Linux confinement beyond today's reach. Runs are confined with pasta,
+   bubblewrap and a socket filter (`src/sandbox/bwrap.ts`), on x86_64 and
+   arm64 only. NixOS keeps its programs under `/run`, which the sandbox
+   hides, so the probe fails and runs are refused there.
 10. Retention: `outbound_dispatch_refs`, FR-AUD-4's tiered purge, and the
     download cleanup that shares their shape.
 

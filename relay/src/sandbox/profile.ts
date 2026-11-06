@@ -63,6 +63,13 @@ export type SandboxProfileSpec = {
    * make every concurrent run writable by every other one.
    */
   readonly temporaryDirectory?: string
+  /**
+   * Linux only: leave the operator's login files readable (src/sandbox/bwrap.ts
+   * LOGIN_PATHS). Only the engine sets it, because it runs the claude CLI,
+   * which needs its own login. macOS keeps those logins in the Keychain, so
+   * the profile there has nothing to cover and ignores this.
+   */
+  readonly exposeLogins?: boolean
 }
 
 /**

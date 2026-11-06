@@ -116,6 +116,8 @@ export async function runEngine(request: EngineRequest, deps: EngineDependencies
         worktree: request.worktreePath,
         readOnlyPaths: [request.repo.path],
         proxyPort: proxy.port,
+        // The engine is the claude CLI, which needs its own login (Linux keeps it in a plain file).
+        exposeLogins: true,
       },
       command: ENGINE_BINARY,
       args: ['-p', request.task],

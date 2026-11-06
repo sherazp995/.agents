@@ -4,7 +4,8 @@
  * The requirement is specific about the method: a startup self-test
  * "attempts a known-forbidden write and a known-forbidden connection,
  * refusing to start if either succeeds". This implements exactly that,
- * against the real `sandbox-exec` on the real machine, because every test in
+ * against the real confinement on the real machine (`sandbox-exec` on macOS,
+ * pasta and bubblewrap on Linux), because every test in
  * `test/sandbox/` proves the profile TEXT is right and none of them proves
  * the kernel honoured it here.
  *
@@ -24,8 +25,10 @@
  * thing they checked could never have been true.
  */
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import type { Server } from 'node:net'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { runSandboxed, sandboxAvailability } from './exec.js'
@@ -52,12 +55,36 @@ export async function runSandboxSelfTest(deps: SandboxExecDependencies = {}): Pr
   const availability = sandboxAvailability(deps)
   if (!availability.available) return { outcome: 'unavailable', reason: availability.reason }
 
+  const linux = (deps.platform ?? process.platform) === 'linux'
   const worktree = mkdtempSync(join(tmpdir(), 'relay-sandbox-selftest-'))
-  const outside = mkdtempSync(join(tmpdir(), 'relay-sandbox-outside-'))
+  // In the home folder, not the temporary one: the Linux sandbox covers /tmp
+  // with an empty folder, so a probe target there would fail with "no such
+  // file" and pass without the read-only mount ever being tested.
+  const outside = mkdtempSync(join(homedir(), '.relay-sandbox-outside-'))
   const allowedFile = join(worktree, 'allowed.txt')
   const forbiddenFile = join(outside, 'forbidden.txt')
+  let socketServer: Server | undefined
 
   try {
+    // Linux only: a Unix socket the run can see must still be refused, which
+    // is the socket filter's job (src/sandbox/seccomp.ts). The socket is this
+    // test's own, in a visible folder, so the probe does not depend on a
+    // session bus being present. Success needs EPERM specifically: a probe
+    // that failed to start must not read as a refusal.
+    let socketProbe: string[] = []
+    if (linux) {
+      const socketPath = join(outside, 'probe.sock')
+      socketServer = await listenOn(socketPath)
+      const probeScript = join(worktree, 'socket-probe.cjs')
+      writeFileSync(
+        probeScript,
+        `require('node:net').connect(${JSON.stringify(socketPath)})` +
+          ".on('connect', () => { console.log('LOCAL_SOCKET_OPENED'); process.exit(0) })" +
+          ".on('error', (e) => { console.log('LOCAL_SOCKET_REFUSED_' + e.code); process.exit(0) })\n",
+      )
+      socketProbe = [`"${process.execPath}" "${probeScript}"`]
+    }
+
     // One invocation, one profile, three probes. Deliberately a single shell
     // command so that a sandbox that silently failed to apply cannot pass
     // one probe and be absent for the next.
@@ -66,6 +93,7 @@ export async function runSandboxSelfTest(deps: SandboxExecDependencies = {}): Pr
       `printf 'x' > "${forbiddenFile}" 2>/dev/null && echo WROTE_FORBIDDEN`,
       // -m keeps a machine with no sandbox from hanging here for a minute.
       `/usr/bin/curl -s -m 5 -o /dev/null https://${FORBIDDEN_HOST} 2>/dev/null && echo CONNECTED`,
+      ...socketProbe,
       'echo PROBES_DONE',
     ].join('\n')
 
@@ -147,14 +175,36 @@ export async function runSandboxSelfTest(deps: SandboxExecDependencies = {}): Pr
       }
     }
 
+    // Half four, Linux: a visible local socket was refused by the filter.
+    if (linux && !result.stdout.includes('LOCAL_SOCKET_REFUSED_EPERM')) {
+      return {
+        outcome: 'failed',
+        reason: result.stdout.includes('LOCAL_SOCKET_OPENED')
+          ? 'a local (Unix) socket outside the worktree was OPENED from inside the sandbox. Through the session bus ' +
+            'that starts unconfined programs, so no coding run may start (FR-SH-7).'
+          : 'the local socket probe did not report the filter refusing it, so the socket filter cannot be confirmed: ' +
+            (result.stdout.match(/LOCAL_SOCKET_\w+/)?.[0] ?? 'the probe printed nothing'),
+      }
+    }
+
     return {
       outcome: 'passed',
       detail:
         'confinement verified on this machine: a write inside the worktree succeeded and was read back, a write ' +
-        `outside it was denied by the kernel, and a direct connection to ${FORBIDDEN_HOST} was refused.`,
+        `outside it was denied by the kernel, and a direct connection to ${FORBIDDEN_HOST} was refused` +
+        (linux ? ', and a visible local socket was refused by the socket filter.' : '.'),
     }
   } finally {
+    socketServer?.close()
     rmSync(worktree, { recursive: true, force: true })
     rmSync(outside, { recursive: true, force: true })
   }
+}
+
+function listenOn(path: string): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = createServer((socket) => socket.end())
+    server.once('error', reject)
+    server.listen(path, () => resolve(server))
+  })
 }

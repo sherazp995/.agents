@@ -15,7 +15,8 @@ import './checks/capabilities.js'
 // Same pattern again: adds the 'egress' check, FR-DATA-14.
 import './checks/egress.js'
 // Same pattern again: adds the 'sandbox' check, FR-SH-7. It runs the real
-// self-test against the real sandbox-exec, so this is the line that makes
+// self-test against the real sandbox (sandbox-exec on macOS, pasta and
+// bubblewrap on Linux), so this is the line that makes
 // `relay doctor` able to say confinement holds on THIS machine.
 import './checks/sandbox.js'
 // Same pattern again: adds the 'audit' check, FR-AUD-2.
