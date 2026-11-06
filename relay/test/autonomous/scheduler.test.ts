@@ -179,6 +179,19 @@ describe('autonomous scheduler', () => {
     expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [], nextWakeupAt: null })
   })
 
+  it("never sends a reminder's read-only task to an open terminal chat: its own limited worker answers", async () => {
+    const { workspaceId, task } = await newTask('check the deploy')
+    await pool.query('UPDATE autonomous_tasks SET read_only = true WHERE id = $1', [task.id])
+    const h = harness([async () => reply('Deploy is green.')])
+    const delivered: string[] = []
+    h.effects.deliverToOpenChat = async (_task, text) => delivered.push(text) > 0
+
+    await scheduler(workspaceId, h).tick()
+
+    expect(delivered).toEqual([])
+    expect(h.posts).toEqual(['Deploy is green.'])
+  })
+
   it('runs the headless turn when no open chat took the message', async () => {
     const { workspaceId, task } = await newTask('check the deploy')
     const h = harness([async () => reply('Deploy is green.')])
@@ -213,6 +226,52 @@ describe('autonomous scheduler', () => {
     expect(h.turns).toHaveLength(1)
     expect(h.posts).toEqual(['Report with a chart.'])
     expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [], nextWakeupAt: null })
+  })
+
+  it('holds a message for the next worker when the channel token changed since the running one started', async () => {
+    const { workspaceId, task, say } = await newTask('build the report')
+    const sent: string[] = []
+    const h = harness([
+      async (context) => {
+        if (context.inbox) context.inbox.send = (text) => sent.push(text) > 0
+        await say('also add a chart')
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        return reply('Report without the chart.')
+      },
+      async () => reply('Chart added.'),
+    ])
+    const checked: string[] = []
+    h.effects.extensionTokenChanged = async (changed) => checked.push(changed.id) > 0
+    const s = scheduler(workspaceId, h, { tickMs: 20 })
+
+    await s.tick()
+
+    expect(checked.length).toBeGreaterThan(0)
+    expect(sent).toEqual([])
+    expect((await loadTask(pool, task.id))?.pendingEvents.map((event) => event.text)).toEqual(['also add a chart'])
+
+    await s.tick()
+    expect(h.turns).toHaveLength(2)
+    expect(h.posts).toEqual(['Report without the chart.', 'Chart added.'])
+  })
+
+  it('still sends a message into the running worker while its channel token is unchanged', async () => {
+    const { workspaceId, say } = await newTask('build the report')
+    const sent: string[] = []
+    const h = harness([
+      async (context) => {
+        if (context.inbox) context.inbox.send = (text) => sent.push(text) > 0
+        await say('also add a chart')
+        const deadline = Date.now() + 3000
+        while (sent.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+        return reply('Report with a chart.')
+      },
+    ])
+    h.effects.extensionTokenChanged = async () => false
+
+    await scheduler(workspaceId, h, { tickMs: 20 }).tick()
+
+    expect(sent).toHaveLength(1)
   })
 
   it("keeps a message sent into a turn that then failed pending, while the turn's own message is dropped", async () => {

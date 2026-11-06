@@ -13,12 +13,11 @@
 
 import { registerCapability } from './registry.js'
 import { ECHO_CAPABILITY_DEFINITION } from '../agent/capabilities/echo.js'
-import { BROWSER_CAPABILITY_DEFINITION } from '../agent/capabilities/browser.js'
 import { SHELL_CAPABILITY_DEFINITION } from '../agent/capabilities/shell.js'
 import { FILES_CAPABILITY_DEFINITION } from '../agent/capabilities/files/index.js'
 import { CODE_CAPABILITY_DEFINITION } from '../agent/capabilities/code.js'
 
-const BUILTIN_CAPABILITY_DEFINITIONS = [ECHO_CAPABILITY_DEFINITION, BROWSER_CAPABILITY_DEFINITION, SHELL_CAPABILITY_DEFINITION, FILES_CAPABILITY_DEFINITION, CODE_CAPABILITY_DEFINITION]
+const BUILTIN_CAPABILITY_DEFINITIONS = [ECHO_CAPABILITY_DEFINITION, SHELL_CAPABILITY_DEFINITION, FILES_CAPABILITY_DEFINITION, CODE_CAPABILITY_DEFINITION]
 
 /**
  * Registers every built-in capability. Safe to call more than once: each

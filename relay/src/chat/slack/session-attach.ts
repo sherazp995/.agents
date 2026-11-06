@@ -29,7 +29,7 @@
 import type { SlackBlock } from '../../approvals/blockkit.js'
 import type { EngineSession } from '../../sessions/discovery.js'
 import { listEngineSessions } from '../../sessions/discovery.js'
-import { attachSessionToEngineChat, findOrCreateSession } from '../../sessions/store.js'
+import { attachSessionToEngineChat, findOrCreateSession, ReadOnlySessionError } from '../../sessions/store.js'
 import type { Pool } from 'pg'
 import type { Logger } from '../../obs/logger.js'
 import { OWNER_ONLY_REPLY } from '../../tenancy/access.js'
@@ -405,8 +405,10 @@ export async function handleSessionAttachButton(ctx: SessionAttachContext, envel
   // attached session runs unmediated in the operator's own directory
   // with the operator's own permissions (§24), so that is the most
   // consequential binding in the product.
+  // The picker is posted as a reply in the thread to attach, so the thread
+  // is its thread_ts; the picker's own ts names no thread anyone replies in.
   const channel = envelope.channel?.id
-  const thread = envelope.message?.ts
+  const thread = envelope.message?.thread_ts ?? envelope.message?.ts
   if (!channel || !thread) {
     ctx.log?.error('SlackAdapter: session attach click carried no channel or message ts; ignoring')
     return
@@ -455,6 +457,11 @@ export async function handleSessionAttachButton(ctx: SessionAttachContext, envel
     const { text, blocks } = renderAttachConfirmation(engineCwd)
     await ctx.apiClient.postMessage({ channel, thread, text, blocks })
   } catch (error) {
+    if (error instanceof ReadOnlySessionError) {
+      const { text, blocks } = renderAttachFailure(error.message)
+      await ctx.apiClient.postMessage({ channel, thread, text, blocks }).catch(() => {})
+      return
+    }
     ctx.log?.error({ err: error }, 'SlackAdapter: session attach handler threw')
     const { text, blocks } = renderAttachFailure('an unexpected error occurred')
     await ctx.apiClient.postMessage({ channel, thread, text, blocks }).catch(() => {})

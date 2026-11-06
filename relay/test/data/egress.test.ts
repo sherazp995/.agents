@@ -168,11 +168,11 @@ describe('compareEgressToSource', () => {
       wiredInThisBuild: true,
       knownGaps: ['dynamic'],
     }
-    const comparison = compareEgressToSource([dynamic], EMPTY_EVIDENCE, ['browser'])
+    const comparison = compareEgressToSource([dynamic], EMPTY_EVIDENCE, ['fetcher'])
     expect(comparison.findings).toContainEqual({
       kind: 'confirmed',
       destination: 'Approved action target',
-      evidence: 'capabilities declaring destinationOf: browser',
+      evidence: 'capabilities declaring destinationOf: fetcher',
     })
   })
 
@@ -260,7 +260,7 @@ describe('launcher spawns and wiredBy evidence', () => {
 describe('a real scan of this repository\'s own src/, as an integration proof', () => {
   it('finds Slack and the claude CLI, confirmed against the declared inventory', () => {
     const evidence = scanSourceForEgressEvidence('src')
-    const comparison = compareEgressToSource(EGRESS_INVENTORY, evidence, ['browser'])
+    const comparison = compareEgressToSource(EGRESS_INVENTORY, evidence, [])
 
     const confirmedNames = comparison.findings.filter((f) => f.kind === 'confirmed').map((f) => (f as { destination: string }).destination)
     expect(confirmedNames).toContain('Slack')

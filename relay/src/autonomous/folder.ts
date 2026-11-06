@@ -14,11 +14,16 @@ import { join, resolve } from 'node:path'
 import type { RepoEntry } from '../repos/schema.js'
 
 export function chatFolder(text: string, repos: readonly RepoEntry[], home: string = homedir()): string {
+  return textFolder(text, repos, home) ?? repos[0]?.path ?? home
+}
+
+/** The folder the text itself names, by path or by a registered repository's name or alias; never a fallback. */
+export function textFolder(text: string, repos: readonly RepoEntry[], home: string = homedir()): string | undefined {
   const named = namedFolder(text, home)
   if (named !== undefined) return named
-  const words = new Set(text.toLowerCase().split(/[^a-z0-9._-]+/))
-  const repo = repos.find((entry) => [entry.name, ...(entry.aliases ?? [])].some((name) => words.has(name.toLowerCase())))
-  return repo?.path ?? repos[0]?.path ?? home
+  // Dots stay inside a word ("relay.config") but not at its ends, so "in cohabit." still names cohabit.
+  const words = new Set(text.toLowerCase().split(/[^a-z0-9._-]+/).map((word) => word.replace(/^\.+|\.+$/g, '')))
+  return repos.find((entry) => [entry.name, ...(entry.aliases ?? [])].some((name) => words.has(name.toLowerCase())))?.path
 }
 
 /** The first existing folder the text names by absolute or ~ path, quoted ones first; never a repository or home fallback. */

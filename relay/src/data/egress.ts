@@ -155,24 +155,20 @@ export const EGRESS_INVENTORY: readonly EgressDestination[] = [
     name: 'The explicit, approved target of the current action',
     category: 'approved_action_target',
     reason:
-      "FR-DATA-1(b): the explicit target of a task action the operator has approved, for example a browser " +
-      'navigation. Resolved per call, never a fixed host: every capability that reaches one declares it via ' +
-      'CapabilityDefinition.destinationOf, so the policy engine can govern it before the capability runs (see ' +
-      'src/agent/capabilities/browser.ts).',
+      "FR-DATA-1(b): the explicit target of a task action the operator has approved, for example a host a " +
+      'sandboxed shell run declares. Resolved per call, never a fixed host: a capability that reaches one either ' +
+      'declares it via CapabilityDefinition.destinationOf, so the policy engine can govern it before the capability ' +
+      "runs, or goes through the sandbox's enforcing egress proxy (src/sandbox/proxy.ts), which refuses any host " +
+      "outside the run's declared destination list.",
     hosts: [],
     requiresOperatorAcknowledgement: false,
     wiredInThisBuild: true,
+    wiredBy: 'src/sandbox/proxy.ts',
     knownGaps: [
       'This inventory does not enumerate individual destinations for this category; there is no fixed list to ' +
-        'name. It verifies structurally that at least one registered capability declares destinationOf, and relies ' +
-        'on that capability\'s own origin enforcement (a browser profile\'s allowlist, FR-PRF-4) to bound where it ' +
-        'can actually go, which this file does not re-check.',
-      'That reliance is only as strong as the tier the call lands on, and the two differ. On TIER 2 the bound is ' +
-        'now real: src/browser/tier2/page.ts pauses every request the page makes at the CDP Fetch layer and fails ' +
-        'the ones outside the profile\'s allowlist, so an undeclared destination is not reached. On TIER 1 the ' +
-        'Claude-in-Chrome extension owns navigation, so Relay refuses to issue an off-allowlist navigation and ' +
-        'detects one afterwards, and this category is bounded by detection rather than by prevention there. Tier 3 ' +
-        'has no driver in this build at all.',
+        'name. It verifies structurally that the enforcing proxy is present, or that a registered capability ' +
+        "declares destinationOf, and relies on that enforcement to bound where a run can actually go, which this " +
+        'file does not re-check.',
     ],
   }
 ]
@@ -221,15 +217,6 @@ export const VENDOR_LAUNCHER_SPAWNS: Readonly<Record<string, { readonly launcher
 
 /** A file whose unresolved spawn target has a known, specific explanation, so the finding is reported WITH that explanation rather than reading as a bare unknown. Every entry here is grounded in a file this project's author has actually read, per this task's own honesty requirement, not assumed safe by pattern. */
 export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
-  'src/browser/cdp/endpoint.ts':
-    'Launches the local Chrome or Chromium executable chosen by defaultChromeExecutablePath() as a Relay-owned ' +
-    'tier 2 automation browser. The browser process is not itself an egress destination. Unlike the tier 1 launch ' +
-    'in src/browser/launch.ts, this one IS driven by Relay, and every request the driven page makes, of any kind, ' +
-    'is paused at the CDP Fetch layer and checked against the bound profile\'s origin allowlist before it leaves ' +
-    'the browser (src/browser/tier2/page.ts, FR-PRF-4). Where it is permitted to go therefore falls under the ' +
-    '"explicit, approved target of the current action" entry above, not under an undeclared destination. The ' +
-    'launch also passes --disable-background-networking, --disable-component-update and --disable-sync, so ' +
-    "Chrome's own update, variation and sync traffic, none of which this inventory declares, is not made at all.",
   'src/secrets/libsecret.ts':
     "A generic execFile wrapper's own `file` parameter (defaultExecFile), not a fixed destination by itself; the " +
     'actual binary it is invoked with (secret-tool) is resolved and matched separately, above. Same shape as ' +
@@ -247,17 +234,6 @@ export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
     'destination list and records every attempt. Where a confined run is permitted to go therefore falls under the ' +
     '"explicit, approved target of the current action" entry, and the sandbox is what makes that list enforceable ' +
     'rather than advisory.',
-  'src/cli/profile-login.ts':
-    'Launches the local Chrome or Chromium executable chosen by defaultChromeExecutablePath() as an ORDINARY, ' +
-    'visible browser window, so the operator can sign in to the sites a profile is for. Relay does not drive this ' +
-    'window and issues it no instructions: where it goes is wherever the person at the keyboard goes, which is ' +
-    'their own browsing and not Relay egress. It is the one browser launch in this codebase with no Relay-side ' +
-    'origin enforcement, and deliberately so, because enforcing an allowlist against a human signing in would ' +
-    'block the very login the command exists to enable.',
-  'src/browser/launch.ts':
-    'Launches the local Chrome or Chromium executable chosen by defaultChromeExecutablePath(). The browser ' +
-    'process itself is not a network egress destination; where it subsequently navigates is governed separately ' +
-    'by src/browser/enforcement.ts (FR-PRF-4), not by this inventory.',
   'src/secrets/keychain.ts':
     'A generic execFile wrapper\'s own `file` parameter (defaultExecFile), and the configured KeychainReader\'s ' +
     'file: /usr/bin/security or <RELAY_HOME>/bin/relay-secrets (native/relay-secrets), both local Keychain reads ' +
@@ -495,7 +471,7 @@ export type EgressComparison = {
  * category, which has no fixed host to text-scan for). Pure and
  * synchronous: every fact it needs is a parameter, so the whole decision
  * table is exhaustively testable without touching a filesystem or a
- * registry, matching src/browser/enforcement.ts's own "pure, no I/O" shape.
+ * registry.
  */
 export function compareEgressToSource(
   inventory: readonly EgressDestination[],

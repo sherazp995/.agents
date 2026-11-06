@@ -66,8 +66,7 @@ export function resolveRealPath(candidate: string): string {
  *
  * `startsWith` would accept `/work/project-secrets` for a root of
  * `/work/project`, which is a different directory that merely shares a
- * prefix. This project has already shipped that exact bug once, in
- * profile-clone's containment check.
+ * prefix.
  */
 export function isInside(parent: string, child: string): boolean {
   if (parent === child) return true

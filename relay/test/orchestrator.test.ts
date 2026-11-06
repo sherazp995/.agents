@@ -451,6 +451,50 @@ describeDb('orchestrator', () => {
       expect(rows).toHaveLength(0)
     })
 
+    it('sends a reminder only to its read-only task: no governed run when the task store turns it down, nothing at all with autonomous mode off', async () => {
+      const { workspaceId, principalId } = await createFixtures()
+      const reminder = { ...buildEvent({ workspaceId, principalId, mentionsBot: true }), origin: 'reminder' as const }
+      const auto = fakeAutonomous('not_autonomous')
+      const adapter = new MockAdapter()
+      const deps = { pool, dispatcher: adapter, log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, engine: buildImmediateSuccessEngine() }
+
+      await handleChatEvent({ ...deps, autonomous: auto.routing }, reminder)
+      await handleChatEvent(deps, { ...reminder, platformEventId: `${reminder.platformEventId}-2` })
+
+      expect(auto.routed).toHaveLength(1)
+      expect(auto.adopted).toEqual([false])
+      expect(await runCount(workspaceId)).toBe(0)
+      expect(adapter.performed).toEqual([])
+    })
+
+    it('starts a reminder in the channel description\'s existing folder without asking, and never asks when it is missing', async () => {
+      const { workspaceId, principalId } = await createFixtures()
+      const present = mkdtempSync(join(tmpdir(), 'relay-reminder-folder-'))
+      const routed: Array<string | undefined> = []
+      const description = { path: present }
+      const folderQuestions = new FolderQuestions({ lookup: async () => ({ kind: 'folder', path: description.path }) })
+      const autonomous = {
+        async route(_event: ChatEvent, _thread: unknown, options?: { chatCwd?: string }) {
+          routed.push(options?.chatCwd)
+          return 'handled' as const
+        },
+        async stopSession() {
+          return true
+        },
+      }
+      const adapter = new MockAdapter()
+      const deps = { pool, dispatcher: adapter, log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, autonomous, folderQuestions }
+
+      await handleChatEvent(deps, { ...buildEvent({ workspaceId, principalId }), origin: 'reminder' })
+      description.path = join(present, 'gone')
+      const second = { ...buildEvent({ workspaceId, principalId }), origin: 'reminder' as const }
+      await handleChatEvent(deps, second)
+
+      expect(routed).toEqual([present, undefined])
+      expect(folderQuestions.isWaiting(composeThreadRef(second.ref.channel, second.ref.message ?? ''))).toBe(false)
+      expect(adapter.performed).toEqual([])
+    })
+
     it('keeps the governed loop for a mention in an existing governed thread', async () => {
       const { workspaceId, principalId } = await createFixtures()
       const auto = fakeAutonomous('not_autonomous')
@@ -2310,7 +2354,7 @@ describe('buildFinalReport: what the CAPABILITIES tell the operator, not what th
       notVerified: ['nothing was independently verified'],
       warnings: [],
       capabilityNotices: [],
-      capabilitiesUsed: ['browser'],
+      capabilitiesUsed: ['shell'],
       ...overrides,
     }
   }
@@ -2318,17 +2362,14 @@ describe('buildFinalReport: what the CAPABILITIES tell the operator, not what th
   const START = new Date('2026-08-11T00:00:00.000Z')
   const END = new Date('2026-08-11T00:00:30.000Z')
 
-  it('states that a page needed a human EVEN WHEN the model answered as though all was well', () => {
-    // The failure this prevents: FR-BR-8's detection reached the model and
-    // stopped there. A model that summarised the bot wall as if it were the
-    // page produced a report with no sign anything was wrong.
+  it('states that a step needed a human EVEN WHEN the model answered as though all was well', () => {
+    // The failure this prevents: a capability's own notice reached the model
+    // and stopped there. A model that summarised past it produced a report
+    // with no sign anything was wrong.
     const report = buildFinalReport(
       resultWith({
         answer: 'There are 4 pending invoices.',
-        capabilityNotices: [
-          'Acted in the "acme-client" browser profile on tier 2.',
-          'Human action needed on admin.acme.com, in the "acme-client" profile: captcha (likely, the page contains Google reCAPTCHA markup). Complete it yourself.',
-        ],
+        capabilityNotices: ['Human action needed on admin.acme.com: captcha. Complete it yourself.'],
       }),
       START,
       END,
@@ -2341,19 +2382,9 @@ describe('buildFinalReport: what the CAPABILITIES tell the operator, not what th
     expect(report.indexOf('Human action needed')).toBeGreaterThan(report.indexOf('Answer:'))
   })
 
-  it('FR-PRF-10: names the profile that acted', () => {
-    const report = buildFinalReport(
-      resultWith({ capabilityNotices: ['Acted in the "westside" browser profile on tier 2.'] }),
-      START,
-      END,
-    )
-
-    expect(report).toContain('"westside" browser profile')
-  })
-
   it('says a run with a mutating capability could have had real effects, rather than claiming nothing changed', () => {
     registerBuiltinCapabilities()
-    const report = buildFinalReport(resultWith({ capabilitiesUsed: ['browser'] }), START, END)
+    const report = buildFinalReport(resultWith({ capabilitiesUsed: ['shell'] }), START, END)
 
     expect(report).toContain('can have real effects outside Relay')
     expect(report).not.toContain("nothing on the operator's machine")

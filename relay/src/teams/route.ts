@@ -75,6 +75,8 @@ type Body<C extends Command> = z.infer<(typeof bodies)[C]>
 type Lead = { readonly role: 'lead'; readonly context: InvocationContext; readonly task: AutonomousTask }
 type Member = { readonly role: 'member'; readonly context: InvocationContext; readonly task: AutonomousTask; readonly assignment: Assignment; readonly leaseGeneration: number }
 
+export const READ_ONLY_TEAM_TEXT = 'This task was started by a reminder and is read-only, so it cannot run a team.'
+
 export function teamRoute(deps: TeamRouteDeps): BridgeRoute {
   return async (context, rawBody) => {
     const now = deps.now?.() ?? new Date()
@@ -87,6 +89,8 @@ export function teamRoute(deps: TeamRouteDeps): BridgeRoute {
     }
 
     const task = await loadTask(deps.pool, context.taskId)
+    // A reminder's read-only task never starts or runs a team, whatever reaches this route.
+    if (task?.readOnly === true) return refuse(403, READ_ONLY_TEAM_TEXT)
     let actor: Lead | Member
     if (role === 'lead') {
       const reason = notLiveReason(task, context, now)

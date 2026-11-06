@@ -23,12 +23,16 @@ const INTAKE_ATTEMPTS = 3
 const RETRY_DELAYS_MS = [250, 750]
 
 export const STOPPED_TEXT = 'This task is stopped.'
+export const REMINDER_NO_FOLDER_TEXT =
+  "I could not tell which folder this reminder is about. Name the repo in the reminder's text, or put the folder in this channel's description."
 
 export type RouterDeps = {
   pool: Pool
   outbox: IntakeOutbox
   /** The folder a new thread's chat runs in, from its first message. */
   chatFolder: (text: string) => string
+  /** The folder a reminder's text names, with no fallback: a reminder runs where it says or not at all. */
+  reminderFolder: (text: string) => string | undefined
   /** Tells the scheduler a task has new work. */
   wake: () => void
   log: Logger
@@ -51,6 +55,12 @@ export async function routeAutonomousEvent(
   // Before anything is stored: the token value never reaches the database.
   // Stored as the sender's words; the scheduler renders it for the worker as untrusted data.
   const text = unwrapForAudit(event.text)
+  const reminder = event.origin === 'reminder'
+  const chatCwd = options.chatCwd ?? (reminder ? deps.reminderFolder(text) : deps.chatFolder(text))
+  if (chatCwd === undefined) {
+    await deps.outbox.enqueue({ kind: 'post', ref: thread.replyRef, text: REMINDER_NO_FOLDER_TEXT }, event.workspaceId)
+    return 'handled'
+  }
 
   const result = await intakeWithRetry(deps, {
     workspaceId: event.workspaceId,
@@ -64,12 +74,15 @@ export async function routeAutonomousEvent(
       ref: event.ref,
       fileIds: event.files.map((file) => file.id),
       receivedAt: event.receivedAt,
+      ...(reminder ? { origin: 'reminder' as const } : {}),
     },
     replyRef: thread.replyRef,
     files: pendingFiles(event.files),
-    adopt: options.adopt === true,
+    // A reminder never adopts another session: it only ever starts its own read-only task.
+    adopt: options.adopt === true && !reminder,
     // A folder decided before routing (the channel's) wins over the message's.
-    chatCwd: options.chatCwd ?? deps.chatFolder(text),
+    chatCwd,
+    ...(reminder ? { readOnly: true } : {}),
   })
   if (result.kind === 'not_autonomous') return 'not_autonomous'
   if (result.kind === 'appended' && result.duplicate) return 'handled'

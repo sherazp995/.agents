@@ -1,4 +1,5 @@
 import { ErrorCode } from '@slack/web-api'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { unwrapForAudit } from '../../../src/agent/untrusted.js'
 import type { AdapterCapabilities, ChatAction, ChatActionResult, ChatEvent } from '../../../src/chat/contract.js'
@@ -43,6 +44,7 @@ import {
 import { encodeSessionAttachValue, SESSION_ATTACH_ACTION_ID } from '../../../src/chat/slack/session-attach.js'
 import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from '../../../src/chat/slack/session-attach.js'
 import type { EngineSession } from '../../../src/sessions/discovery.js'
+import { ReadOnlySessionError } from '../../../src/sessions/store.js'
 import type { ConformanceAdapter } from '../conformance.js'
 import { runChatAdapterConformance } from '../conformance.js'
 import { OWNER_ONLY_REPLY } from '../../../src/tenancy/access.js'
@@ -2876,21 +2878,51 @@ describe('SlackAdapter session attach (FR-ATT-5)', () => {
     })
     await adapter.start(async () => {})
 
-    // Only the session id, which is all the option value carries now.
+    // Only the session id, which is all the option value carries now. The
+    // picker is a reply in the thread the "sessions" message started, so the
+    // click's message has its own ts and the thread's ts as thread_ts.
     await boltApp.dispatchAction(
       SESSION_ATTACH_ACTION_ID,
-      sessionAttachSelectEnvelope({ engineSessionId: 'claude-sess-1' }),
+      sessionAttachSelectEnvelope({ engineSessionId: 'claude-sess-1' }, { message: { ts: '3000.000005', thread_ts: '3000.000001' } }),
     )
 
     expect(attach.calls).toEqual([
       {
-        threadRef: composeThreadRef('D1SESS', '3000.000005'),
+        // The thread the user replies in, not the picker message inside it.
+        threadRef: composeThreadRef('D1SESS', '3000.000001'),
         principalId: 'prn_operator',
         engineSessionId: 'claude-sess-1',
         // Re-derived from discovery by id, never taken from the payload.
         engineCwd: '/Users/operator/project-a',
       },
     ])
+    await adapter.stop()
+  })
+
+  it('posts the read-only refusal when the picked thread was started by a reminder, and attaches nothing', async () => {
+    const boltApp = new StubBoltApp()
+    const apiClient = new StubSlackApiClient()
+    const adapter = await createOwnerAdapter(fakeSecrets(bothTokens()), {
+      boltApp,
+      apiClient,
+      sleep: instantSleep,
+      resolvePrincipalId: async () => 'prn_operator',
+      listRecentSessions: async () => [buildSession({ sessionId: 'claude-sess-1' })],
+      attachThreadToSession: async () => {
+        throw new ReadOnlySessionError()
+      },
+    })
+    await adapter.start(async () => {})
+
+    await boltApp.dispatchAction(
+      SESSION_ATTACH_ACTION_ID,
+      sessionAttachSelectEnvelope({ engineSessionId: 'claude-sess-1' }, { message: { ts: '3000.000005', thread_ts: '3000.000001' } }),
+    )
+
+    expect(apiClient.posted).toHaveLength(1)
+    const rendered = (apiClient.posted[0]?.text ?? '') + JSON.stringify(apiClient.posted[0]?.blocks ?? [])
+    expect(rendered).toContain('started by a reminder and is read-only')
+    expect(rendered).not.toMatch(/unexpected error/)
     await adapter.stop()
   })
 
@@ -3143,5 +3175,134 @@ describe('SlackAdapter "direct" and "sessions" messages', () => {
     expect(requests).toEqual([])
     expect(delivered).toHaveLength(1)
     await adapter.stop()
+  })
+})
+
+describe('SlackAdapter Slackbot reminders (slack.reminders)', () => {
+  // The real reminder Slackbot posted in #cohabit-hassan, with this suite's bot id in place of the live one.
+  const fixture = JSON.parse(readFileSync(new URL('../../fixtures/slack/reminder-event.json', import.meta.url), 'utf8')) as {
+    channel: string
+    botUserId: string
+    reminderPosted: Record<string, unknown>
+  }
+  const CHANNEL = fixture.channel
+  const reminderEvent = (overrides: Record<string, unknown> = {}) => ({
+    ...fixture.reminderPosted,
+    text: String(fixture.reminderPosted.text).replace(fixture.botUserId, 'UBOTLIVE'),
+    channel: CHANNEL,
+    ...overrides,
+  })
+
+  async function start(options: SlackAdapterCreateOptions = {}) {
+    const boltApp = new StubBoltApp()
+    const principalLookups: string[] = []
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      boltApp,
+      apiClient: new StubSlackApiClient(),
+      sleep: instantSleep,
+      reminderChannels: new Map([[CHANNEL, 'UOWNER']]),
+      isOwner: async (user) => user === 'UOWNER',
+      resolvePrincipalId: async (user) => {
+        principalLookups.push(user)
+        return user === 'UOWNER' ? 'prn_owner' : null
+      },
+      ...options,
+    })
+    const events: ChatEvent[] = []
+    await adapter.start(async (event) => {
+      events.push(event)
+    })
+    return { boltApp, events, principalLookups, stop: () => adapter.stop() }
+  }
+
+  it('turns the real reminder into one reminder event run as the configured owner, whichever subscription delivers it first', async () => {
+    for (const order of [['message', 'app_mention'], ['app_mention', 'message']]) {
+      const { boltApp, events, principalLookups, stop } = await start()
+      try {
+        for (const type of order) await boltApp.dispatch(type, { event: { ...reminderEvent(), type }, body: {} })
+        expect(events).toHaveLength(1)
+        expect(events[0]).toMatchObject({ principalId: 'prn_owner', origin: 'reminder', kind: 'message', ref: { channel: CHANNEL, message: fixture.reminderPosted.ts } })
+        expect(principalLookups).toEqual(['UOWNER'])
+      } finally {
+        await stop()
+      }
+    }
+  })
+
+  it('posts "could not start" under the reminder when intake fails, and takes a redelivery of it again', async () => {
+    const boltApp = new StubBoltApp()
+    const apiClient = new StubSlackApiClient()
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      boltApp,
+      apiClient,
+      sleep: instantSleep,
+      reminderChannels: new Map([[CHANNEL, 'UOWNER']]),
+      isOwner: async (user) => user === 'UOWNER',
+      resolvePrincipalId: async () => 'prn_owner',
+    })
+    let calls = 0
+    await adapter.start(async () => {
+      calls += 1
+      if (calls === 1) throw new IntakeFailedError('store down')
+    })
+    try {
+      await boltApp.dispatch('message', { event: { ...reminderEvent(), type: 'message' }, body: {} })
+      expect(apiClient.posted).toEqual([expect.objectContaining({ channel: CHANNEL, thread: fixture.reminderPosted.ts, text: 'I could not start this task, mention me again.' })])
+
+      await boltApp.dispatch('message', { event: { ...reminderEvent(), type: 'message' }, body: {} })
+      expect(calls).toBe(2)
+    } finally {
+      await adapter.stop()
+    }
+  })
+
+  it('ignores the same reminder in another channel, as a thread reply, with plain "@Relay" text, or as an edit', async () => {
+    const { boltApp, events, stop } = await start()
+    try {
+      const ts = String(fixture.reminderPosted.ts)
+      for (const event of [
+        reminderEvent({ channel: 'COTHER1' }),
+        reminderEvent({ thread_ts: '1.000001' }),
+        reminderEvent({ text: 'Reminder: @Relay: give me today’s status update.' }),
+        reminderEvent({ subtype: 'message_changed' }),
+        reminderEvent({ metadata: { event_type: 'something_else' } }),
+      ]) {
+        await boltApp.dispatch('message', { event: { ...event, type: 'message', ts }, body: {} })
+      }
+      expect(events).toEqual([])
+    } finally {
+      await stop()
+    }
+  })
+
+  it('ignores a Slackbot auto-response that mentions Relay but is not a reminder, and a person\'s message with no mention', async () => {
+    const { boltApp, events, stop } = await start()
+    try {
+      await boltApp.dispatch('message', { event: reminderEvent({ text: '<@UBOTLIVE> run the deploy', metadata: undefined, ts: '9.000001' }), body: {} })
+      await boltApp.dispatch('message', { event: { type: 'message', channel: CHANNEL, user: 'UOWNER', text: 'Reminder: no mention', ts: '9.000002' }, body: {} })
+      expect(events).toEqual([])
+    } finally {
+      await stop()
+    }
+  })
+
+  it('drops a reminder whose configured user is no longer an owner', async () => {
+    const { boltApp, events, stop } = await start({ isOwner: async () => false })
+    try {
+      await boltApp.dispatch('message', { event: reminderEvent(), body: {} })
+      expect(events).toEqual([])
+    } finally {
+      await stop()
+    }
+  })
+
+  it('takes no reminder when no channel is configured', async () => {
+    const { boltApp, events, stop } = await start({ reminderChannels: new Map() })
+    try {
+      await boltApp.dispatch('message', { event: reminderEvent(), body: {} })
+      expect(events).toEqual([])
+    } finally {
+      await stop()
+    }
   })
 })

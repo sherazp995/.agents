@@ -39,6 +39,7 @@ import {
 import { handleApprovalButton, handleConfirmModalSubmission, handleEditModalSubmission } from './approval-interactions.js'
 import type { ApprovalInteractionContext } from './approval-interactions.js'
 import { buildChatFiles, composeThreadRef, IGNORED_MESSAGE_SUBTYPES, RecentEventWindow } from './events.js'
+import { reminderActAs, type ReminderChannels } from './reminder.js'
 import type {
   DirectCommandRequest,
   SlackAdapterCreateOptions,
@@ -157,6 +158,8 @@ export class SlackAdapter implements ChatAdapter {
   readonly #resolvePrincipalId: (platformUserId: string) => Promise<string | null>
   readonly #isKnownSession: (threadRef: string) => Promise<boolean>
   readonly #acceptThreadMentions: boolean
+  readonly #reminderChannels: ReminderChannels
+  readonly #isOwner: (platformUserId: string) => Promise<boolean>
   readonly #onDirectCommand: (request: DirectCommandRequest) => Promise<void>
   readonly #sleep: (ms: number) => Promise<void>
   readonly #maxRateLimitRetries: number
@@ -187,6 +190,8 @@ export class SlackAdapter implements ChatAdapter {
     this.#resolvePrincipalId = deps.resolvePrincipalId
     this.#isKnownSession = deps.isKnownSession
     this.#acceptThreadMentions = deps.acceptThreadMentions
+    this.#reminderChannels = deps.reminderChannels
+    this.#isOwner = deps.isOwner
     this.#onDirectCommand = deps.onDirectCommand
     this.#sleep = deps.sleep
     this.#maxRateLimitRetries = deps.maxRateLimitRetries
@@ -245,6 +250,7 @@ export class SlackAdapter implements ChatAdapter {
       isOwner: options.isOwner ?? (async () => false),
       isKnownSession: options.isKnownSession ?? (async () => false),
       acceptThreadMentions: options.acceptThreadMentions ?? false,
+      reminderChannels: options.reminderChannels ?? new Map(),
       resolveApprovalInteraction: options.resolveApprovalInteraction ?? (async () => undefined),
       listRecentSessions: options.listRecentSessions ?? (async () => []),
       // Refuses rather than silently doing nothing when no handler is
@@ -512,6 +518,11 @@ export class SlackAdapter implements ChatAdapter {
     // first meant one housekeeping envelope could burn it and silently drop
     // the real user message that followed, with no error anywhere: a
     // dropped prompt, indistinguishable from Relay ignoring someone.
+    const reminderUser = reminderActAs(event, { channel, ts, botUserId: this.#botUserId, channels: this.#reminderChannels })
+    if (reminderUser !== undefined) {
+      await this.#handleReminder(event, channel, ts, reminderUser)
+      return
+    }
     if (this.#shouldIgnore(event)) return
     if (!(await this.#isChannelEntryAllowed(event, channel, ts, eventType))) return
 
@@ -593,6 +604,33 @@ export class SlackAdapter implements ChatAdapter {
       await dispatch(chatEvent)
     } catch {
       // Only an IntakeFailedError reaches here (see start()).
+      this.#recentEvents.delete(dedupeKey)
+      await this.#postCouldNotStart(chatEvent)
+    }
+  }
+
+  /**
+   * A Slackbot reminder (src/chat/slack/reminder.ts): delivered as a new
+   * message from the user the channel's config names, marked as a reminder
+   * so it starts a read-only task. Only an owner may be named; a reminder
+   * for anyone else is dropped with a log line. Stop, "sessions" and
+   * "direct" are never read from a reminder: those paths have no read-only
+   * limit. The dedupe and its recheck match the ordinary path below.
+   */
+  async #handleReminder(event: SlackRawEvent, channel: string, ts: string, actAs: string): Promise<void> {
+    const dedupeKey = `${channel}:${ts}`
+    if (this.#recentEvents.has(dedupeKey)) return
+    if (!(await this.#isOwner(actAs))) {
+      this.#log?.warn({ channel, platformUserId: actAs }, 'SlackAdapter: ignored a Slackbot reminder; slack.reminders names a user who is not an owner')
+      return
+    }
+    const chatEvent = await this.#buildChatEvent(event, channel, ts, actAs)
+    const dispatch = this.#dispatch
+    if (!dispatch || this.#recentEvents.has(dedupeKey)) return
+    this.#recentEvents.add(dedupeKey)
+    try {
+      await dispatch(chatEvent)
+    } catch {
       this.#recentEvents.delete(dedupeKey)
       await this.#postCouldNotStart(chatEvent)
     }
@@ -723,13 +761,13 @@ export class SlackAdapter implements ChatAdapter {
    * root instead of opening a thread. `sessionRefFor` in contract.ts is the
    * one place that turns this ref into "where the reply goes."
    */
-  async #buildChatEvent(event: SlackRawEvent, channel: string, ts: string): Promise<ChatEvent> {
+  async #buildChatEvent(event: SlackRawEvent, channel: string, ts: string, reminderActAs?: string): Promise<ChatEvent> {
     const threadTs = typeof event.thread_ts === 'string' ? event.thread_ts : undefined
     const isThreadReply = threadTs !== undefined && threadTs !== ts
     const kind: ChatEventKind = isThreadReply ? 'thread_reply' : 'message'
     const ref: ChatRef = isThreadReply && threadTs !== undefined ? { channel, thread: threadTs, message: ts } : { channel, message: ts }
 
-    const userId = typeof event.user === 'string' ? event.user : undefined
+    const userId = reminderActAs ?? (typeof event.user === 'string' ? event.user : undefined)
     const principalId = userId ? await this.#resolvePrincipalId(userId) : null
 
     return {
@@ -745,6 +783,7 @@ export class SlackAdapter implements ChatAdapter {
       receivedAt: new Date().toISOString(),
       mentionsBot: typeof event.text === 'string' && mentionsUser(event.text, this.#botUserId),
       platformEventId: `${channel}:${ts}`,
+      ...(reminderActAs !== undefined ? { origin: 'reminder' as const } : {}),
     }
   }
 

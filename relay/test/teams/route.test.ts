@@ -10,7 +10,7 @@ import { closePool, createPool } from '../../src/db/pool.js'
 import type { InvocationContext } from '../../src/engine/hook-bridge.js'
 import type { RepoEntry } from '../../src/repos/schema.js'
 import { runTeamCommand, SAFE_TO_RETRY } from '../../src/cli/team.js'
-import { teamRoute } from '../../src/teams/route.js'
+import { READ_ONLY_TEAM_TEXT, teamRoute } from '../../src/teams/route.js'
 import { acquireAssignmentLease, cancelTaskAssignments, insertAssignment, listRunAssignments, loadAssignment, loadOpenRun } from '../../src/teams/store.js'
 import { TEAM_COMMANDS } from '../../src/teams/types.js'
 import { ensureMemberWorktree } from '../../src/teams/worktrees.js'
@@ -146,6 +146,14 @@ describe('the /team route', () => {
     expect((await call(lead, { command: 'status' })).status).toBe(200)
     expect((await call({ ...lead, workspaceId: 'probe' }, { command: 'status' })).status).toBe(403)
     expect((await call(lead, { command: 'rm' })).status).toBe(400)
+  })
+
+  it("refuses every team command from a reminder's read-only task", async () => {
+    const { call, lead } = await setup()
+    await pool.query('UPDATE autonomous_tasks SET read_only = true WHERE id = $1', [lead.taskId])
+    for (const body of [{ command: 'status' }, { command: 'start', title: 'x' }]) {
+      expect(await call(lead, body)).toMatchObject({ status: 403, body: { message: READ_ONLY_TEAM_TEXT } })
+    }
   })
 
   it('refuses a stale lead lease, a released one and a cancelled task', async () => {

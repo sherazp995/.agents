@@ -87,6 +87,14 @@ export class FolderQuestions {
     return this.#ask(threadRef, principalId, request, found.path, 'description')
   }
 
+  /** The channel's project or described folder when it exists on this machine; never asks, for a request no one is there to answer (a reminder). */
+  async existingChannelFolder(channel: string): Promise<string | undefined> {
+    const project = await this.#projectFolder(channel)
+    if (project !== undefined) return isFolder(project) ? project : undefined
+    const found = await this.#lookup(channel)
+    return found.kind === 'folder' && isFolder(found.path) ? found.path : undefined
+  }
+
   #ask(threadRef: string, principalId: string, request: WaitingRequest, missing: string, source: 'description' | 'project'): NewThreadFolder {
     this.#prune()
     this.#waiting.set(threadRef, { request, principalId, expiresAt: this.#now() + WAITING_TTL_MS })

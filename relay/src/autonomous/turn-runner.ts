@@ -66,6 +66,15 @@ export function taskSubject(task: TurnRequestContext['task']): TurnSubject {
   }
 }
 
+/**
+ * A reminder's read-only task: the task's own session, on Claude logins only,
+ * with no MCP servers, whatever a project's lead would otherwise make it.
+ * The tool limits (the guard and the all-tools hook) are built for Claude.
+ */
+export function readOnlySubject(task: TurnRequestContext['task']): TurnSubject {
+  return { ...taskSubject(task), preference: null, client: 'claude', noMcp: true }
+}
+
 export type SpawnPlanParams = {
   context: TurnRequestContext
   subject: TurnSubject
@@ -119,7 +128,8 @@ function preferenceOf(value: string | null): AccountClient | null {
 }
 
 export async function runTurnOnPool(deps: TurnRunnerDeps, context: TurnRequestContext): Promise<TurnResult> {
-  const subject = context.subject ?? taskSubject(context.task)
+  // Bound here, where every turn passes, so no caller's subject can lift a read-only task's limits.
+  const subject = context.task.readOnly ? readOnlySubject(context.task) : (context.subject ?? taskSubject(context.task))
   const pool = await deps.readAccounts()
   // The account holding the session goes first, so a resume stays possible.
   const ordered = orderForSubject(pool, subject)

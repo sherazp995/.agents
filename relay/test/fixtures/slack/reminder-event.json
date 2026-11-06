@@ -1,0 +1,48 @@
+{
+  "_note": "Real Slack messages from conversations.history in #cohabit-hassan (C0CDW07KZ27), 2026-11-06. reminderPosted is what Slackbot posts when a channel reminder fires; reminderAdd is the confirmation posted when a user sets one. No tokens are present.",
+  "channel": "C0CDW07KZ27",
+  "botUserId": "U0BNWUW36CE",
+  "reminderPosted": {
+    "user": "USLACKBOT",
+    "type": "message",
+    "ts": "1793976790.513539",
+    "bot_id": "B01",
+    "text": "Reminder: <@U0BNWUW36CE|relay>: give me today’s status update for hassan in cohabit.",
+    "team": "T0BPT8LQQ80",
+    "metadata": {
+      "event_type": "slack_system.reminders.posted_in_channel"
+    },
+    "blocks": [
+      {
+        "type": "rich_text",
+        "block_id": "A2z",
+        "elements": [
+          {
+            "type": "rich_text_section",
+            "elements": [
+              {
+                "type": "text",
+                "text": "Reminder: "
+              },
+              {
+                "type": "user",
+                "user_id": "U0BNWUW36CE"
+              },
+              {
+                "type": "text",
+                "text": ": give me today’s status update for hassan in cohabit."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "reminderAdd": {
+    "subtype": "reminder_add",
+    "user": "U0BP0RW8FCH",
+    "type": "message",
+    "ts": "1793976839.444309",
+    "text": " set up a reminder “@Relay: give me today’s status update for hassan in cohabit” in this channel at 19:30 every weekday, Pakistan Standard Time."
+  }
+}

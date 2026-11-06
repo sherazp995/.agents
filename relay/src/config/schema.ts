@@ -315,6 +315,33 @@ export const relayConfigSchema = z
         .strict()
         .optional(),
     ),
+    // Slackbot channel reminders Relay takes (src/chat/slack/reminder.ts):
+    // each channel with the Slack user, an owner, the reminder runs as. A
+    // reminder carries no author, so whoever can set one in a listed channel
+    // makes Relay run as that user; the task it starts is read-only. Needs
+    // autonomous mode. Absent means no reminder is taken.
+    slack: z
+      .object({
+        reminders: z
+          .array(
+            z
+              .object({
+                channel: z.string().regex(/^[CG][A-Z0-9]+$/, 'a Slack channel id, like C0123ABC (not a name or a DM)'),
+                act_as: z.string().regex(/^[UW][A-Z0-9]+$/, 'a Slack user id, like U0123ABC'),
+              })
+              .strict(),
+          )
+          .default([])
+          .superRefine((entries, ctx) => {
+            const seen = new Set<string>()
+            entries.forEach((entry, index) => {
+              if (seen.has(entry.channel)) ctx.addIssue({ code: 'custom', path: [index, 'channel'], message: `channel ${entry.channel} is listed twice` })
+              seen.add(entry.channel)
+            })
+          }),
+      })
+      .strict()
+      .optional(),
     // The local setup page (relay ui): projects, the persona library and
     // teams. Bound to 127.0.0.1 only; the fixed port lets `relay ui` build
     // the login link. Absent means on, at the default port.

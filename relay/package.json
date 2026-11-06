@@ -18,7 +18,6 @@
     "dist/src",
     "dist/scripts",
     "dist/egress-audit.json",
-    "config/profiles.example.yaml",
     "docs/slack-app-manifest.yaml",
     "README.md"
   ],

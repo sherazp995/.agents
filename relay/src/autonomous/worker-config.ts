@@ -31,10 +31,13 @@ export type HookCommandParams = {
   hookCommand: string
 }
 
-export function buildClaudeSettings(params: HookCommandParams): string {
+/** Claude's hook for a read-only task sees every tool call, not only Bash, so the guard can refuse the ones that write. */
+export type ClaudeSettingsParams = HookCommandParams & { allTools?: boolean }
+
+export function buildClaudeSettings(params: ClaudeSettingsParams): string {
   return JSON.stringify({
     hooks: {
-      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: params.hookCommand, timeout: HOOK_TIMEOUT_SECONDS }] }],
+      PreToolUse: [{ matcher: params.allTools === true ? '*' : 'Bash', hooks: [{ type: 'command', command: params.hookCommand, timeout: HOOK_TIMEOUT_SECONDS }] }],
     },
   })
 }

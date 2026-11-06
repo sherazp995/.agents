@@ -12,8 +12,6 @@ import './checks/slack.js'
 // registerBuiltinCapabilities() (src/capabilities/wiring.js). See that
 // check's own doc comment for why this exists.
 import './checks/capabilities.js'
-// Same pattern again: adds the 'profiles' check, FR-PRF-6a.
-import './checks/profiles.js'
 // Same pattern again: adds the 'egress' check, FR-DATA-14.
 import './checks/egress.js'
 // Same pattern again: adds the 'sandbox' check, FR-SH-7. It runs the real

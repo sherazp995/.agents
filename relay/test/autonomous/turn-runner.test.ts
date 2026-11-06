@@ -199,4 +199,14 @@ describe('turn runner', () => {
     expect(await runTurnOnPool(d, ctx)).toMatchObject({ kind: 'outcome', accountKey: 'codex1' })
     expect(contexts[0]).not.toHaveProperty('assignment')
   })
+
+  it("binds a reminder's read-only task to Claude with no MCP servers, even when a project lead's subject would pick Codex", async () => {
+    const ctx = await context()
+    const readOnly = { ...ctx, task: { ...ctx.task, readOnly: true }, subject: { ...taskSubject(ctx.task), client: 'codex' as const, noMcp: false, brief: 'You lead the team.' } }
+    const { d, plans } = deps([() => REPLY])
+
+    await runTurnOnPool(d, readOnly)
+
+    expect(plans.map((plan) => [plan.account.client, plan.subject.client, plan.subject.noMcp, plan.subject.brief])).toEqual([['claude', 'claude', true, null]])
+  })
 })

@@ -35,6 +35,8 @@ export type TaskEvent = {
   ref: ChatRef
   fileIds: string[]
   receivedAt: string
+  /** Set when a Slackbot reminder sent it; its principal is then the owner the channel's config names. */
+  origin?: 'reminder'
 }
 
 export type TaskFile = {
@@ -61,6 +63,8 @@ export type AutonomousTask = {
   /** The Claude Code chat this task took over (see migration 0025), and its folder. */
   chatSessionId: string | null
   chatCwd: string | null
+  /** Started by a Slackbot reminder: reading tools only, for the task's whole life (migration 0029). */
+  readOnly: boolean
   pendingEvents: TaskEvent[]
   /** Relay's notes for the next turn, oldest first. */
   pendingNotes: string[]
@@ -85,6 +89,7 @@ type TaskRow = {
   engine_session_id: string | null
   chat_session_id: string | null
   chat_cwd: string | null
+  read_only: boolean
   pending_events: TaskEvent[]
   pending_notes: string[]
   files: TaskFile[]
@@ -109,6 +114,7 @@ function toTask(row: TaskRow): AutonomousTask {
     engineSessionId: row.engine_session_id,
     chatSessionId: row.chat_session_id,
     chatCwd: row.chat_cwd,
+    readOnly: row.read_only,
     pendingEvents: row.pending_events,
     pendingNotes: row.pending_notes,
     files: row.files,
@@ -136,6 +142,8 @@ export type IntakeMentionParams = FindOrCreateSessionParams & {
   adopt?: boolean
   /** The folder a new task's chat runs in; a taken-over chat keeps its own. */
   chatCwd?: string
+  /** A Slackbot reminder: it only ever creates a new read-only task, never joins or adopts an existing session. */
+  readOnly?: boolean
 }
 
 type TakenOverChat = { sessionId: string; cwd: string }
@@ -152,23 +160,27 @@ export type IntakeResult =
  *     own first reply);
  *   - an active autonomous session: appends the event (once per event id)
  *     and any new files;
- *   - an active governed, direct or live-controlled session: changes nothing.
+ *   - an active governed, direct or live-controlled session: changes nothing;
+ *   - a read-only (reminder) intake whose thread already has a session:
+ *     changes nothing, so a reminder never joins or adopts another task.
  */
 export async function intakeMention(pool: Pool, params: IntakeMentionParams): Promise<IntakeResult> {
   return inTransaction(pool, async (client) => {
     const createTask = async (session: Session, chat: TakenOverChat | null = null): Promise<IntakeResult> => {
       const { rows } = await client.query<TaskRow>(
         `INSERT INTO autonomous_tasks (workspace_id, session_id, requester_principal_id, pending_events, files, seen_event_ids, next_wakeup_at,
-                                       chat_session_id, chat_cwd, engine_session_id)
-         VALUES ($1, $2, $3, $4, $5, ARRAY[$6], now(), $7, $8, $7)
+                                       chat_session_id, chat_cwd, engine_session_id, read_only)
+         VALUES ($1, $2, $3, $4, $5, ARRAY[$6], now(), $7, $8, $7, $9)
          RETURNING *`,
-        [params.workspaceId, session.id, params.principalId, JSON.stringify([params.event]), JSON.stringify(params.files), params.event.id, chat?.sessionId ?? null, chat?.cwd ?? params.chatCwd ?? null],
+        [params.workspaceId, session.id, params.principalId, JSON.stringify([params.event]), JSON.stringify(params.files), params.event.id, chat?.sessionId ?? null, chat?.cwd ?? params.chatCwd ?? null, params.readOnly === true],
       )
       return { kind: 'created', task: toTask(requireRow(rows[0])), session }
     }
 
     const session = await insertActiveSession(client, params, 'autonomous')
     if (session) return createTask(session)
+    // A reminder's thread is new; one that already has a session (a redelivery) starts nothing.
+    if (params.readOnly === true) return { kind: 'not_autonomous' }
 
     const { rows: sessions } = await client.query<SessionRow>(
       `SELECT * FROM sessions

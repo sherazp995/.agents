@@ -60,8 +60,8 @@ describe('FR-SH-2: reading outside the roots is refused by default', () => {
   })
 
   it('refuses a SIBLING whose name merely starts with the root, not a path boundary', async () => {
-    // `/work/project-secrets` starts with `/work/project`. This project has
-    // already shipped that exact bug once, in profile-clone.
+    // `/work/project-secrets` starts with `/work/project`, a different
+    // directory that merely shares a prefix.
     expect(isInside('/work/project', '/work/project-secrets')).toBe(false)
     expect(isInside('/work/project', '/work/project/src')).toBe(true)
     expect(isInside('/work/project', '/work/project')).toBe(true)

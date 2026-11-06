@@ -3,7 +3,7 @@ import type { Account } from '../../src/autonomous/accounts.js'
 import { WORKER_BRIEF } from '../../src/autonomous/prompt.js'
 import { buildSpawnPlan, withTeamStop } from '../../src/autonomous/runtime.js'
 import type { AutonomousTask } from '../../src/autonomous/store.js'
-import { taskSubject, type SpawnPlanParams } from '../../src/autonomous/turn-runner.js'
+import { taskSubject, type SpawnPlanParams, type TurnSubject } from '../../src/autonomous/turn-runner.js'
 import { buildClaudeSettings, buildCodexHookOverrides } from '../../src/autonomous/worker-config.js'
 
 const CLAUDE: Account = { key: 'claude', client: 'claude', configDir: null, env: {} }
@@ -45,11 +45,50 @@ describe('the spawn plan', () => {
   })
 })
 
+describe("the spawn plan and the channel's extension token", () => {
+  it("gives the thread's own worker the token, on Claude and on Codex, in its environment and never its arguments", () => {
+    for (const account of [CLAUDE, CODEX]) {
+      const plan = buildSpawnPlan(SETUP, params(account), 'channel-token-456')
+      expect(plan.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBe('channel-token-456')
+      expect(plan.args.join(' ')).not.toContain('channel-token-456')
+    }
+  })
+
+  it('gives a team member none, since it runs with no MCP servers but could still read its environment', () => {
+    const member = { ...taskSubject(task), cwd: '/wt/a1', brief: 'You are Theo.', model: null, noMcp: true }
+    expect(buildSpawnPlan(SETUP, params(CLAUDE, member), 'channel-token-456').env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
+  })
+})
+
 describe("Stop's cleanup", () => {
   it("stops the task's team members before the rest of the cleanup", async () => {
     const calls: string[] = []
     const cleanup = withTeamStop({ stopTask: async (taskId) => void calls.push(`team:${taskId}`) }, async (stopped) => void calls.push(`ops:${stopped.id}`))
     await cleanup(task)
     expect(calls).toEqual(['team:t', 'ops:t'])
+  })
+})
+
+describe("the spawn plan for a reminder's read-only task", () => {
+  const readOnly = { ...task, readOnly: true } as AutonomousTask
+  const readOnlyParams = (account: Account, subject: TurnSubject = { ...taskSubject(readOnly), client: 'claude', noMcp: true }): SpawnPlanParams => ({
+    ...params(account, subject),
+    context: { ...params(account).context, task: readOnly },
+  })
+
+  it('runs Claude with no MCP servers and the hook on every tool, not only Bash', () => {
+    const plan = buildSpawnPlan(SETUP, readOnlyParams(CLAUDE))
+    expect(plan.args).toEqual(expect.arrayContaining(['--strict-mcp-config', '--settings', buildClaudeSettings({ hookCommand: 'hook', allTools: true })]))
+    expect(JSON.parse(buildClaudeSettings({ hookCommand: 'hook', allTools: true })).hooks.PreToolUse[0].matcher).toBe('*')
+    expect(JSON.parse(buildClaudeSettings({ hookCommand: 'hook' })).hooks.PreToolUse[0].matcher).toBe('Bash')
+  })
+
+  it('gives it no extension token, even when one is passed', () => {
+    expect(buildSpawnPlan(SETUP, readOnlyParams(CLAUDE), 'channel-token-456').env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
+  })
+
+  it('refuses a plan on Codex or with MCP servers', () => {
+    expect(() => buildSpawnPlan(SETUP, readOnlyParams(CODEX))).toThrow('read-only')
+    expect(() => buildSpawnPlan(SETUP, readOnlyParams(CLAUDE, taskSubject(readOnly)))).toThrow('read-only')
   })
 })

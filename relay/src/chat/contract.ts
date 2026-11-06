@@ -99,6 +99,8 @@ export type ChatEvent = {
   mentionsBot: boolean
   /** `<channel>:<ts>`: the same key the adapter dedupes on, so the paired envelopes of one mention share it. */
   platformEventId: string
+  /** Set on a Slackbot reminder (src/chat/slack/reminder.ts): the task it starts is read-only for its whole life. */
+  origin?: 'reminder'
 }
 
 /**

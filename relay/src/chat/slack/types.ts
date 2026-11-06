@@ -10,6 +10,7 @@ import type { Logger } from '../../obs/logger.js'
 import type { EngineSession } from '../../sessions/discovery.js'
 import type { AdapterCapabilities } from '../contract.js'
 import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from './session-attach.js'
+import type { ReminderChannels } from './reminder.js'
 
 // ---------------------------------------------------------------------------
 // The two seams: SlackBoltApp (inbound) and SlackApiClient (outbound).
@@ -55,7 +56,8 @@ export type SlackBlockActionEnvelope = {
   actions: SlackBlockActionElement[]
   user: { id: string }
   channel?: { id: string }
-  message?: { ts: string }
+  /** The clicked message; `thread_ts` is set when it is a reply in a thread, as the session picker always is. */
+  message?: { ts: string; thread_ts?: string }
   trigger_id?: string
 }
 export type SlackActionListener = (envelope: SlackBlockActionEnvelope) => Promise<void>
@@ -211,6 +213,8 @@ export type SlackAdapterOptions = {
    * `autonomous.enabled`.
    */
   acceptThreadMentions?: boolean
+  /** Channels whose Slackbot reminders Relay takes, each with the owner it runs as (config `slack.reminders`, src/chat/slack/reminder.ts). None by default. */
+  reminderChannels?: ReminderChannels
   /**
    * Resolves a Block Kit approval interaction (a button click or a modal
    * submission), per the Task 4 brief's "receive Block Kit interactions."
@@ -281,6 +285,7 @@ export type SlackAdapterDeps = {
   isOwner: (platformUserId: string) => Promise<boolean>
   isKnownSession: (threadRef: string) => Promise<boolean>
   acceptThreadMentions: boolean
+  reminderChannels: ReminderChannels
   resolveApprovalInteraction: (request: ApprovalInteractionRequest) => Promise<ResolveApprovalResult | undefined>
   listRecentSessions: (limit: number) => Promise<readonly EngineSession[]>
   onDirectCommand: (request: DirectCommandRequest) => Promise<void>

@@ -9,7 +9,6 @@ There is no API key to supply, and adding one is not a supported shortcut.
 ```
 you (Slack)  ──▶  Relay daemon  ──▶  claude -p (headless)
                        │                    │
-                       │                    ├── browser, in a scoped Chrome profile
                        │                    └── shell, git, files
                        └──▶  policy, approvals, budget, audit
 ```
@@ -18,8 +17,8 @@ you (Slack)  ──▶  Relay daemon  ──▶  claude -p (headless)
 
 ## Before you start
 
-**macOS is the fully supported platform.** Linux runs Slack, approvals and
-the browser, with `secrets.provider: libsecret` (the Secret Service, through
+**macOS is the fully supported platform.** Linux runs Slack and approvals,
+with `secrets.provider: libsecret` (the Secret Service, through
 `secret-tool`), and `relay setup` works the same there. What Linux
 does not have is the sandbox, which is built on macOS `sandbox-exec`, so
 `shell` calls there fail closed rather than running unconfined (FR-SH-7).
@@ -38,7 +37,6 @@ You need:
 | pnpm | `npm i -g pnpm` |
 | Postgres 17 and Redis | the system services (Homebrew), see below |
 | Claude Code CLI | signed in; Relay spawns it |
-| Google Chrome | only if you want the browser capability |
 
 ---
 
@@ -234,9 +232,7 @@ relay init --yes    # writes starter config and policy (relay setup does this to
 relay doctor        # every dependency, truthfully
 ```
 
-`doctor` reports what is actually true rather than what is configured. No
-profiles configured is reported as `ok`, because a browser call is then
-refused with a clear reason, which is a safe state and not a broken one.
+`doctor` reports what is actually true rather than what is configured.
 
 ### Run it
 
@@ -305,6 +301,28 @@ request starts in it, in the mode you asked for; reply "stop" to drop it.
 The waiting request lives in memory, so after a Relay restart send it
 again. A channel whose description names no folder, and a DM, work as
 before.
+
+### A Playwright extension token per channel
+
+Add a line `PLAYWRIGHT_MCP_EXTENSION_TOKEN=<token>` to a channel's
+description, and the workers Relay starts for that channel's threads get
+that token, so the `playwright-extension` server drives the Chrome it
+belongs to. The first such line counts; quotes or backticks around the
+value are dropped.
+
+- Relay reads the description when a worker starts and again before a new
+  message joins a running worker. Remove or change the line, and the next
+  message waits for a new worker started with the current description.
+- A channel without the line, a DM, or a description Relay cannot read
+  starts a default session with no token. A token the daemon itself was
+  started with is never passed on.
+- Team members and read-only reminder tasks run with no MCP servers and
+  never get the token. Attached CLI chats are not covered: they run on your
+  own environment.
+- The token is scrubbed from what Relay posts and logs, but not from the
+  worker's own transcript (`~/.claude*/projects/`).
+- Anyone who can see the channel can read its description, and so the
+  token. Use a private channel for it.
 
 ### Projects, personas and teams (setup page)
 
@@ -384,42 +402,26 @@ between them. An app made from an older manifest still has `/relay`,
 
 ---
 
-## Browser profiles
+## Reminders
 
-Relay will not touch your everyday Chrome. Chrome 136 and later ignore
-remote-debugging switches for the default user-data directory, and a
-user-data directory permits only one running browser instance, which yours
-already holds. So Relay drives a **dedicated** directory.
+A Slack channel reminder that mentions Relay (`/remind #channel "@Relay give me today's status update" every weekday at 7:45am`) fires as a Slackbot message. Relay takes it only in a channel listed under `slack.reminders` in `config/relay.config.yaml`, each with the owner it runs as. Autonomous mode must be on. It answers in a thread on the reminder, like a mention.
 
-The quickest route keeps your existing logins. Quit Chrome fully first, with
-Cmd-Q rather than closing the windows: its cookie store is live SQLite, and
-copying it mid-write yields a clone that is silently signed out.
-
-```bash
-node dist/src/cli.js profile-list                       # folder names Chrome never shows you
-node dist/src/cli.js profile-clone --from "Profile 3" --to acme --origin acme.com
-node dist/src/cli.js profile-registry                   # what is registered, and what it may reach
+```yaml
+slack:
+  reminders:
+    - channel: C0CDW07KZ27 # a channel id, not a name
+      act_as: U0BP0RW8FCH  # an owner's Slack user id
 ```
 
-Cloning copies cookies and saved passwords to a second place on disk, which
-Relay then drives unattended. Delete the directory under `~/chrome-profiles`
-to revoke it.
+The reminder must be posted by Slackbot, start with "Reminder: " and carry Relay's real mention. Edits, thread replies and Slackbot auto-responses are ignored. It runs in the folder the channel's project or description names, or a repository the text names; if neither is set, it replies that it could not pick a folder. It never asks.
 
-Starting with no login instead:
+A reminder carries no author, so **anyone who can set a reminder in a listed channel makes Relay run as that owner**. That is why the task it starts is read-only for its whole life, including later replies in its thread:
 
-```bash
-node dist/src/cli.js profile-add acme --dir ~/chrome-profiles/acme --origin acme.com
-node dist/src/cli.js profile-login acme     # sign in by hand, then quit the window
-```
+- Claude only, with no MCP servers. Only reading tools are allowed (Read, Glob, Grep, Bash, Skill, Task and similar); Edit, Write and every MCP tool are refused.
+- Pushes, GitHub writes and every `relay` command are refused with no approval card. Relay's team and team-proposal routes refuse the task too.
+- The thread can't be attached to a terminal chat, and its messages never go to one.
 
-Widen an allowlist as real tasks hit it:
-
-```bash
-node dist/src/cli.js profile-origins acme --allow billing.acme.com
-```
-
-`config/profiles.yaml` is gitignored. It names real clients and points at
-directories holding copies of their cookies.
+This is a guard, not a sandbox. Bash is allowed so the task can read GitHub and git, and a script the chat writes could still change files or use your GitHub login. List only channels you trust.
 
 ---
 
@@ -427,15 +429,8 @@ directories holding copies of their cookies.
 
 Worth reading before you trust it with anything.
 
-- **Origin scoping on tier 2 is prevented, not detected.** Every request a
-  driven page makes is paused at the CDP `Fetch` layer and checked against
-  the profile's allowlist before it leaves the browser. Popups the page opens
-  are guarded too.
-- **Tier 1, the browser extension, can only detect.** The extension owns
-  navigation, so Relay can refuse to issue one and then observe where the
-  browser went. Client profiles default to a tier 2 pin for this reason.
-- **Page content reaching the model is treated as untrusted** and wrapped so
-  instructions inside a page are data, not directions.
+- **Capability output reaching the model is treated as untrusted** and
+  wrapped so instructions inside it are data, not directions.
 - **The secret scrubber only redacts values Relay itself brokered.** It
   cannot catch a key you pasted into a prompt.
 - **Commands run under OS-level confinement.** Every `shell` call goes through
@@ -476,9 +471,6 @@ Stated plainly so nobody discovers it the hard way.
   is covered by tests to the same standard as the macOS one, but nobody has
   watched it work against a live Secret Service.
 - Cron and webhook triggers, recipes, memory, document parsing.
-- File upload from the browser, deliberately: a model reading an
-  attacker-controlled page choosing which local file to upload is a direct
-  exfiltration route. It needs path scoping first.
 
 ---
 
@@ -489,9 +481,6 @@ pnpm test         # full suite
 pnpm typecheck
 node dist/src/cli.js smoke        # readiness; --run-agent spends real money
 ```
-
-Browser suites drive a real headless Chrome against a local fixture server.
-Without Chrome they skip and say so rather than passing quietly.
 
 `docs/HANDOVER.md` is the orientation document for anyone picking this up:
 current state, what is done, what is next, and a list of things that are true

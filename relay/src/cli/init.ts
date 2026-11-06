@@ -1,49 +1,41 @@
 /**
  * `relay init`, the setup wizard. FR-SET-1 through FR-SET-10, scoped to what
- * a fresh, config-less machine needs to reach a first task: starter config,
- * policy, and profiles files; a reviewed hard-blocked origin list; an honest
- * browser tier report per profile; guidance for storing Slack secrets in the
- * Keychain; and a closing `relay doctor` pass naming what is still missing.
+ * a fresh, config-less machine needs to reach a first task: starter config
+ * and policy files; a reviewed hard-blocked origin list; guidance for storing
+ * Slack secrets in the Keychain; and a closing `relay doctor` pass naming
+ * what is still missing.
  *
  * FR-SET-2 (dependency preflight), FR-SET-3 (macOS permission grants),
  * FR-SET-6 (repository enrolment), FR-SET-9 (launchd service), and FR-SET-21
  * (real smoke tests) are NOT implemented here: they need modules this file
- * does not own (doctor's own checks, the browser driver, the orchestrator).
+ * does not own (doctor's own checks, the orchestrator).
  * `relay doctor`, run at the end of this wizard, already covers the
  * dependency and Slack-connectivity half of that list; the rest is later
  * milestone work.
  *
  * Everything a real terminal or a real clock touches is a parameter with a
- * production default, the same seam src/profiles/tiers.ts uses for `home`
- * and `platform`: a test exercises the exact logic this wizard runs, not a
+ * production default: a test exercises the exact logic this wizard runs, not a
  * simulation of it, without opening a real prompt or a real doctor pass.
  *
  * THE ONE RULE THIS FILE NEVER BREAKS: an existing config file is never
  * overwritten without --force or an explicit "yes" typed into a real
  * terminal. Destroying a working configuration is the worst thing a setup
  * command can do, so every write path funnels through writeStarterFile,
- * which is the only place `writeFile` is called for these three files.
+ * which is the only place `writeFile` is called for these files.
  */
 
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createInterface } from 'node:readline/promises'
-import { defaultConfigPath, defaultPolicyPath, defaultProfilesPath } from '../config/paths.js'
+import { defaultConfigPath, defaultPolicyPath } from '../config/paths.js'
 
 import { SLACK_APP_TOKEN_SECRET, SLACK_BOT_TOKEN_SECRET } from '../chat/slack/adapter.js'
-import { ConfigError } from '../config/errors.js'
-import { loadProfileRegistry } from '../config/load.js'
 import type { CheckResult } from '../doctor/checks.js'
 import { formatResults, runDoctor } from '../doctor/run.js'
-import type { ProfileEntry, ProfileRegistry } from '../profiles/schema.js'
-import { reportTierAvailability, validatePin } from '../profiles/tiers.js'
 
 export const DEFAULT_CONFIG_PATH = defaultConfigPath()
 export const DEFAULT_POLICY_PATH = defaultPolicyPath()
-export const DEFAULT_PROFILES_PATH = defaultProfilesPath()
-export const DEFAULT_PROFILES_EXAMPLE_PATH = 'config/profiles.example.yaml'
 
 // The system's own Postgres and Redis (Homebrew services on their default
 // ports), matching this repository's committed config/relay.config.yaml.
@@ -176,7 +168,7 @@ type FileOutcome = 'written' | 'overwritten' | 'kept-existing'
 type WriteResult = { outcome: FileOutcome; refusedNonInteractive: boolean }
 
 /**
- * The one place any of the three starter files is ever written. An existing
+ * The one place either starter file is ever written. An existing
  * file is left untouched unless --force was given, or (only when a real
  * terminal is present) the operator confirms an explicit overwrite prompt.
  * Non-interactively, an existing file without --force is reported and left
@@ -217,71 +209,6 @@ function describeFileOutcome(path: string, outcome: WriteResult): string {
     : `kept the existing ${path} untouched, as you confirmed.`
 }
 
-type ProfilesFileOutcome = { outcome: 'skipped' } | { outcome: 'declined' } | WriteResult
-
-async function readExampleProfiles(examplePath: string): Promise<string> {
-  try {
-    return await readFile(examplePath, 'utf8')
-  } catch {
-    throw new Error(`relay init: could not read the worked example at ${examplePath} to copy it.`)
-  }
-}
-
-/**
- * Resolves config/profiles.yaml. Distinct from writeStarterFile's own guard
- * for the case where the file does not exist yet: creating it is never
- * destructive, so nothing blocks it non-interactively, but copying placeholder
- * example data into a real config path unasked is still a judgement call, not
- * a neutral default, so it is opt-in non-interactively (--with-example-profiles)
- * and asked for interactively (default yes, since a human can edit it at once).
- * --skip-profiles leaves the path completely untouched either way; an existing
- * file there is still picked up by the tier report below regardless.
- */
-async function resolveProfilesFile(
-  path: string,
-  examplePath: string,
-  opts: {
-    interactive: boolean
-    force: boolean
-    skip: boolean
-    withExample: boolean
-    confirm: (question: string, defaultValue: boolean) => Promise<boolean>
-  },
-): Promise<ProfilesFileOutcome> {
-  if (opts.skip) return { outcome: 'skipped' }
-
-  if (!existsSync(path)) {
-    if (opts.interactive) {
-      const copy = await opts.confirm(
-        `No profile registry at ${path}. Copy the worked example so you can start enrolling browser profiles?`,
-        true,
-      )
-      if (!copy) return { outcome: 'declined' }
-    } else if (!opts.withExample) {
-      return { outcome: 'declined' }
-    }
-    const exampleContent = await readExampleProfiles(examplePath)
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, exampleContent, 'utf8')
-    return { outcome: 'written', refusedNonInteractive: false }
-  }
-
-  const exampleContent = await readExampleProfiles(examplePath)
-  return writeStarterFile(path, exampleContent, { interactive: opts.interactive, force: opts.force, confirm: opts.confirm })
-}
-
-function describeProfilesOutcome(path: string, outcome: ProfilesFileOutcome): string {
-  if (outcome.outcome === 'skipped') return `skipped ${path}, per --skip-profiles.`
-  if (outcome.outcome === 'declined') {
-    return (
-      `no profile registry written at ${path}. Every browser call is refused with a clear reason (FR-PRF-2), ` +
-      'which is a safe state, not a broken one. Copy config/profiles.example.yaml there yourself, or run relay ' +
-      'init again with --with-example-profiles, when you are ready to enrol one.'
-    )
-  }
-  return describeFileOutcome(path, outcome)
-}
-
 async function resolveHardBlockedOrigins(
   extra: readonly string[],
   opts: { interactive: boolean; promptLine: (question: string) => Promise<string> },
@@ -297,55 +224,6 @@ async function resolveHardBlockedOrigins(
     }
   }
   return mergeHardBlockedOrigins(additions)
-}
-
-type ProfileTierLine = { line: string; pinFailed: boolean }
-
-function describeProfile(profile: ProfileEntry, home: string, platform: NodeJS.Platform): ProfileTierLine {
-  if (profile.classification === 'personal') {
-    return { line: `profile "${profile.name}" (personal): excluded from agent use, per FR-PRF-5.`, pinFailed: false }
-  }
-
-  const report = reportTierAvailability(profile, home, platform)
-  const tierLines = report.tiers
-    .map((entry) => `tier ${entry.tier} ${entry.available ? 'available' : 'unavailable'} (${entry.reason})`)
-    .join('; ')
-
-  if (profile.pinned_tier === undefined) {
-    return { line: `profile "${profile.name}" (${profile.classification}): ${tierLines}.`, pinFailed: false }
-  }
-
-  const pin = validatePin(profile, home, platform)
-  if (pin.ok) {
-    return {
-      line:
-        `profile "${profile.name}" (${profile.classification}): ${tierLines}. ` +
-        `Pinned to tier ${profile.pinned_tier}, honoured.`,
-      pinFailed: false,
-    }
-  }
-  return {
-    line: `profile "${profile.name}" (${profile.classification}): ${tierLines}. PIN FAILURE: ${pin.reason}`,
-    pinFailed: true,
-  }
-}
-
-function describeProfileRegistry(
-  registry: ProfileRegistry,
-  home: string,
-  platform: NodeJS.Platform,
-): { lines: string[]; pinFailures: string[] } {
-  if (registry.profiles.length === 0) {
-    return {
-      lines: ['no profiles configured yet. Every browser call is refused with a clear reason (FR-PRF-2), which is a safe state.'],
-      pinFailures: [],
-    }
-  }
-  const described = registry.profiles.map((profile) => describeProfile(profile, home, platform))
-  return {
-    lines: described.map((entry) => entry.line),
-    pinFailures: described.filter((entry) => entry.pinFailed).map((entry) => entry.line),
-  }
 }
 
 async function defaultConfirm(question: string, defaultValue: boolean): Promise<boolean> {
@@ -377,13 +255,9 @@ export type DoctorRunner = (options: {
 export type InitOptions = {
   configPath: string
   policyPath: string
-  profilesPath: string
-  profilesExamplePath: string
   /** Never prompt; use flags and built-in defaults only. Always true when there is no real terminal, regardless of this flag. */
   yes: boolean
   force: boolean
-  skipProfiles: boolean
-  withExampleProfiles: boolean
   hardBlockedOrigins: string[]
   databaseUrl: string
   redisUrl: string
@@ -392,8 +266,6 @@ export type InitOptions = {
   confirm?: (question: string, defaultValue: boolean) => Promise<boolean>
   promptLine?: (question: string) => Promise<string>
   now?: () => number
-  home?: string
-  platform?: NodeJS.Platform
   runDoctorFn?: DoctorRunner
 }
 
@@ -405,8 +277,8 @@ export type InitResult = { report: string; exitCode: number }
  * both call the same function the same way.
  *
  * EXIT CODE CONTRACT: 0 means the wizard completed its own job: the files it
- * owns are in a valid state and no invariant it enforces (a non-empty
- * hard-blocked list, an honourable tier pin) was violated. It does NOT mean
+ * owns are in a valid state and the invariant it enforces (a non-empty
+ * hard-blocked list) was not violated. It does NOT mean
  * the machine is fully ready to run a task; `relay doctor`'s own exit code,
  * printed in the report below, is what answers that. Tying relay init's own
  * exit code to Postgres or Redis being reachable right now would fail a
@@ -420,14 +292,11 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   const confirm = options.confirm ?? defaultConfirm
   const promptLine = options.promptLine ?? defaultPromptLine
   const runDoctorImpl = options.runDoctorFn ?? runDoctor
-  const home = options.home ?? homedir()
-  const platform = options.platform ?? process.platform
 
   const sections: string[] = [
-    'relay init: bootstraps config, policy, and profiles for a clean machine. Target is NFR-12, a first task ' +
+    'relay init: bootstraps config and policy for a clean machine. Target is NFR-12, a first task ' +
       'inside 30 minutes.',
   ]
-  let blocked = false
 
   const configOutcome = await writeStarterFile(options.configPath, renderConfigYaml(options.databaseUrl, options.redisUrl), {
     interactive,
@@ -453,38 +322,6 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
     sections.push(`hard-blocked origins written (FR-SET-7): ${hardBlockedOrigins.join(', ')}`)
   }
 
-  const profilesOutcome = await resolveProfilesFile(options.profilesPath, options.profilesExamplePath, {
-    interactive,
-    force: options.force,
-    skip: options.skipProfiles,
-    withExample: options.withExampleProfiles,
-    confirm,
-  })
-  sections.push(describeProfilesOutcome(options.profilesPath, profilesOutcome))
-
-  // Whatever is at profilesPath now, freshly written or already there from
-  // before, gets reported: FR-PRF-6a's whole point is learning the truth
-  // about this machine at setup, not only about the file this run touched.
-  if (existsSync(options.profilesPath)) {
-    try {
-      const registry = loadProfileRegistry(options.profilesPath)
-      const { lines, pinFailures } = describeProfileRegistry(registry, home, platform)
-      sections.push(['browser tier availability (FR-PRF-6a):', ...lines].join('\n'))
-      if (pinFailures.length > 0) {
-        blocked = true
-        sections.push(
-          ['relay init refuses to complete: the following pins cannot be honoured, per FR-PRF-4a.', ...pinFailures].join(
-            '\n',
-          ),
-        )
-      }
-    } catch (error) {
-      blocked = true
-      const detail = error instanceof ConfigError ? error.reason : (error as Error).message
-      sections.push(`profiles: ${options.profilesPath} could not be read: ${detail}`)
-    }
-  }
-
   sections.push(renderSecretsGuidance())
 
   const { results, exitCode: doctorExitCode } = await runDoctorImpl({
@@ -504,9 +341,5 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
       'not the full NFR-12 time to a first successful task.',
   )
 
-  if (blocked) {
-    sections.push('relay init did not complete. Fix the item(s) above and run it again.')
-  }
-
-  return { report: sections.join('\n\n'), exitCode: blocked ? 1 : 0 }
+  return { report: sections.join('\n\n'), exitCode: 0 }
 }

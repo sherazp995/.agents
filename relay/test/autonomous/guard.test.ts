@@ -177,3 +177,35 @@ describe('the guard for a team member', () => {
     expect(requested).toHaveLength(1)
   })
 })
+
+describe('the guard for a reminder\'s read-only task', () => {
+  const READ_ONLY = { ...TASK, readOnly: true } as AutonomousTask
+  const readOnlyGuard = (answer: ShellWriteAnswer = { kind: 'approved' }) => guardWith(answer, { loadTask: async (id) => (id === TASK.id ? READ_ONLY : undefined) })
+
+  it('allows reading tools and plain reading commands', async () => {
+    const { guard } = readOnlyGuard()
+    for (const toolName of ['Read', 'Grep', 'Glob', 'Skill', 'Task', 'WebFetch']) {
+      expect(await guard.decide(bash('', toolName), CONTEXT)).toMatchObject({ decision: 'allow' })
+    }
+    for (const command of ['gh pr list --author @me', 'git log --oneline -5', 'agents-hub search cohabit']) {
+      expect(await guard.decide(bash(command), CONTEXT)).toMatchObject({ decision: 'allow' })
+    }
+  })
+
+  it('refuses editing and MCP tools, which a normal task may call', async () => {
+    const { guard } = readOnlyGuard()
+    for (const toolName of ['Edit', 'Write', 'NotebookEdit', 'mcp__slack__send_message']) {
+      expect(await guard.decide(bash('', toolName), CONTEXT)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('read access only') })
+    }
+    const { guard: normal } = guardWith({ kind: 'pending' })
+    expect(await normal.decide(bash('', 'Edit'), CONTEXT)).toMatchObject({ decision: 'allow' })
+  })
+
+  it('refuses remote writes and every relay command without posting an approval card, even when approvals would pass', async () => {
+    const { guard, requested } = readOnlyGuard({ kind: 'approved' })
+    for (const command of ['git push origin main', 'gh pr create --title x', "sh -c 'gh issue comment 3 --body hi'", 'relay notify hi', 'relay team start', '/usr/local/bin/relay live say --text x']) {
+      expect(await guard.decide(bash(command), CONTEXT)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('read access only') })
+    }
+    expect(requested).toEqual([])
+  })
+})

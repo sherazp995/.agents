@@ -36,7 +36,7 @@ function payloadDeliveredToModel(rendered: string): string {
 describe('buildStepObservation', () => {
   it('carries the capability, sequence, state, and the result the step actually returned', () => {
     const observation = buildStepObservation({
-      capability: 'browser',
+      capability: 'files',
       seq: 3,
       state: 'succeeded',
       output: { outcome: 'completed', steps: [{ action: 'read_text', value: 'Pending invoices: 4' }] },
@@ -44,33 +44,33 @@ describe('buildStepObservation', () => {
     })
 
     const text = observationText(observation)
-    expect(text).toContain('capability: browser')
+    expect(text).toContain('capability: files')
     expect(text).toContain('step: 3')
     expect(text).toContain('state: succeeded')
-    // The load-bearing one: the page content the capability read is
-    // present. Without it the model answers "how many pending invoices"
-    // having never seen the page.
+    // The load-bearing one: the content the capability read is present.
+    // Without it the model answers "how many pending invoices" having never
+    // seen it.
     expect(text).toContain('Pending invoices: 4')
   })
 
   it('reports a failed step\'s error and shows no result, rather than an empty result that reads as "nothing was there"', () => {
     const observation = buildStepObservation({
-      capability: 'browser',
+      capability: 'files',
       seq: 1,
       state: 'failed',
       output: null,
-      error: 'chrome would not start',
+      error: 'the file could not be read',
     })
 
     const text = observationText(observation)
     expect(text).toContain('state: failed')
-    expect(text).toContain('error: chrome would not start')
+    expect(text).toContain('error: the file could not be read')
     expect(text).not.toContain('result:')
   })
 
   it('omits the result for a step that did not succeed even when an output value is present', () => {
     const observation = buildStepObservation({
-      capability: 'browser',
+      capability: 'files',
       seq: 1,
       state: 'timed_out',
       output: { partial: 'half a page' },
@@ -83,7 +83,7 @@ describe('buildStepObservation', () => {
   it('truncates an oversized result and SAYS SO, naming the real size, rather than cutting it silently', () => {
     const huge = 'x'.repeat(MAX_OBSERVATION_CHARACTERS * 2)
     const observation = buildStepObservation({
-      capability: 'browser',
+      capability: 'files',
       seq: 1,
       state: 'succeeded',
       output: huge,
@@ -121,7 +121,7 @@ describe('AP-2: a capability result is untrusted content, and is delivered as da
 
     const rendered = renderForModel(
       buildStepObservation({
-        capability: 'browser',
+        capability: 'files',
         seq: 1,
         state: 'succeeded',
         output: { steps: [{ action: 'read_text', value: hostilePage }] },
@@ -151,7 +151,7 @@ describe('AP-2: a capability result is untrusted content, and is delivered as da
 
     const rendered = renderForModel(
       buildStepObservation({
-        capability: 'browser',
+        capability: 'files',
         seq: 1,
         state: 'succeeded',
         output: { steps: [{ action: 'read_text', value: 'the page printed xoxb-a-real-looking-token' }] },

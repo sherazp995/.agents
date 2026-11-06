@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifyBlocked } from '../../src/autonomous/accounts.js'
+import { classifyBlocked, type Account, type CooldownStore } from '../../src/autonomous/accounts.js'
 import { UNTRUSTED_DATA_TAG } from '../../src/agent/untrusted.js'
 import {
   COURIER_DELIVERED,
@@ -241,5 +241,96 @@ describe('deliverViaCourier', () => {
     expect(outcome.outcome).toBe('not_delivered')
     if (outcome.outcome !== 'not_delivered') return
     expect(outcome.reason).toContain('did not finish within')
+  })
+})
+
+describe('deliverViaCourier across the Claude logins agents-hub lists', () => {
+  const LOGINS: Account[] = [
+    { key: 'claude', client: 'claude', configDir: null, env: {} },
+    { key: 'codex', client: 'codex', configDir: null, env: {} },
+    { key: 'claude1', client: 'claude', configDir: '/h/.claude1', env: { CLAUDE_CONFIG_DIR: '/h/.claude1' } },
+    { key: 'claude2', client: 'claude', configDir: '/h/.claude2', env: { CLAUDE_CONFIG_DIR: '/h/.claude2' } },
+  ]
+  function cooldowns(cooling: Record<string, number> = {}): CooldownStore & { cooling: Record<string, number> } {
+    return {
+      cooling,
+      async cooldownUntil(key) {
+        const until = cooling[key]
+        return until !== undefined && until > Date.now() ? until : null
+      },
+      async coolDown(key, until) {
+        cooling[key] = until
+      },
+    }
+  }
+  const scripted = (answers: Record<string, { stdout: string; stderr: string }>) => {
+    const used: string[] = []
+    return {
+      used,
+      spawnCourier: async (_prompt: string, _timeout: number, env: Readonly<Record<string, string>>) => {
+        const key = env.CLAUDE_CONFIG_DIR === undefined ? 'claude' : env.CLAUDE_CONFIG_DIR.split('.').pop() === 'claude1' ? 'claude1' : 'claude2'
+        used.push(key)
+        return answers[key] ?? { stdout: '', stderr: '' }
+      },
+    }
+  }
+
+  it('skips an expired login and a weekly-limited one, cools both down, and delivers on the next Claude login', async () => {
+    const store = cooldowns()
+    const run = scripted({
+      claude: { stdout: 'Failed to authenticate: OAuth session expired and could not be refreshed', stderr: 'exit 1: ' },
+      claude1: { stdout: "You've hit your weekly limit · resets Nov 9 at 3pm", stderr: 'exit 1: ' },
+      claude2: { stdout: `${COURIER_DELIVERED} agents-7`, stderr: '' },
+    })
+
+    const outcome = await deliverViaCourier(request(), { spawnCourier: run.spawnCourier, accounts: { readAccounts: async () => LOGINS, cooldowns: store } })
+
+    expect(outcome).toEqual({ outcome: 'delivered', peer: 'agents-7' })
+    expect(run.used).toEqual(['claude', 'claude1', 'claude2'])
+    expect(Object.keys(store.cooling).sort()).toEqual(['claude', 'claude1'])
+  })
+
+  it('skips a login that is already cooling down, and never runs a Codex login', async () => {
+    const run = scripted({ claude2: { stdout: `${COURIER_DELIVERED} agents-7`, stderr: '' } })
+    const store = cooldowns({ claude: Date.now() + 60_000, claude1: Date.now() + 60_000 })
+
+    await deliverViaCourier(request(), { spawnCourier: run.spawnCourier, accounts: { readAccounts: async () => LOGINS, cooldowns: store } })
+
+    expect(run.used).toEqual(['claude2'])
+  })
+
+  it('stops at a failure that is not a blocked login, since the message may already be in the session and a retry would send it twice', async () => {
+    const run = scripted({ claude: { stdout: `${COURIER_NOT_DELIVERED} no session in that folder`, stderr: '' } })
+
+    const outcome = await deliverViaCourier(request(), { spawnCourier: run.spawnCourier, accounts: { readAccounts: async () => LOGINS, cooldowns: cooldowns() } })
+
+    expect(outcome).toMatchObject({ outcome: 'not_delivered', reason: expect.stringContaining('no session in that folder') })
+    expect(run.used).toEqual(['claude'])
+  })
+
+  it('moves to the next login when the claude binary cannot be found for one, and cools that login down', async () => {
+    const store = cooldowns()
+    const used: string[] = []
+    const spawnCourier = async (_prompt: string, _timeout: number, env: Readonly<Record<string, string>>) => {
+      const key = env.CLAUDE_CONFIG_DIR === undefined ? 'claude' : 'claude1'
+      used.push(key)
+      if (key === 'claude') throw Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' })
+      return { stdout: `${COURIER_DELIVERED} agents-7`, stderr: '' }
+    }
+
+    const outcome = await deliverViaCourier(request(), { spawnCourier, accounts: { readAccounts: async () => LOGINS, cooldowns: store } })
+
+    expect(outcome).toEqual({ outcome: 'delivered', peer: 'agents-7' })
+    expect(used).toEqual(['claude', 'claude1'])
+    expect(Object.keys(store.cooling)).toEqual(['claude'])
+  })
+
+  it('names every blocked login when none can run the courier', async () => {
+    const expired = { stdout: 'Failed to authenticate: OAuth session expired', stderr: 'exit 1: ' }
+    const run = scripted({ claude: expired, claude1: expired, claude2: expired })
+
+    const outcome = await deliverViaCourier(request(), { spawnCourier: run.spawnCourier, accounts: { readAccounts: async () => LOGINS, cooldowns: cooldowns() } })
+
+    expect(outcome).toEqual({ outcome: 'not_delivered', reason: 'no Claude login could run the courier (claude: auth; claude1: auth; claude2: auth)' })
   })
 })

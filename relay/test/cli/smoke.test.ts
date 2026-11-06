@@ -8,7 +8,7 @@
  * creation, migrations, the agent-run step itself, secrets, fetch), so most
  * of this file needs no real Postgres or Redis at all. One group, marked
  * REAL INFRA, deliberately exercises the always-on steps (postgres, redis,
- * migrations, browser-tiers) against this repo's own docker-compose
+ * migrations) against this repo's own docker-compose
  * Postgres and Redis and a real per-worker test database, the same
  * convention test/cli/principals.test.ts already uses; it never runs the
  * real agent-run step, since that needs a real claude binary and spends
@@ -28,7 +28,6 @@ import { applyMigrations } from '../../src/db/migrate.js'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { EnvSecretProvider } from '../../src/secrets/env.js'
-import type { runTier2SelfTest } from '../../src/browser/tier2/selftest.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 import type { Policy } from '../../src/config/schema.js'
 import {
@@ -136,7 +135,7 @@ describe('evaluateAgentRun', () => {
   })
 
   it('fails when the only persisted step is a different capability', () => {
-    const result = evaluateAgentRun(baseResult(), [echoStep({ capability: 'browser' })], 'nonce-abc')
+    const result = evaluateAgentRun(baseResult(), [echoStep({ capability: 'shell' })], 'nonce-abc')
     expect(result.status).toBe('failed')
   })
 
@@ -181,7 +180,6 @@ function baseSmokeOptions(overrides: Partial<SmokeOptions> = {}): SmokeOptions {
   return {
     configPath: join(dir, 'relay.config.yaml'),
     policyPath: join(dir, 'policy.yaml'),
-    profilesPath: join(dir, 'profiles.yaml'),
     migrationsDir: 'src/db/migrations',
     runAgent: false,
     now: () => 0,
@@ -189,11 +187,6 @@ function baseSmokeOptions(overrides: Partial<SmokeOptions> = {}): SmokeOptions {
     closePoolFn: noopClosePool,
     applyMigrationsFn: async () => [],
     secretsFn: () => new EnvSecretProvider({}),
-    // Stubbed by default so this file's tests never launch a real Chrome:
-    // the self-test itself is exercised against a real browser in
-    // test/browser/tier2/selftest.integration.test.ts, and what these tests
-    // are about is how runSmoke REPORTS its outcome.
-    runTier2SelfTestFn: async () => ({ outcome: 'passed', detail: 'stubbed self-test' }),
     ...overrides,
   }
 }
@@ -219,7 +212,7 @@ describe('runSmoke: invalid configuration', () => {
 
     expect(result.exitCode).toBe(1)
     expect(result.report).toContain('[FAIL] config')
-    for (const name of ['postgres', 'redis', 'migrations', 'slack-token-valid', 'slack-socket-mode', 'slack-identity', 'browser-tiers', 'browser-driver', 'agent-run']) {
+    for (const name of ['postgres', 'redis', 'migrations', 'slack-token-valid', 'slack-socket-mode', 'slack-identity', 'agent-run']) {
       expect(result.report).toContain(`[SKIP] ${name}`)
     }
   })
@@ -341,50 +334,6 @@ describe('runAgentSmokeStep: the real impure wrapper', () => {
   }, 15000)
 })
 
-describe('runSmoke: browser tier availability', () => {
-  it('reports a pin failure as a failed step', async () => {
-    const configPath = join(dir, 'relay.config.yaml')
-    const policyPath = join(dir, 'policy.yaml')
-    const profilesPath = join(dir, 'profiles.yaml')
-    await writeConfig(configPath, UNREACHABLE_DATABASE_URL, UNREACHABLE_REDIS_URL)
-    await writePolicy(policyPath)
-    await writeFile(
-      profilesPath,
-      `version: 1
-profiles:
-  - name: work
-    description: everyday profile at Chrome's own default directory
-    user_data_dir: /Users/faketestoperator/Library/Application Support/Google/Chrome
-    profile_directory: Default
-    classification: client
-    allowed_origins: ['*.acme.com']
-    pinned_tier: 2
-`,
-      'utf8',
-    )
-
-    const result = await runSmoke(
-      baseSmokeOptions({ configPath, policyPath, profilesPath, home: '/Users/faketestoperator', platform: 'darwin' }),
-    )
-
-    expect(result.exitCode).toBe(1)
-    expect(result.report).toContain('[FAIL] browser-tiers')
-    expect(result.report).toContain('PIN FAILURE')
-  }, 15000)
-
-  it('reports no profiles configured as a passing, non-blocking state', async () => {
-    const configPath = join(dir, 'relay.config.yaml')
-    const policyPath = join(dir, 'policy.yaml')
-    await writeConfig(configPath, UNREACHABLE_DATABASE_URL, UNREACHABLE_REDIS_URL)
-    await writePolicy(policyPath)
-
-    const result = await runSmoke(baseSmokeOptions({ configPath, policyPath }))
-
-    expect(result.report).toContain('[PASS] browser-tiers')
-    expect(result.report).toContain('no profiles configured yet')
-  }, 15000)
-})
-
 describe('runSmoke: Slack steps', () => {
   it('reports skipped when no Slack secrets are configured, never touching the network', async () => {
     const configPath = join(dir, 'relay.config.yaml')
@@ -459,8 +408,8 @@ describe('runSmoke: every step states what it verified', () => {
     const result = await runSmoke(baseSmokeOptions({ configPath, policyPath }))
 
     const verifiedLines = result.report.split('\n').filter((line) => line.trim().startsWith('verified:'))
-    // config, postgres, redis, migrations, 3 slack checks, browser-tiers, agent-run
-    expect(verifiedLines.length).toBe(10)
+    // config, postgres, redis, migrations, 3 slack checks, agent-run
+    expect(verifiedLines.length).toBe(8)
   }, 15000)
 })
 
@@ -480,7 +429,6 @@ describe('runSmoke: against real infrastructure', () => {
     const result = await runSmoke({
       configPath,
       policyPath,
-      profilesPath: join(dir, 'profiles.yaml'),
       migrationsDir: 'src/db/migrations',
       runAgent: false,
       secretsFn: () => new EnvSecretProvider({}),
@@ -526,56 +474,4 @@ describe('runSmoke: a keystore database reference (user decision 7)', () => {
     expect(result.report).toContain('relay-test-missing-database-url')
     expect(result.report).toContain('[SKIP] postgres')
   })
-})
-
-describe('runSmoke: the tier 2 driver self-test', () => {
-  async function runWithSelfTest(
-    outcome: Awaited<ReturnType<typeof runTier2SelfTest>>,
-  ): Promise<{ report: string; exitCode: number }> {
-    const configPath = join(dir, 'relay.config.yaml')
-    const policyPath = join(dir, 'policy.yaml')
-    await writeConfig(configPath, UNREACHABLE_DATABASE_URL, UNREACHABLE_REDIS_URL)
-    await writePolicy(policyPath)
-    return runSmoke(baseSmokeOptions({ configPath, policyPath, runTier2SelfTestFn: async () => outcome }))
-  }
-
-  it('reports a passing self-test with what it actually verified, not a bare "ok"', async () => {
-    const result = await runWithSelfTest({ outcome: 'passed', detail: 'chrome launched and enforcement held' })
-
-    expect(result.report).toContain('[PASS] browser-driver')
-    expect(result.report).toContain('chrome launched and enforcement held')
-    // The claim must be scoped: a reader has to be able to tell this
-    // checked enforcement against a server log, not merely that Chrome ran.
-    expect(result.report).toContain("server's own request log")
-  }, 15000)
-
-  it('FAILS the smoke run when an off-allowlist request was not actually prevented', async () => {
-    // The whole reason this step exists. A machine where scoping silently
-    // does not work must not produce a green readiness report.
-    const result = await runWithSelfTest({
-      outcome: 'failed',
-      reason: 'an off-allowlist request REACHED its destination',
-    })
-
-    expect(result.report).toContain('[FAIL] browser-driver')
-    expect(result.report).toContain('REACHED its destination')
-    expect(result.exitCode).toBe(1)
-  }, 15000)
-
-  it('skips, without failing, on a machine with no Chrome installed', async () => {
-    const skipped = await runWithSelfTest({ outcome: 'skipped', reason: 'no Chrome executable at /nowhere' })
-    const passed = await runWithSelfTest({ outcome: 'passed', detail: 'all good' })
-
-    expect(skipped.report).toContain('[SKIP] browser-driver')
-    expect(skipped.report).toContain('no Chrome executable')
-    expect(skipped.report).not.toContain('[FAIL] browser-driver')
-    // An operator who never uses the browser capability does not need
-    // Chrome, and a readiness report that fails over an unused optional
-    // dependency stops being read. Asserted by comparison rather than
-    // against a literal 0, because these runs deliberately point at
-    // unreachable dependencies, so the exit code is 1 for reasons that
-    // have nothing to do with the browser: what matters is that skipping
-    // changes nothing about it.
-    expect(skipped.exitCode).toBe(passed.exitCode)
-  }, 20000)
 })

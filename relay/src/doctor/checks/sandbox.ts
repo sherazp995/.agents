@@ -36,7 +36,7 @@ export const checkSandbox: Check = {
         detail: outcome.reason,
         remediation:
           'Coding runs fail closed without OS-level confinement (FR-SH-7), so they will be refused on this machine. ' +
-          'Browser and chat capabilities are unaffected.',
+          'Chat capabilities are unaffected.',
       }
     }
 

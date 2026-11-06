@@ -10,7 +10,8 @@ import { findOrCreateSession } from '../../src/sessions/store.js'
 import { IntakeFailedError, type ChatAction, type ChatEvent } from '../../src/chat/contract.js'
 import { loadTaskBySession, markTaskStopped, type IntakeOutbox } from '../../src/autonomous/store.js'
 import { findActiveSession } from '../../src/sessions/store.js'
-import { routeAutonomousEvent, STOPPED_TEXT, type RouterDeps } from '../../src/autonomous/router.js'
+import { REMINDER_NO_FOLDER_TEXT, routeAutonomousEvent, STOPPED_TEXT, type RouterDeps } from '../../src/autonomous/router.js'
+import { attachSessionToEngineChat, ReadOnlySessionError } from '../../src/sessions/store.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 
@@ -74,6 +75,7 @@ describe('autonomous router', () => {
       pool,
       outbox: outbox(),
       chatFolder: (text: string) => (text.includes('winad') ? '/repos/winad' : '/repos/agents'),
+      reminderFolder: (text: string) => (text.includes('winad') ? '/repos/winad' : undefined),
       wakes: 0,
       wake: () => {
         result.wakes += 1
@@ -198,5 +200,63 @@ describe('autonomous router', () => {
     await routeAutonomousEvent(d, first, where)
 
     expect(d.wakes).toBe(1)
+  })
+
+  describe('a Slackbot reminder', () => {
+    const reminder = (workspaceId: string, principalId: string, text: string, ts: string): ChatEvent => ({ ...event(workspaceId, principalId, text, ts), origin: 'reminder' })
+
+    it('starts a read-only task that stays read-only after a reply in its thread, and keeps the reminder as its source', async () => {
+      const { workspaceId, requester } = await setup()
+      const where = thread('20.1')
+
+      expect(await routeAutonomousEvent(deps(), reminder(workspaceId, requester, 'Reminder: status update for winad', '20.1'), where)).toBe('handled')
+      await routeAutonomousEvent(deps(), event(workspaceId, requester, 'now push it', '20.2'), where)
+
+      const session = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: where.threadRef })
+      const task = await loadTaskBySession(pool, session?.id ?? '')
+      expect(task).toMatchObject({ readOnly: true, chatCwd: '/repos/winad' })
+      expect(task?.pendingEvents.map((pending) => pending.origin ?? null)).toEqual(['reminder', null])
+    })
+
+    it('leaves a task a person starts as not read-only', async () => {
+      const { workspaceId, requester } = await setup()
+      const where = thread('20.3')
+      await routeAutonomousEvent(deps(), event(workspaceId, requester, 'fix winad', '20.3'), where)
+      const session = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: where.threadRef })
+      expect((await loadTaskBySession(pool, session?.id ?? ''))?.readOnly).toBe(false)
+    })
+
+    it('never joins a thread that already has a session', async () => {
+      const { workspaceId, requester } = await setup()
+      const where = thread('20.4')
+      await routeAutonomousEvent(deps(), event(workspaceId, requester, 'fix winad', '20.4'), where)
+
+      expect(await routeAutonomousEvent(deps(), reminder(workspaceId, requester, 'Reminder: winad', '20.5'), where)).toBe('not_autonomous')
+      const session = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: where.threadRef })
+      expect((await loadTaskBySession(pool, session?.id ?? ''))?.pendingEvents).toHaveLength(1)
+    })
+
+    it('replies once and starts nothing when its text names no folder, instead of falling back to the first repository', async () => {
+      const { workspaceId, requester } = await setup()
+      const d = deps()
+      const where = thread('20.6')
+
+      expect(await routeAutonomousEvent(d, reminder(workspaceId, requester, 'Reminder: status update', '20.6'), where)).toBe('handled')
+      expect(await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: where.threadRef })).toBeNull()
+      expect(await (d.outbox as ReturnType<typeof outbox>).queued(workspaceId)).toEqual([{ kind: 'post', ref: where.replyRef, text: REMINDER_NO_FOLDER_TEXT }])
+    })
+
+    it('cannot be attached to a terminal chat, while a normal thread still can', async () => {
+      const { workspaceId, requester } = await setup()
+      const readOnly = thread('20.7')
+      const normal = thread('20.8')
+      await routeAutonomousEvent(deps(), reminder(workspaceId, requester, 'Reminder: winad', '20.7'), readOnly)
+      await routeAutonomousEvent(deps(), event(workspaceId, requester, 'fix winad', '20.8'), normal)
+      const readOnlySession = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: readOnly.threadRef })
+      const normalSession = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: normal.threadRef })
+
+      await expect(attachSessionToEngineChat(pool, readOnlySession?.id ?? '', 'chat-1', '/repos/winad')).rejects.toBeInstanceOf(ReadOnlySessionError)
+      await expect(attachSessionToEngineChat(pool, normalSession?.id ?? '', 'chat-1', '/repos/winad')).resolves.toBeUndefined()
+    })
   })
 })

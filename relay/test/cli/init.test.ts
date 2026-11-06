@@ -1,13 +1,11 @@
 /**
  * Tests for src/cli/init.ts. Every side-effecting or blocking dependency
- * (prompts, the clock, home/platform for tier detection, and the final
- * doctor pass) is injected, so these run fast and hermetically: no real
+ * (prompts, the clock, and the final doctor pass) is injected, so these run fast and hermetically: no real
  * terminal, no real Postgres or Redis, no dependency on this machine's own
  * home directory. Fixtures live under a fresh os.tmpdir() directory per
  * test, never under the repo's own config/.
  */
 
-import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -39,12 +37,8 @@ function baseOptions(overrides: Partial<InitOptions> = {}): InitOptions {
   return {
     configPath: join(dir, 'relay.config.yaml'),
     policyPath: join(dir, 'policy.yaml'),
-    profilesPath: join(dir, 'profiles.yaml'),
-    profilesExamplePath: join(dir, 'profiles.example.yaml'),
     yes: true,
     force: false,
-    skipProfiles: true,
-    withExampleProfiles: false,
     hardBlockedOrigins: [],
     databaseUrl: 'postgres://relay:relay@localhost:5432/relay',
     redisUrl: 'redis://localhost:6379/13',
@@ -167,119 +161,6 @@ describe('runInit: writes a valid runtime config', () => {
     expect(config.database.url).toBe('postgres://relay:relay@localhost:5432/relay')
     expect(config.redis.url).toBe('redis://localhost:6379/13')
     expect(config.secrets.provider).toBe('keychain')
-  })
-})
-
-describe('runInit: browser tier availability, FR-PRF-6a and FR-PRF-4a', () => {
-  const fakeHome = '/Users/faketestoperator'
-
-  async function writeProfiles(path: string, yaml: string): Promise<void> {
-    await writeFile(path, yaml, 'utf8')
-  }
-
-  it('reports an honourable pin as honoured and completes successfully', async () => {
-    const profilesPath = join(dir, 'profiles.yaml')
-    await writeProfiles(
-      profilesPath,
-      `version: 1
-profiles:
-  - name: acme
-    description: dedicated automation profile
-    user_data_dir: /Users/faketestoperator/chrome-profiles/acme
-    profile_directory: Default
-    classification: client
-    allowed_origins: ['*.acme.com']
-    pinned_tier: 2
-`,
-    )
-
-    const result = await runInit(
-      baseOptions({ profilesPath, skipProfiles: true, home: fakeHome, platform: 'darwin' }),
-    )
-
-    expect(result.exitCode).toBe(0)
-    expect(result.report).toContain('tier 2 available')
-    expect(result.report).toContain('Pinned to tier 2, honoured')
-  })
-
-  it('refuses to complete when a pin cannot be honoured, using validatePin', async () => {
-    const profilesPath = join(dir, 'profiles.yaml')
-    await writeProfiles(
-      profilesPath,
-      `version: 1
-profiles:
-  - name: work
-    description: everyday profile pointed at Chrome's own default directory
-    user_data_dir: /Users/faketestoperator/Library/Application Support/Google/Chrome
-    profile_directory: Default
-    classification: client
-    allowed_origins: ['*.acme.com']
-    pinned_tier: 2
-`,
-    )
-
-    const result = await runInit(
-      baseOptions({ profilesPath, skipProfiles: true, home: fakeHome, platform: 'darwin' }),
-    )
-
-    expect(result.exitCode).toBe(1)
-    expect(result.report).toContain('PIN FAILURE')
-    expect(result.report).toContain('relay init did not complete')
-  })
-
-  it('with --with-example-profiles, copies the worked example non-interactively when none exists yet', async () => {
-    const profilesPath = join(dir, 'profiles.yaml')
-    const profilesExamplePath = join(dir, 'profiles.example.yaml')
-    await writeFile(
-      profilesExamplePath,
-      `version: 1
-profiles:
-  - name: acme
-    description: dedicated automation profile from the example
-    user_data_dir: /Users/faketestoperator/chrome-profiles/acme
-    profile_directory: Default
-    classification: client
-    allowed_origins: ['*.acme.com']
-`,
-      'utf8',
-    )
-
-    const result = await runInit(
-      baseOptions({ profilesPath, profilesExamplePath, skipProfiles: false, withExampleProfiles: true }),
-    )
-
-    await expect(readFile(profilesPath, 'utf8')).resolves.toContain('name: acme')
-    expect(result.report).toContain(`wrote ${profilesPath}`)
-    expect(result.report).toContain('browser tier availability')
-  })
-
-  it('without --with-example-profiles, leaves profiles unconfigured non-interactively rather than guessing', async () => {
-    const profilesPath = join(dir, 'profiles.yaml')
-    const profilesExamplePath = join(dir, 'profiles.example.yaml')
-    await writeFile(profilesExamplePath, 'version: 1\nprofiles: []\n', 'utf8')
-
-    const result = await runInit(baseOptions({ profilesPath, profilesExamplePath, skipProfiles: false }))
-
-    expect(existsSync(profilesPath)).toBe(false)
-    expect(result.report).toContain('no profile registry written')
-  })
-
-  it('reports an empty registry as a safe, non-blocking state', async () => {
-    const profilesPath = join(dir, 'profiles.yaml')
-    await writeProfiles(profilesPath, 'version: 1\nprofiles: []\n')
-
-    const result = await runInit(baseOptions({ profilesPath, skipProfiles: true }))
-
-    expect(result.exitCode).toBe(0)
-    expect(result.report).toContain('no profiles configured yet')
-    expect(result.report).not.toContain('PIN FAILURE')
-  })
-
-  it('reports "no profiles configured" as safe when no file exists at all and profiles are skipped', async () => {
-    const result = await runInit(baseOptions({ skipProfiles: true }))
-    expect(result.exitCode).toBe(0)
-    expect(result.report).toContain('skipped')
-    expect(result.report).not.toContain('PIN FAILURE')
   })
 })
 

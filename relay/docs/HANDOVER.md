@@ -6,6 +6,13 @@ Written 2026-08-11 for a fresh session picking this up. Read this file, then
 Revised 2026-08-11, later the same day, after the tier 2 browser driver
 landed. Section 4's first item has changed substantially: GT-1 passes now.
 
+Revised 2026-11-06: the built-in browser capability, the browser profiles
+(`config/profiles.yaml`, the `relay profile-*` commands, the doctor and smoke
+tier checks) and the CDP driver under `src/browser` were removed; nothing used
+them any more. Threads use Claude Code's own Playwright MCP servers instead.
+GT-1, GT-2 and GT-12 went with the driver; GT-10 now runs on a fake
+capability. The milestone rows below that mention them are history.
+
 ---
 
 ## 1. What Relay is
@@ -28,12 +35,7 @@ database 8), not Docker; the Docker data was copied over with `pg_dump`.
 
 **1330 tests passing, 1 gated live skip, typecheck clean, tree clean.**
 Phase 0 is substantively complete through P0.6. The tier 2 browser driver
-landed after that, and **GT-1 passes**.
-
-The browser suites drive a real headless Chrome against a local fixture
-server (`test/support/fixture-site.ts`). They need Chrome installed; where
-it is absent they skip and say so rather than passing quietly. They cost no
-money and add roughly ten seconds to a full run.
+landed after that and was removed on 2026-11-06 (see the note at the top).
 
 ```bash
 pnpm test                      # full suite, ~60s
@@ -186,10 +188,6 @@ six later ones.**
 3. **The hosted run page** (FR-RPT-7), which is where diffs and long content
    live, since FR-RPT-10 forbids them in chat and FR-CODE-47c makes it the
    review surface for a repo with no GitHub remote.
-4. **Browser depth**: cross-call sessions (the browser dies with each call),
-   an artifact store so downloads are not orphaned, tier 1 extension
-   discovery (FR-PRF-6), tier 3 vision (FR-BR-3), FR-BR-7's "then position"
-   rung, and file upload (FR-BR-5), which path scoping now unblocks.
 
 ### Carried from the autonomous build
 
@@ -255,17 +253,6 @@ six later ones.**
   `src/` to scan. It is recorded at build time and reported with its
   timestamp; deriving it with an empty capability list fabricates an
   inconsistency.
-- **Cloning a signed-in Chrome profile WORKS, confirmed on this machine.**
-  The open question was whether cookies encrypted against a Keychain key
-  would decrypt from a copied directory. They do: `Storage.getCookies` over
-  CDP returned 543 of 547 values readable on one clone, 248 of 248 and 124
-  of 124 on the others, and the operator confirmed visually that the clone
-  opens signed in to the right account. So the clone path is proven end to
-  end, not merely plausible.
-- **Chrome never deletes `DevToolsActivePort` on exit.** A present file
-  proves a browser started, not that one is alive. `profile-login` gated on
-  it and refused forever after the first unclean exit, naming a dead port.
-  Check the process table for the user-data directory instead.
 
 Each of these cost real time to discover. Do not re-derive them.
 
@@ -288,19 +275,8 @@ Each of these cost real time to discover. Do not re-derive them.
 - **`normalizeDestination` is a hostname canonicaliser, not a URL parser.**
   Given `https://admin.acme.com/x` it returns the hostname `https`, because
   its "strip anything after a colon" step reads the scheme as a port. It
-  failed closed, so nothing caught it until a URL became load-bearing. Pipe
-  a destination through `destinationHost` (`src/browser/url.ts`) first.
-- **CDP request interception does not pause `data:` or `blob:` URLs.**
-  Verified against a real Chrome, with a regression test, because the
-  origin guard's whole design depends on it: a host-based guard would
-  otherwise block every inline image on the web.
-- **A `beforeunload` dialog must be ACCEPTED, not dismissed.** Dismissing it
-  cancels the navigation the driver itself just issued and strands the run
-  on a page it asked to leave. `confirm` and `prompt` are still dismissed.
-- **A capability's test double drifts, and a cast hides it.** `Tier2Page` is
-  nominal (private fields), so a double had to be cast past the compiler,
-  and it silently fell three versions behind in one milestone. Doubles are
-  now typed against `DrivablePage`. Do not reintroduce the cast.
+  failed closed, so nothing caught it until a URL became load-bearing. Pass
+  it a hostname, never a URL.
 
 ---
 
@@ -332,10 +308,6 @@ each was paid for by a defect that shipped.
 
 ## 7. Carried items
 
-- **The registry commands do a read-modify-write with no lock.** Two
-  concurrent `relay profile-add` runs would lose one edit. Acceptable for a
-  command an operator runs by hand; not acceptable if anything ever calls
-  them programmatically.
 - **`config/profiles.yaml` left this operator's `scratch` path in git
   history** before it was untracked. There is no remote, so the history is
   local only, and it is a path rather than a credential. Rewriting history
@@ -350,14 +322,6 @@ each was paid for by a defect that shipped.
   fragile.
 - Agents share one working tree. Prefer a git worktree per agent: stale
   in-memory copies overwrote one file four times in a single session.
-- The browser capability declares `requiresMachineLock: true` for both
-  tiers. FR-CAP-3's own example says a headless browser action does not
-  need the lock, and this build's tier 2 browser is headless, so the
-  declaration is conservative rather than accurate. A per-tier declaration
-  is a change to the registry's contract.
-- `detectHumanBlock` is a string-matching heuristic over known vendor
-  markers and wording. It will miss a bot wall nobody here has seen. Its
-  output carries evidence and a confidence for exactly that reason.
 - **The daemon exits on purpose and needs a supervisor.** Its health check
   exits non-zero after three failed Slack connectivity checks, deliberately,
   because an in-process reconnect is one more thing that can fail silently.
@@ -374,18 +338,6 @@ each was paid for by a defect that shipped.
   cause was an orphaned startup outliving its own deadline; fixed, with a
   test. **The check that tells them apart is the log line "orchestrator is
   running: Socket Mode is connected".** A running process is not evidence.
-- **The browser integration suites flake under parallel load, and it is
-  contention rather than a logic bug.** Recorded precisely because an
-  earlier entry here called it "one unexplained intermittent", which was
-  the wrong diagnosis. Caught by running the suite repeatedly to a file:
-  one run took **369 seconds against a normal 27**, and twelve tests in
-  `page.integration.test.ts` timed out at 30s each, every one of them
-  after the first, because they share a browser opened in `beforeAll`.
-  Eight test files each launch a real Chrome and vitest runs files in
-  parallel, so on a loaded machine a 30 second navigation timeout is
-  genuinely reachable. Roughly one run in ten. If this becomes annoying
-  the fix is to cap file parallelism for the browser suites, not to raise
-  the timeouts, which would only hide it.
 - **Relay's self-protection is a narrowing, not a boundary** (user decision
   7). A same-user process can rewrite the helper, its pid file, Relay's
   source or plist.
@@ -410,17 +362,15 @@ each was paid for by a defect that shipped.
   extensions (relay's migrations create none); `egress.ts` `wiredBy` and
   `VENDOR_LAUNCHER_SPAWNS` compare against paths as the scanner reports them,
   `src/...` relative to the repository root, so a scan from another root
-  reports the browser and git remote entries as inconsistent.
+  reports the approved action target and git remote entries as inconsistent.
 - **Clicking "Always Allow" on a `relay-…` Keychain dialog undoes the
   access list** for that item: it adds the asking program, and a worker's
   shell can then read it through `security`. The operator allows once, never
   always. Rebuilding the helper changes its signature, so items prompt again
   until `relay secrets migrate` recreates them.
 - The governed loop's `requestApproval` is still unwired; see section 4.
-- A page read is bounded at 100,000 characters, a step observation shown to
-  the model at 20,000, and console and network capture at 200 records each.
-  Every bound reports when it bites. None of them is measured; they are
-  chosen.
+- A step observation shown to the model is bounded at 20,000 characters,
+  and the bound reports when it bites. It is not measured; it is chosen.
 
 ---
 

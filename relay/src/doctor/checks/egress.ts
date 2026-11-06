@@ -45,8 +45,7 @@ function capabilitiesWithDestination(): readonly string[] {
 
 /**
  * Removes every occurrence of the operator's home directory from a piece of
- * text before it can reach a CheckResult (FR-SEC-1), matching
- * src/doctor/checks/profiles.ts's own redactHome: a scanned file path can
+ * text before it can reach a CheckResult (FR-SEC-1): a scanned file path can
  * legitimately start with the operator's home directory when `relay doctor`
  * is pointed at a source tree outside the repository, and this report is
  * exactly what an operator pastes into an issue or a chat.

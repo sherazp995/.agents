@@ -132,12 +132,11 @@ const CapabilityDefinitionSchema = z.object({
    *
    * THE GAP THIS CLOSES. FR-CAP-1 says the model's tool list derives from
    * this registry, but what reached the model was the capability's NAME and
-   * nothing else: "the only capabilities Relay can execute are: echo,
-   * browser." A model told that much can call `echo`, whose input is a
-   * string anyone would guess, and cannot call `browser`, whose input is an
-   * object with a destination and a list of eleven kinds of step. It would
-   * guess, the input would fail validation, and the run would burn steps
-   * discovering that.
+   * nothing else. A model told that much can call `echo`, whose input is a
+   * string anyone would guess, and cannot call `shell`, whose input is an
+   * object with a command, its arguments and a required working directory.
+   * It would guess, the input would fail validation, and the run would burn
+   * steps discovering that.
    *
    * WHY EXAMPLES RATHER THAN A GENERATED JSON SCHEMA. Emitting JSON Schema
    * from these zod schemas needs a converter dependency this project does
@@ -158,14 +157,12 @@ const CapabilityDefinitionSchema = z.object({
    * Turns this capability's own output into lines an OPERATOR should read,
    * regardless of what the model chose to say about it.
    *
-   * THE GAP THIS CLOSES, and it is a safety one rather than a nicety. The
-   * browser capability can return `humanActionNeeded`: the page was a
-   * CAPTCHA, a bot wall, or a signed-out session (FR-BR-8, FR-BR-10). It
-   * can also name the profile that acted, which FR-PRF-10 requires every
-   * report to state. Both reached the model, and whether either reached
-   * the operator depended entirely on the model choosing to mention it.
-   * A safety property that holds only when a model remembers is not a
-   * safety property.
+   * THE GAP THIS CLOSES, and it is a safety one rather than a nicety. A
+   * capability's output can carry something the operator must see, such as
+   * a step that needs a person to act. Without this field it reached only
+   * the model, and whether it reached the operator depended entirely on the
+   * model choosing to mention it. A safety property that holds only when a
+   * model remembers is not a safety property.
    *
    * Declared by the capability rather than derived at the report, for the
    * same reason `destinationOf` is: only the capability knows its own

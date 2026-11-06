@@ -20,10 +20,10 @@ import type { Logger } from '../obs/logger.js'
 import type { TeamProposer } from '../projects/proposals.js'
 import { closeRedis, type Redis } from '../redis/client.js'
 import type { SecretProvider } from '../secrets/provider.js'
-import { classifyBlocked, COOLDOWN_MS, readAccountPool, RedisCooldownStore, type Account } from './accounts.js'
+import { readAccountPool, RedisCooldownStore, type Account } from './accounts.js'
 import { codexVersion, isProvenEligible, readCodexEligibility } from './codex-probe.js'
 import { downloadTaskFiles } from './files.js'
-import { chatFolder } from './folder.js'
+import { chatFolder, textFolder } from './folder.js'
 import { createAutonomousGuard, killSwitchCheck } from './guard.js'
 import { cancelTaskWork, requestShellWrite, settleTaskOperations, sweepExpiredApprovals, threadChatRef } from './operations.js'
 import { buildReplyCommand } from '../live/control.js'
@@ -45,6 +45,8 @@ import { TEAM_PATH, type TeamHooks } from '../teams/types.js'
 import { ensureMemberWorktree, headOf } from '../teams/worktrees.js'
 import { buildClaudeSettings, buildCodexHookOverrides } from './worker-config.js'
 import { buildClaudeArgs, buildCodexArgs, buildWorkerEnv, claudeUserLine } from './worker.js'
+import { createExtensionTokens } from './extension-token.js'
+import { slackChannelPurpose } from '../chat/slack/channel-folder.js'
 import type { AutonomousRouting } from '../orchestrator.js'
 
 export type AutonomousConfig = NonNullable<RelayConfig['autonomous']>
@@ -122,7 +124,12 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
 
   // --- spawning ----------------------------------------------------------------
   const hookCommand = `'${process.execPath}' '${join(options.distRoot, 'scripts', 'hook-pretooluse.js')}'`
-  const spawnPlan = async (params: SpawnPlanParams): Promise<SpawnPlan> => buildSpawnPlan({ claudeBin: config.claude_bin, codexBin: config.codex_bin, hookCommand, hookUrl: bridge.url }, params)
+  const botToken = await options.secrets.get(SLACK_BOT_TOKEN_SECRET)
+  const extensionTokens = createExtensionTokens({ readPurpose: slackChannelPurpose(botToken), log })
+  const spawnPlan = async (params: SpawnPlanParams): Promise<SpawnPlan> => {
+    const extensionToken = params.subject.noMcp ? undefined : await extensionTokens.forWorker(params.context.task.id, (await replyRef(params.context.task)).channel)
+    return buildSpawnPlan({ claudeBin: config.claude_bin, codexBin: config.codex_bin, hookCommand, hookUrl: bridge.url }, params, extensionToken)
+  }
 
   const turnDeps: TurnRunnerDeps = {
     pool,
@@ -137,7 +144,6 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   }
 
   // --- the scheduler -------------------------------------------------------------
-  const botToken = await options.secrets.get(SLACK_BOT_TOKEN_SECRET)
   const threadReplies = slackThreadReplies(botToken)
   const team = createTeamScheduler({
     pool,
@@ -182,22 +188,19 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
         const name = await findOpenSessionName(sessionId)
         if (name === null) return false
         const replyCommand = buildReplyCommand(await replyRef(task))
-        // The courier is itself a short `claude -p`, so it takes the first Claude login that is not cooling down.
-        // Only a blocked login moves on to the next one: any other failure may have sent the message already, and retrying would send it twice.
-        for (const account of (await turnDeps.readAccounts()).filter((entry) => entry.client === 'claude')) {
-          if (((await turnDeps.cooldowns.cooldownUntil(account.key)) ?? 0) > Date.now()) continue
-          const outcome = await deliverViaCourier({ targetCwd: task.chatCwd, targetName: name, body: text, replyCommand, senderLabel: 'your operator' }, { env: account.env, log })
-          if (outcome.outcome === 'delivered') {
-            log.info({ taskId: task.id, peer: outcome.peer, accountKey: account.key }, 'sent the thread\'s messages into the open chat')
-            return true
-          }
-          log.warn({ taskId: task.id, accountKey: account.key, reason: outcome.reason }, 'could not send into the open chat with this account')
-          const blocked = classifyBlocked({ exitCode: 1, stderr: outcome.reason })
-          if (blocked === null) return false
-          await turnDeps.cooldowns.coolDown(account.key, Date.now() + COOLDOWN_MS[blocked])
+        // The courier takes the first Claude login that is not cooling down; only a blocked login moves on (src/live/courier.ts).
+        const outcome = await deliverViaCourier(
+          { targetCwd: task.chatCwd, targetName: name, body: text, replyCommand, senderLabel: 'your operator' },
+          { accounts: { readAccounts: turnDeps.readAccounts, cooldowns: turnDeps.cooldowns }, log },
+        )
+        if (outcome.outcome === 'delivered') {
+          log.info({ taskId: task.id, peer: outcome.peer }, 'sent the thread\'s messages into the open chat')
+          return true
         }
+        log.warn({ taskId: task.id, reason: outcome.reason }, 'could not send into the open chat')
         return false
       },
+      extensionTokenChanged: async (task) => extensionTokens.changedSince(task.id, (await replyRef(task)).channel),
       settleApprovals: (_task, lease) => settleTaskOperations(pool, lease),
       cleanupStopped,
       sweep: () => sweepExpiredApprovals(pool, workspaceId),
@@ -208,7 +211,12 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   const routing: AutonomousRouting = {
     async route(event: ChatEvent, thread, routeOptions) {
       const repos = () => loadRepoRegistryIfPresent(options.repoRegistryPath).repos
-      return routeAutonomousEvent({ pool, outbox: dispatcher, chatFolder: (text) => chatFolder(text, repos()), wake: () => scheduler.wake(), log }, event, thread, routeOptions)
+      return routeAutonomousEvent(
+        { pool, outbox: dispatcher, chatFolder: (text) => chatFolder(text, repos()), reminderFolder: (text) => textFolder(text, repos()), wake: () => scheduler.wake(), log },
+        event,
+        thread,
+        routeOptions,
+      )
     },
     async stopSession(sessionId) {
       const task = await loadTaskBySession(pool, sessionId)
@@ -241,17 +249,22 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
  * member's subject brings its worktree, brief, model and no MCP servers; the
  * task's own subject gives exactly today's single agent.
  */
-export function buildSpawnPlan(setup: { claudeBin: string; codexBin: string; hookCommand: string; hookUrl: string }, params: SpawnPlanParams): SpawnPlan {
+export function buildSpawnPlan(setup: { claudeBin: string; codexBin: string; hookCommand: string; hookUrl: string }, params: SpawnPlanParams, extensionToken?: string): SpawnPlan {
   const { context, account, subject } = params
-  const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken })
+  // A worker with no MCP servers never gets the channel's extension token: it could still read it from its environment.
+  const token = subject.noMcp ? undefined : extensionToken
+  const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken, ...(token !== undefined ? { extensionToken: token } : {}) })
   // A member works in its worktree; a task's chat folder is set at intake, the home folder only for one created before that.
   const cwd = subject.cwd ?? context.task.chatCwd ?? (process.env.HOME ?? '/')
   const brief = subject.brief ?? WORKER_BRIEF
   const flags = { ...(params.resume !== undefined ? { resume: params.resume } : {}), ...(subject.model !== null ? { model: subject.model } : {}), ...(subject.noMcp ? { noMcp: true } : {}) }
+  const readOnly = context.task.readOnly
+  // runTurnOnPool binds a read-only task to Claude; this refuses a plan that would lift it anyway.
+  if (readOnly && (account.client !== 'claude' || !subject.noMcp)) throw new Error('a read-only task only runs on Claude with no MCP servers')
   if (account.client === 'claude') {
     return {
       bin: setup.claudeBin,
-      args: buildClaudeArgs({ brief, settingsJson: buildClaudeSettings({ hookCommand: setup.hookCommand }), ...flags }),
+      args: buildClaudeArgs({ brief, settingsJson: buildClaudeSettings({ hookCommand: setup.hookCommand, allTools: readOnly }), ...flags }),
       input: claudeUserLine(context.prompt),
       cwd,
       env,

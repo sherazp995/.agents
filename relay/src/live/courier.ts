@@ -45,6 +45,7 @@ import { spawn } from 'node:child_process'
 
 import type { Logger } from '../obs/logger.js'
 import { UNTRUSTED_DATA_TAG, renderForModel, wrapUntrusted } from '../agent/untrusted.js'
+import { chooseAccount, classifyBlocked, COOLDOWN_MS, type Account, type CooldownStore } from '../autonomous/accounts.js'
 
 /** The binary Relay spawns. Matches src/agent/loop.ts's own constant rather than re-deriving it. */
 const CLAUDE_BINARY = 'claude'
@@ -87,11 +88,24 @@ export type CourierRequest = {
   readonly senderLabel: string
 }
 
+/**
+ * The Claude logins a courier may run on: agents-hub's account list
+ * (`~/.agents/accounts.toml`, read by src/autonomous/accounts.ts) and the
+ * cooldowns task turns share. A login that fails to authenticate or is out
+ * of usage cools down and the next is tried, so one expired login does not
+ * stop every push.
+ */
+export type CourierAccounts = {
+  readonly readAccounts: () => Promise<readonly Account[]>
+  readonly cooldowns: CooldownStore
+}
+
 export type CourierDependencies = {
   readonly timeoutMs?: number
-  readonly spawnCourier?: (prompt: string, timeoutMs: number) => Promise<{ readonly stdout: string; readonly stderr: string }>
-  /** Added to the default courier's environment, e.g. an account's CLAUDE_CONFIG_DIR. */
-  readonly env?: Readonly<Record<string, string>>
+  /** `env` selects the login (CLAUDE_CONFIG_DIR); empty means the default login. */
+  readonly spawnCourier?: (prompt: string, timeoutMs: number, env: Readonly<Record<string, string>>) => Promise<{ readonly stdout: string; readonly stderr: string }>
+  /** Without it the courier runs once, on the default login. */
+  readonly accounts?: CourierAccounts
   readonly log?: Logger
 }
 
@@ -178,6 +192,13 @@ export function buildCourierPrompt(request: CourierRequest): string {
   ].join('\n')
 }
 
+/** Relay's environment on the chosen login: the default login unless `env` names another. */
+function courierEnv(env: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = { ...process.env }
+  delete base.CLAUDE_CONFIG_DIR
+  return { ...base, ...env }
+}
+
 function defaultSpawnCourier(prompt: string, timeoutMs: number, env: Readonly<Record<string, string>> = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -191,7 +212,7 @@ function defaultSpawnCourier(prompt: string, timeoutMs: number, env: Readonly<Re
         '--allowedTools',
         'ListAgents SendMessage',
       ],
-      { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } },
+      { stdio: ['pipe', 'pipe', 'pipe'], env: courierEnv(env) },
     )
 
     let stdout = ''
@@ -255,28 +276,58 @@ export async function deliverViaCourier(
   request: CourierRequest,
   deps: CourierDependencies = {},
 ): Promise<CourierOutcome> {
+  const accounts = deps.accounts
+  if (accounts === undefined) return (await deliverOnce(request, deps, {})).outcome
+
+  const claude = (await accounts.readAccounts()).filter((account) => account.client === 'claude')
+  const tried: string[] = []
+  const blocked: string[] = []
+  for (;;) {
+    const choice = await chooseAccount(claude, { cooldowns: accounts.cooldowns, isCodexEligible: async () => false, exclude: tried })
+    if (choice.kind === 'none') {
+      return { outcome: 'not_delivered', reason: `no Claude login could run the courier${blocked.length > 0 ? ` (${blocked.join('; ')})` : ': every one is cooling down'}` }
+    }
+    const account = choice.account
+    tried.push(account.key)
+    const attempt = await deliverOnce(request, deps, account.env)
+    if (attempt.blocked === null) return attempt.outcome
+    await accounts.cooldowns.coolDown(account.key, Date.now() + COOLDOWN_MS[attempt.blocked])
+    blocked.push(`${account.key}: ${attempt.blocked.replace('_', ' ')}`)
+    deps.log?.warn({ account: account.key, reason: attempt.blocked }, 'the courier login is blocked; cooling it down and trying the next Claude login')
+  }
+}
+
+/** One courier run on one login; `blocked` says why that login cannot serve, so the caller tries the next. */
+async function deliverOnce(
+  request: CourierRequest,
+  deps: CourierDependencies,
+  env: Readonly<Record<string, string>>,
+): Promise<{ outcome: CourierOutcome; blocked: ReturnType<typeof classifyBlocked> }> {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_COURIER_TIMEOUT_MS
-  const spawnCourier = deps.spawnCourier ?? ((prompt: string, timeout: number) => defaultSpawnCourier(prompt, timeout, deps.env))
+  const spawnCourier = deps.spawnCourier ?? defaultSpawnCourier
 
   let result: { readonly stdout: string; readonly stderr: string }
   try {
-    result = await spawnCourier(buildCourierPrompt(request), timeoutMs)
+    result = await spawnCourier(buildCourierPrompt(request), timeoutMs, env)
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code
     return {
-      outcome: 'not_delivered',
-      reason: `the courier could not be run: ${error instanceof Error ? error.message : String(error)}`,
+      outcome: { outcome: 'not_delivered', reason: `the courier could not be run: ${error instanceof Error ? error.message : String(error)}` },
+      blocked: code === 'ENOENT' ? 'missing_cli' : null,
     }
   }
 
   const outcome = readCourierOutcome(result.stdout)
-  if (outcome.outcome === 'delivered') return outcome
+  if (outcome.outcome === 'delivered') return { outcome, blocked: null }
+  // `claude -p` prints a login or limit failure on stdout, so both streams are read.
+  const blocked = classifyBlocked({ exitCode: 1, stderr: `${result.stderr}\n${result.stdout}` })
 
   // stderr carried into the reason rather than dropped. When the token is
   // missing, whatever the courier complained about is the only evidence of
   // why, and this reason is what reaches the operator's log.
   // stdout too: `claude -p` prints a login or limit failure there, which is how a caller tells a blocked account from any other failure.
   const detail = [result.stderr.trim() && `stderr: ${result.stderr.trim().slice(0, 400)}`, result.stdout.trim() && `output: ${result.stdout.trim().slice(-400)}`].filter(Boolean).join('; ')
-  return detail.length === 0 ? outcome : { outcome: 'not_delivered', reason: `${outcome.reason} (${detail})` }
+  return { outcome: detail.length === 0 ? outcome : { outcome: 'not_delivered', reason: `${outcome.reason} (${detail})` }, blocked }
 }
 
 /**

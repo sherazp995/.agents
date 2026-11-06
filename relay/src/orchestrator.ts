@@ -24,6 +24,8 @@
  * with no production caller. handleChatEvent below is that caller.
  */
 
+import { readAccountPool, RedisCooldownStore } from './autonomous/accounts.js'
+import { routeReminder } from './reminder-route.js'
 import { startAutonomousRuntime, type AutonomousRuntime, type AutonomousRuntimeOptions } from './autonomous/runtime.js'
 import type { Pool } from 'pg'
 import type { AgentLoopLimits, AgentLoopResult } from './agent/loop.js'
@@ -80,7 +82,7 @@ import {
   takeBackMessage,
   waitForClaim,
 } from './live/control.js'
-import { deliverViaCourier } from './live/courier.js'
+import { deliverViaCourier, type CourierAccounts } from './live/courier.js'
 import { findOpenSessionName } from './live/open-session.js'
 import { KillSwitchEngagedError, PostgresKillSwitchStore, createKillSwitch } from './killswitch.js'
 import type { KillSwitch } from './killswitch.js'
@@ -485,13 +487,12 @@ function isCompactReport(result: AgentLoopResult): boolean {
  * function to say something real here instead.
  */
 /**
- * FR-PRF-10 and FR-BR-8, in the one place the operator actually reads.
+ * Capability notices, in the one place the operator actually reads.
  *
  * These lines come from the capabilities themselves
  * (`CapabilityDefinition.reportLines`), not from the model's answer. That
- * distinction is the point: "this page showed a CAPTCHA" and "acted in the
- * acme-client profile" both used to reach the model and then depend on it
- * choosing to repeat them. A safety property that holds only when a model
+ * distinction is the point: a notice that reached only the model would
+ * depend on it choosing to repeat it. A safety property that holds only when a model
  * remembers is not a safety property.
  *
  * Bounded, because a chat message is not a log file, and stated as
@@ -516,10 +517,10 @@ function formatNoticeLines(notices: readonly string[]): readonly string[] {
  * THIS LINE WAS A HARDCODED LIE for exactly as long as it took to add a
  * second capability. It read "nothing on the operator's machine. This
  * milestone's only capability, echo, reads its input back and never
- * modifies anything", which stopped being true the moment `browser` could
- * drive a real browser, sign into real sites and write downloaded files to
- * disk. It is now derived from the registry's own idempotency classes, so
- * it cannot fall out of step with what Relay can do.
+ * modifies anything", which stopped being true the moment `shell` could
+ * run commands and write files in a working directory. It is now derived
+ * from the registry's own idempotency classes, so it cannot fall out of
+ * step with what Relay can do.
  */
 function formatWhatChangedLine(capabilitiesUsed: readonly string[]): string {
   if (capabilitiesUsed.length === 0) {
@@ -712,6 +713,8 @@ export type OrchestratorDeps = {
   readonly autonomous?: AutonomousRouting
   /** New threads run in the folder their channel's description names, asking when it is missing (src/chat/slack/folder-questions.ts). */
   readonly folderQuestions?: FolderQuestions
+  /** The Claude logins the live-session courier may run on (agents-hub's list); absent, it runs on the default login only. */
+  readonly courierAccounts?: CourierAccounts
   /** Injected for tests; production starts the real `claude` for an answered `direct` request. */
   readonly directSession?: DirectSessionDependencies
 }
@@ -792,7 +795,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // a run is ever created. No amount of retrying this branch can produce a
   // run row, the same "fail closed before persistence" shape PRE-2's own
   // branch above uses.
-  if (isStopInstruction(event.text)) {
+  if (event.origin !== 'reminder' && isStopInstruction(event.text)) {
     // A request waiting for a folder has no session to stop yet.
     if (existing === null && deps.folderQuestions?.cancel(threadRef, principalId)) {
       await dispatcher.perform({ kind: 'post', ref: replyRef, text: CANCELLED_TEXT })
@@ -835,6 +838,11 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
       }
       throw error
     }
+  }
+
+  if (event.origin === 'reminder') {
+    await routeReminder(deps, event, { threadRef, replyRef })
+    return
   }
 
   // A thread with no session yet: the answer to a folder question, or a new
@@ -987,7 +995,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
                   replyCommand: buildReplyCommand(replyRef),
                   senderLabel: 'your operator',
                 },
-                { log },
+                { log, ...(deps.courierAccounts ? { accounts: deps.courierAccounts } : {}) },
               )
             : ({ outcome: 'not_delivered', reason: 'the session has no recorded working directory to address' } as const)
 
@@ -1259,6 +1267,8 @@ export type StartOrchestratorOptions = {
   policy: Policy
   /** The runtime config's `autonomous` section; enables thread mentions and requires the kill switch store. */
   autonomous?: RelayConfig['autonomous']
+  /** The runtime config's `slack` section: the channels whose Slackbot reminders start read-only tasks, taken only with autonomous mode on. */
+  slack?: RelayConfig['slack']
   /** What autonomous mode needs beyond the config; required when `autonomous.enabled`. */
   autonomousRuntime?: Omit<AutonomousRuntimeOptions, 'pool' | 'workspaceId' | 'dispatcher' | 'log' | 'config' | 'killSwitch' | 'secrets'>
   /** Task 4's approval seam; see OrchestratorDeps.requestApproval's own doc comment. */
@@ -1328,6 +1338,8 @@ export async function startOrchestrator(
     log,
     folderQuestions,
     acceptThreadMentions: autonomousEnabled,
+    // A reminder only ever starts a read-only autonomous task, so none is taken without autonomous mode.
+    ...(autonomousEnabled ? { reminderChannels: new Map((options.slack?.reminders ?? []).map((entry) => [entry.channel, entry.act_as])) } : {}),
     ...(options.autonomousRuntime ? { approvalReceiptKey: options.autonomousRuntime.receiptKey } : {}),
     onApprovalResolved: async (result) => {
       await autonomousRuntime?.onApprovalResolved(result)
@@ -1397,6 +1409,10 @@ export async function startOrchestrator(
     })
   }
 
+  // The courier that pushes into an attached chat tries each Claude login agents-hub lists, sharing the turns' cooldowns.
+  const courierAccounts: CourierAccounts | undefined = options.autonomousRuntime
+    ? { readAccounts: () => readAccountPool(undefined, log), cooldowns: new RedisCooldownStore(options.autonomousRuntime.redis) }
+    : undefined
   const activeHandlers = new Set<Promise<void>>()
 
   await dispatcher.start(async (event) => {
@@ -1412,6 +1428,7 @@ export async function startOrchestrator(
         ...(options.requestApproval ? { requestApproval: options.requestApproval } : {}),
         ...(options.limits ? { limits: options.limits } : {}),
         ...(autonomousRuntime ? { autonomous: autonomousRuntime.routing } : {}),
+        ...(courierAccounts ? { courierAccounts } : {}),
         folderQuestions,
       },
       event,

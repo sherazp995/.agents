@@ -94,6 +94,8 @@ export interface SchedulerEffects {
   threadHistory?(task: AutonomousTask, beforeTs: string | null): Promise<string | null>
   /** Sends `text` into a terminal chat open on the task's session; false when none is open or it was not delivered. */
   deliverToOpenChat?(task: AutonomousTask, text: string): Promise<boolean>
+  /** True when the channel's extension token is no longer the one the running worker started with; its new messages then wait for the next worker. */
+  extensionTokenChanged?(task: AutonomousTask): Promise<boolean>
 }
 
 export type SchedulerDeps = {
@@ -274,7 +276,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * about that worker's own requests.
    */
   async function deliveredToOpenChat(task: AutonomousTask, lease: Lease, dueAt: Date | null): Promise<boolean> {
-    if (!deps.effects.deliverToOpenChat || task.pendingEvents.length === 0) return false
+    // A read-only task's messages go only to its own limited worker, never to a terminal chat without the limit.
+    if (task.readOnly || !deps.effects.deliverToOpenChat || task.pendingEvents.length === 0) return false
     const fileOf = new Map(task.files.map((file) => [file.slackFileId, file]))
     const files = task.pendingEvents.flatMap((event) => event.fileIds.flatMap((id) => fileOf.get(id) ?? []))
     if (!(await deps.effects.deliverToOpenChat(task, renderNewMessages(task.pendingEvents, files)))) return false
@@ -356,6 +359,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const isNew = (event: AutonomousTask['pendingEvents'][number]): boolean => !consumed.includes(event.id) && !sent.events.some((done) => done.id === event.id)
       const current = await loadTask(deps.pool, taskId)
       if (!current?.pendingEvents.some(isNew)) return
+      // A changed or removed token must not reach these messages: they stay pending for a worker started with the current one.
+      if (await deps.effects.extensionTokenChanged?.(current)) {
+        inbox.send = null
+        return
+      }
       if (current.files.some((file) => file.status === 'pending')) {
         for (const line of await deps.effects.downloadFiles(current, lease)) await post(current, line)
       }

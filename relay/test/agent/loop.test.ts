@@ -62,7 +62,7 @@ import { EngineCwdError, runClaudeEngine, validateEngineCwd } from '../../src/ag
 import type { Capability, Engine, EngineInvocation, EngineResult } from '../../src/agent/engine.js'
 import { DECISION_JSON_SCHEMA, PLAN_JSON_SCHEMA } from '../../src/agent/planner.js'
 import type { PlanResponse } from '../../src/agent/planner.js'
-import { echo } from '../../src/agent/capabilities/echo.js'
+import { ECHO_CAPABILITY_DEFINITION, echo } from '../../src/agent/capabilities/echo.js'
 import { registerBuiltinCapabilities } from '../../src/capabilities/wiring.js'
 import {
   CapabilityRegistry,
@@ -70,7 +70,6 @@ import {
   registerCapability,
   unregisterCapability,
 } from '../../src/capabilities/registry.js'
-import { BROWSER_CAPABILITY_DEFINITION } from '../../src/agent/capabilities/browser.js'
 import type { ApprovalDecision, ApprovalRequest } from '../../src/policy/engine.js'
 import type { Policy } from '../../src/config/schema.js'
 import { defaultSessionsRoot, listEngineSessions } from '../../src/sessions/discovery.js'
@@ -873,16 +872,15 @@ describeDb('runAgentLoop', () => {
     })
 
     it('collects the operator-facing notes a capability declares, and records which capabilities ran', async () => {
-      // The other end of FR-PRF-10 and FR-BR-8: the loop is what carries a
-      // capability's own report lines out to where a report can render
+      // The loop is what carries a capability's own report lines out to where a report can render
       // them, independently of anything the model said.
       const registry = new CapabilityRegistry()
       registry.register({
-        ...BROWSER_CAPABILITY_DEFINITION,
+        ...ECHO_CAPABILITY_DEFINITION,
         name: 'noting',
-        // Registered at echo's tier, not the browser's: this test is about
-        // notice collection, and a 'sensitive' capability under the default
-        // 'ask' policy would be refused before it ever produced one.
+        // Registered at echo's tier: this test is about notice collection,
+        // and a 'sensitive' capability under the default 'ask' policy would
+        // be refused before it ever produced one.
         riskTier: 'read' as const,
         idempotencyClass: 'safe' as const,
         requiresMachineLock: false,
@@ -894,11 +892,11 @@ describeDb('runAgentLoop', () => {
       // Registered into the PROCESS-WIDE registry too, because that is what
       // the loop reads; cleaned up after.
       registerCapability({
-        ...BROWSER_CAPABILITY_DEFINITION,
+        ...ECHO_CAPABILITY_DEFINITION,
         name: 'noting',
-        // Registered at echo's tier, not the browser's: this test is about
-        // notice collection, and a 'sensitive' capability under the default
-        // 'ask' policy would be refused before it ever produced one.
+        // Registered at echo's tier: this test is about notice collection,
+        // and a 'sensitive' capability under the default 'ask' policy would
+        // be refused before it ever produced one.
         riskTier: 'read' as const,
         idempotencyClass: 'safe' as const,
         requiresMachineLock: false,
@@ -927,7 +925,7 @@ describeDb('runAgentLoop', () => {
 
     it('does not let a capability\'s own reporting failure damage a run that otherwise worked', async () => {
       registerCapability({
-        ...BROWSER_CAPABILITY_DEFINITION,
+        ...ECHO_CAPABILITY_DEFINITION,
         name: 'bad-reporter',
         riskTier: 'read' as const,
         idempotencyClass: 'safe' as const,
@@ -960,7 +958,7 @@ describeDb('runAgentLoop', () => {
     it('tells the model HOW to call a registered capability, not merely that it exists', async () => {
       // The gap this closes: the prompt used to carry capability names and
       // nothing else, which is enough to call `echo` and useless for
-      // `browser`, whose input is an object with an ordered list of steps.
+      // `shell`, whose input is an object with a command and its arguments.
       // FR-CAP-1's "the model's tool list derives from the registry",
       // applied to the whole entry rather than just the name.
       registerBuiltinCapabilities()
@@ -978,10 +976,10 @@ describeDb('runAgentLoop', () => {
       })
 
       const planPrompt = calls[0]?.systemPrompt ?? ''
-      expect(planPrompt).toContain('- browser (risk: sensitive)')
+      expect(planPrompt).toContain('- shell (risk: write)')
       // The input shape, without which the model can only guess.
       expect(planPrompt).toContain('Example inputs:')
-      expect(planPrompt).toContain('"action":"navigate"')
+      expect(planPrompt).toContain('"working_directory":"/path/to/repo"')
       expect(planPrompt).toContain('- echo (risk: read)')
     })
 
@@ -1006,7 +1004,7 @@ describeDb('runAgentLoop', () => {
     it('shows the decision call what the step it just ran actually returned, not merely that a step happened', async () => {
       // The gap this closes: before it, the decision prompt carried only the
       // task and a step count, so the model wrote its answer having never
-      // seen a single capability result. A browser read's content reached
+      // seen a single capability result. A step's output reached
       // the step row in Postgres and stopped there. See
       // buildStepObservation's own doc comment.
       const { run, runContext } = await buildRun()

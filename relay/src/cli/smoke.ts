@@ -3,9 +3,9 @@
  * valid configuration; this proves it actually works, for real, before they
  * find out otherwise from Slack.
  *
- * SEVEN STEPS, each independently reported: config, Postgres, Redis,
- * migrations, three Slack checks (token, Socket Mode, identity), browser
- * tier availability, and, opt-in only, a real agent run. Every step reports
+ * EACH STEP INDEPENDENTLY REPORTED: config, Postgres, Redis, migrations,
+ * three Slack checks (token, Socket Mode, identity), and, opt-in only, a
+ * real agent run. Every step reports
  * one of three states: passed, failed, or skipped, and every step states
  * WHAT it verified in its own words, regardless of outcome, so a passing
  * step never reads as having proven more than it did and a skipped one is
@@ -37,7 +37,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
 import type { Pool } from 'pg'
 
 import { runAgentLoop } from '../agent/loop.js'
@@ -46,8 +45,8 @@ import { echo, ECHO_CAPABILITY_NAME } from '../agent/capabilities/echo.js'
 import { wrapUntrusted } from '../agent/untrusted.js'
 import { registerBuiltinCapabilities } from '../capabilities/wiring.js'
 import { ConfigError } from '../config/errors.js'
-import { defaultConfigPath, defaultPolicyPath, defaultProfilesPath, resolveMigrationsDirectory } from '../config/paths.js'
-import { loadPolicy, loadProfileRegistryIfPresent, loadRelayConfig } from '../config/load.js'
+import { defaultConfigPath, defaultPolicyPath, resolveMigrationsDirectory } from '../config/paths.js'
+import { loadPolicy, loadRelayConfig } from '../config/load.js'
 import { resolveOperatorDatabaseUrl } from '../config/database-url.js'
 import type { Policy, RelayConfig } from '../config/schema.js'
 import { applyMigrations } from '../db/migrate.js'
@@ -59,9 +58,6 @@ import type { CheckContext } from '../doctor/registry.js'
 import { createRunContext } from '../obs/context.js'
 import { createLogger } from '../obs/logger.js'
 import type { Logger } from '../obs/logger.js'
-import type { ProfileEntry, ProfileRegistry } from '../profiles/schema.js'
-import { reportTierAvailability, validatePin } from '../profiles/tiers.js'
-import { runTier2SelfTest } from '../browser/tier2/selftest.js'
 import * as runsStore from '../runs/store.js'
 import type { Step } from '../runs/store.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
@@ -73,7 +69,6 @@ import { resolveWorkspaceId } from '../tenancy/workspaces.js'
 
 export const DEFAULT_SMOKE_CONFIG_PATH = defaultConfigPath()
 export const DEFAULT_SMOKE_POLICY_PATH = defaultPolicyPath()
-export const DEFAULT_SMOKE_PROFILES_PATH = defaultProfilesPath()
 export const DEFAULT_MIGRATIONS_DIR = resolveMigrationsDirectory()
 
 /** Never a real chat adapter's platform value, so a smoke run's workspace, principal, and session can never collide with, or be mistaken for, a real one. */
@@ -96,8 +91,6 @@ const STEP_NAMES = [
   'slack-token-valid',
   'slack-socket-mode',
   'slack-identity',
-  'browser-tiers',
-  'browser-driver',
   'agent-run',
 ] as const
 
@@ -113,92 +106,6 @@ function fromCheckResult(name: string, verified: string, check: CheckResult): Sm
   const status: SmokeStatus = check.status === 'ok' ? 'passed' : check.status === 'failed' ? 'failed' : 'skipped'
   const detail = check.remediation ? `${check.detail} (fix: ${check.remediation})` : check.detail
   return { name, status, verified, detail }
-}
-
-// ---------------------------------------------------------------------------
-// Browser tier availability, FR-PRF-6a. Reporting only, unlike relay init:
-// this step's job is to tell the truth about what is configured, not to
-// gate anything.
-// ---------------------------------------------------------------------------
-
-function describeProfile(profile: ProfileEntry, home: string, platform: NodeJS.Platform): { line: string; pinFailed: boolean } {
-  if (profile.classification === 'personal') {
-    return { line: `profile "${profile.name}" (personal): excluded from agent use, per FR-PRF-5.`, pinFailed: false }
-  }
-  const report = reportTierAvailability(profile, home, platform)
-  const tierLines = report.tiers
-    .map((entry) => `tier ${entry.tier} ${entry.available ? 'available' : 'unavailable'} (${entry.reason})`)
-    .join('; ')
-  if (profile.pinned_tier === undefined) {
-    return { line: `profile "${profile.name}" (${profile.classification}): ${tierLines}.`, pinFailed: false }
-  }
-  const pin = validatePin(profile, home, platform)
-  if (pin.ok) {
-    return {
-      line: `profile "${profile.name}" (${profile.classification}): ${tierLines}. Pinned to tier ${profile.pinned_tier}, honoured.`,
-      pinFailed: false,
-    }
-  }
-  return { line: `profile "${profile.name}" (${profile.classification}): ${tierLines}. PIN FAILURE: ${pin.reason}`, pinFailed: true }
-}
-
-/**
- * FR-SET-21's readiness question for the browser, answered by doing it
- * rather than by inspecting configuration: the step above reports which
- * tiers are AVAILABLE for each configured profile, which is a statement
- * about paths and flags. This one launches a real headless Chrome and
- * checks that an off-allowlist request is genuinely prevented. The two
- * answer different questions and a green report needs both.
- *
- * A machine with no Chrome is a skip, not a failure: an operator who never
- * uses the browser capability does not need one, and a readiness report
- * that fails over an unused optional dependency stops being read.
- */
-async function stepBrowserDriver(runSelfTest: typeof runTier2SelfTest): Promise<SmokeStepResult> {
-  const verified =
-    'that a real headless Chrome can be launched and driven on this machine, and that an off-allowlist request ' +
-    'from a driven page is actually prevented from leaving the browser (FR-PRF-4), checked against a local ' +
-    "server's own request log rather than against the driver's own account of itself"
-  const result = await runSelfTest()
-  if (result.outcome === 'passed') return { name: 'browser-driver', status: 'passed', verified, detail: result.detail }
-  if (result.outcome === 'skipped') {
-    return {
-      name: 'browser-driver',
-      status: 'skipped',
-      verified: 'nothing; the tier 2 driver was not exercised',
-      detail: result.reason,
-    }
-  }
-  return { name: 'browser-driver', status: 'failed', verified, detail: result.reason }
-}
-
-function stepTierAvailability(profilesPath: string, home: string, platform: NodeJS.Platform): SmokeStepResult {
-  const verified =
-    'which browser tiers (1: extension detection; 2/3: driver-owned enforcement) are genuinely available for ' +
-    'each configured profile, and whether any tier pin can actually be honoured'
-  let registry: ProfileRegistry
-  try {
-    registry = loadProfileRegistryIfPresent(profilesPath)
-  } catch (error) {
-    const detail = error instanceof ConfigError ? error.reason : (error as Error).message
-    return { name: 'browser-tiers', status: 'failed', verified, detail: `${profilesPath} could not be read: ${detail}` }
-  }
-  if (registry.profiles.length === 0) {
-    return {
-      name: 'browser-tiers',
-      status: 'passed',
-      verified,
-      detail: 'no profiles configured yet. Every browser call is refused with a clear reason (FR-PRF-2), which is a safe state.',
-    }
-  }
-  const described = registry.profiles.map((profile) => describeProfile(profile, home, platform))
-  const pinFailed = described.some((entry) => entry.pinFailed)
-  return {
-    name: 'browser-tiers',
-    status: pinFailed ? 'failed' : 'passed',
-    verified,
-    detail: described.map((entry) => entry.line).join('\n'),
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,8 +208,8 @@ async function provisionSmokeIdentity(pool: Pool): Promise<{ workspaceId: string
 /**
  * The impure half: provisions a throwaway identity, registers the built-in
  * capabilities (idempotent; see src/capabilities/wiring.ts's own comment),
- * runs the real loop with ONLY echo in its capability map (never browser,
- * so this never needs a profile or a driver), reads back the persisted
+ * runs the real loop with ONLY echo in its capability map, so it never
+ * touches the machine beyond the run's own rows, reads back the persisted
  * steps, and hands both to evaluateAgentRun. `runAgentLoopFn` defaults to
  * the real runAgentLoop; production never overrides it. Tests override it
  * to exercise runSmoke's own wiring (is this step even attempted, given
@@ -381,12 +288,9 @@ function formatSmokeReport(results: readonly SmokeStepResult[], elapsedMs: numbe
 export type SmokeOptions = {
   configPath: string
   policyPath: string
-  profilesPath: string
   migrationsDir: string
   /** FR-SET-21: the one step that costs real money. Never runs unless this is explicitly true. */
   runAgent: boolean
-  home?: string
-  platform?: NodeJS.Platform
   now?: () => number
   fetchImpl?: typeof fetch
   createPoolFn?: (url: string) => Pool
@@ -394,8 +298,6 @@ export type SmokeOptions = {
   applyMigrationsFn?: (pool: Pool, dir: string, options?: { log?: Logger }) => Promise<string[]>
   runAgentLoopFn?: typeof runAgentLoop
   runAgentSmokeStepFn?: (pool: Pool, policy: Policy, log: Logger, runAgentLoopFn: typeof runAgentLoop) => Promise<SmokeStepResult>
-  /** Seam for the tier 2 driver self-test, so a test of this file's own reporting does not have to launch a real Chrome. Production always uses the real one. */
-  runTier2SelfTestFn?: typeof runTier2SelfTest
   secretsFn?: (config: RelayConfig) => SecretProvider
 }
 
@@ -412,14 +314,11 @@ export type SmokeResult = { report: string; exitCode: number }
 export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
   const now = options.now ?? Date.now
   const startedAt = now()
-  const home = options.home ?? homedir()
-  const platform = options.platform ?? process.platform
   const createPoolFn = options.createPoolFn ?? createPool
   const closePoolFn = options.closePoolFn ?? closePool
   const applyMigrationsFn = options.applyMigrationsFn ?? applyMigrations
   const runAgentLoopFn = options.runAgentLoopFn ?? runAgentLoop
   const runAgentSmokeStepFn = options.runAgentSmokeStepFn ?? runAgentSmokeStep
-  const runTier2SelfTestFn = options.runTier2SelfTestFn ?? runTier2SelfTest
   const secretsFn = options.secretsFn ?? createSecretProvider
   const fetchImpl = options.fetchImpl ?? fetch
 
@@ -515,9 +414,6 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeResult> {
         await checkSlackIdentity(fetchImpl).run(ctx),
       ),
     )
-
-    results.push(stepTierAvailability(options.profilesPath, home, platform))
-    results.push(await stepBrowserDriver(runTier2SelfTestFn))
 
     if (!options.runAgent) {
       results.push({

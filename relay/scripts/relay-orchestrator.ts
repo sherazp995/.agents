@@ -268,6 +268,7 @@ async function main(): Promise<void> {
       startOrchestrator(pool, secrets, log, {
         policy,
         ...(config.autonomous ? { autonomous: config.autonomous } : {}),
+        ...(config.slack ? { slack: config.slack } : {}),
         ...(autonomousRuntime ? { autonomousRuntime } : {}),
         ui: {
           enabled: config.ui?.enabled ?? true,

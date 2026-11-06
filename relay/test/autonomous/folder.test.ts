@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { chatFolder, namedFolder } from '../../src/autonomous/folder.js'
+import { chatFolder, namedFolder, textFolder } from '../../src/autonomous/folder.js'
 import type { RepoEntry } from '../../src/repos/schema.js'
 
 const home = mkdtempSync(join(tmpdir(), 'relay-folder-'))
@@ -32,5 +32,13 @@ describe('namedFolder', () => {
     expect(namedFolder('use ~/code', home)).toBe(join(home, 'code'))
     expect(namedFolder('use agents', home)).toBeUndefined()
     expect(namedFolder('use ~/missing', home)).toBeUndefined()
+  })
+})
+
+describe('textFolder', () => {
+  it('matches a repo name that ends a sentence, as the real reminder "status update for hassan in cohabit." does', () => {
+    const withCohabit = [...repos, { name: 'cohabit', path: '/repos/cohabit' }] as unknown as RepoEntry[]
+    expect(textFolder("give me today's status update for hassan in cohabit.", withCohabit, home)).toBe('/repos/cohabit')
+    expect(textFolder('hello there.', withCohabit, home)).toBeUndefined()
   })
 })

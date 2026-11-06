@@ -79,6 +79,7 @@ export function createAutonomousGuard(deps: GuardDeps): AutonomousGuard {
       const stale = await staleMember(context, deps)
       if (stale !== undefined) return deny(stale)
     } else if (task.leaseGeneration !== context.leaseGeneration) return deny('this worker was superseded (stale lease generation)')
+    if (task.readOnly) return readOnlyDecision(parsed.data.toolName, parsed.data.toolInput)
     if (member && parsed.data.toolName.startsWith('mcp__')) return deny('team members have no MCP tools: your final text goes to the lead, who posts.')
     if (parsed.data.toolName !== 'Bash') return { decision: 'allow', reason: 'only shell commands are checked' }
     const input = shellInputSchema.safeParse(parsed.data.toolInput)
@@ -109,6 +110,47 @@ export function createAutonomousGuard(deps: GuardDeps): AutonomousGuard {
   }
 
   return { decide }
+}
+
+/**
+ * The tools a reminder's read-only task may call (migration 0029). Bash is
+ * among them because reading GitHub and git needs it; its remote writes and
+ * every relay command are refused below, with no approval card. Like the
+ * rest of this guard it is a speed bump for Bash, not a sandbox: a script
+ * the chat writes can still get around it (relay/README.md, "Reminders").
+ */
+export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  'Read',
+  'Glob',
+  'Grep',
+  'LS',
+  'NotebookRead',
+  'Bash',
+  'BashOutput',
+  'KillShell',
+  'Skill',
+  'TodoWrite',
+  'Task',
+  'Agent',
+  'ToolSearch',
+  'WebFetch',
+  'WebSearch',
+])
+
+const READ_ONLY_PREFIX = 'this task was started by a reminder and has read access only'
+
+function readOnlyDecision(toolName: string, toolInput: unknown): HookDecisionResult {
+  if (!READ_ONLY_TOOLS.has(toolName)) return deny(`${READ_ONLY_PREFIX}, so ${toolName} is not available. Answer with what you can read.`)
+  if (toolName !== 'Bash') return { decision: 'allow', reason: 'a reading tool' }
+  const input = shellInputSchema.safeParse(toolInput)
+  if (!input.success) return deny('malformed Bash tool input: no command')
+  const relay = findInCommand(input.data.command, (segment) => (segment.words.some((word) => basename(word.text) === 'relay') ? ['relay'] : []))
+  if ('error' in relay) return deny(`could not parse this command (${relay.error}); rewrite it plainly`)
+  if (relay.length > 0) return deny(`${READ_ONLY_PREFIX}, so it may not run relay commands; your final text is posted for you.`)
+  const writes = remoteWrites(input.data.command)
+  if ('error' in writes) return deny(`could not parse this command (${writes.error}); rewrite it plainly`)
+  if (writes.length > 0) return deny(`${READ_ONLY_PREFIX}, so it may not write to a remote (${writes.join(', ')}); there is no approval for it.`)
+  return { decision: 'allow', reason: 'no remote write' }
 }
 
 /** Why a member's token is no longer good (its assignment gone, not running, or superseded); undefined when it is. */

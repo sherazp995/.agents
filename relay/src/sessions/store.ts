@@ -328,12 +328,23 @@ export async function attachSessionToEngineChat(
   engineSessionId: string,
   engineCwd: string,
 ): Promise<void> {
+  // A reminder's read-only task (0029_task_read_only.sql) must never be handed to a chat without that limit.
   const { rowCount } = await pool.query(
-    `UPDATE sessions SET engine_session_id = $2, engine_cwd = $3 WHERE id = $1`,
+    `UPDATE sessions SET engine_session_id = $2, engine_cwd = $3
+     WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM autonomous_tasks WHERE session_id = $1 AND read_only)`,
     [sessionId, engineSessionId, engineCwd],
   )
-  if (rowCount === 0) {
-    throw new Error(`attachSessionToEngineChat: no session found with id "${sessionId}"`)
+  if (rowCount !== 0) return
+  const { rows } = await pool.query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])
+  if (rows.length > 0) throw new ReadOnlySessionError()
+  throw new Error(`attachSessionToEngineChat: no session found with id "${sessionId}"`)
+}
+
+/** The thread's task was started by a Slackbot reminder and is read-only, so it cannot be attached to a chat. */
+export class ReadOnlySessionError extends Error {
+  constructor() {
+    super('this thread was started by a reminder and is read-only, so it cannot be attached to a chat')
+    this.name = 'ReadOnlySessionError'
   }
 }
 

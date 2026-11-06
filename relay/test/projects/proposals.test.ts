@@ -139,6 +139,13 @@ describe('the team proposal bridge route', () => {
     expect(calls).toHaveLength(1)
   })
 
+  it("refuses a reminder's read-only task and proposes nothing", async () => {
+    const { calls, context, bridge: server } = await setup()
+    await pool.query('UPDATE autonomous_tasks SET read_only = true WHERE id = $1', [context.taskId])
+    expect(await ask(server, server.issueToken(context))).toMatchObject({ status: 403, body: { message: expect.stringContaining('read-only') } })
+    expect(calls).toEqual([])
+  })
+
   it('refuses the instance token and a probe token', async () => {
     const { calls, bridge: server } = await setup()
     expect((await ask(server, server.token)).status).toBe(403)

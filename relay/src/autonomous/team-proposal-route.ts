@@ -45,7 +45,9 @@ export function teamProposalRoute(deps: TeamProposalRouteDeps): BridgeRoute {
     const now = deps.now?.() ?? new Date()
     if (context.workspaceId !== deps.workspaceId || !UUID.test(context.taskId)) return refuse(403, 'This only works from a live Relay turn.')
     if (context.assignment !== undefined) return refuse(403, 'Team members cannot ask for a team proposal.')
-    const reason = notLiveReason(await loadTask(deps.pool, context.taskId), context, now)
+    const task = await loadTask(deps.pool, context.taskId)
+    if (task?.readOnly === true) return refuse(403, 'This task was started by a reminder and is read-only, so it cannot propose a team.')
+    const reason = notLiveReason(task, context, now)
     if (reason !== undefined) return refuse(403, `This only works from a live Relay turn: ${reason}.`)
     if (deps.teamProposer === undefined) return refuse(503, 'Team proposals are not available on this Relay.')
 

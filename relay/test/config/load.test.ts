@@ -208,6 +208,15 @@ secrets:
 `
 
 describe('loadRelayConfig', () => {
+  it('loads slack.reminders, refuses a channel listed twice or a channel name, and takes none when absent', () => {
+    const reminders = (entries: string) => `${VALID_CONFIG}slack:\n  reminders:\n${entries}`
+    const entry = (channel: string) => `    - channel: ${channel}\n      act_as: U0BP0RW8FCH\n`
+    expect(loadRelayConfig(writeTemp('relay.config.yaml', reminders(entry('C0CDW07KZ27')))).slack?.reminders).toEqual([{ channel: 'C0CDW07KZ27', act_as: 'U0BP0RW8FCH' }])
+    expect(() => loadRelayConfig(writeTemp('relay.config.yaml', reminders(entry('C0CDW07KZ27') + entry('C0CDW07KZ27'))))).toThrow(/listed twice/)
+    expect(() => loadRelayConfig(writeTemp('relay.config.yaml', reminders(entry('cohabit-hassan'))))).toThrow(/channel id/)
+    expect(loadRelayConfig(writeTemp('relay.config.yaml', VALID_CONFIG)).slack).toBeUndefined()
+  })
+
   it('accepts a config asserting zero data retention', () => {
     const config = loadRelayConfig(writeTemp('relay.config.yaml', VALID_CONFIG))
     expect(config.model_provider.zero_data_retention).toBe(true)

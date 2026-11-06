@@ -77,11 +77,10 @@ export function relayPath(...segments: readonly string[]): string {
 
 export const DEFAULT_CONFIG_FILENAME = join('config', 'relay.config.yaml')
 export const DEFAULT_POLICY_FILENAME = join('config', 'policy.yaml')
-export const DEFAULT_PROFILES_FILENAME = join('config', 'profiles.yaml')
 export const DEFAULT_REPOS_FILENAME = join('config', 'repos.yaml')
 
 /**
- * The three config paths, resolved against the Relay home.
+ * The config paths, resolved against the Relay home.
  *
  * Functions rather than constants so the answer follows the environment at
  * call time. A constant evaluated at import would freeze whatever the
@@ -90,7 +89,6 @@ export const DEFAULT_REPOS_FILENAME = join('config', 'repos.yaml')
  */
 export const defaultConfigPath = (): string => relayPath(DEFAULT_CONFIG_FILENAME)
 export const defaultPolicyPath = (): string => relayPath(DEFAULT_POLICY_FILENAME)
-export const defaultProfilesPath = (): string => relayPath(DEFAULT_PROFILES_FILENAME)
 export const defaultReposPath = (): string => relayPath(DEFAULT_REPOS_FILENAME)
 
 /**

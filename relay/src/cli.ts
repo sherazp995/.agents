@@ -8,21 +8,11 @@ import { runUi } from './cli/ui.js'
 import { registerTeamCommands } from './cli/team.js'
 import { DEFAULT_UI_PORT } from './config/schema.js'
 import { spawn } from 'node:child_process'
-import { DEFAULT_PROFILES_PATH as PROFILE_LOGIN_PROFILES_PATH, runProfileLogin } from './cli/profile-login.js'
-import { formatChromeProfiles, listChromeProfiles, runProfileClone } from './cli/profile-clone.js'
 import { runInstallService, runUninstallService, serviceBinaries, serviceInstalled } from './cli/service.js'
-import {
-  runProfileAdd,
-  runProfileOrigins,
-  runProfileRegistry,
-  runProfileRemove,
-} from './cli/profile-registry.js'
 import {
   DEFAULT_CONFIG_PATH,
   DEFAULT_DATABASE_URL,
   DEFAULT_POLICY_PATH,
-  DEFAULT_PROFILES_EXAMPLE_PATH,
-  DEFAULT_PROFILES_PATH,
   DEFAULT_REDIS_URL,
   runInit,
 } from './cli/init.js'
@@ -41,7 +31,6 @@ import {
   DEFAULT_MIGRATIONS_DIR,
   DEFAULT_SMOKE_CONFIG_PATH,
   DEFAULT_SMOKE_POLICY_PATH,
-  DEFAULT_SMOKE_PROFILES_PATH,
   runSmoke,
 } from './cli/smoke.js'
 import { createSecretProvider } from './secrets/index.js'
@@ -59,11 +48,6 @@ import { fileURLToPath } from 'node:url'
 import { runReposAdd } from './cli/repos.js'
 import { runDbCreate } from './cli/db.js'
 import { buildSetupSteps, promptHidden, promptLine, runSetup } from './cli/setup.js'
-
-/** Commander's accumulator for a repeatable option, so `--origin a --origin b` yields both rather than the last one. */
-function collect(value: string, previous: string[]): string[] {
-  return [...previous, value]
-}
 
 /** The relay checkout or package this CLI runs from: dist/src/cli.js sits two folders below it. */
 const RELAY_ROOT = fileURLToPath(new URL('../..', import.meta.url))
@@ -88,22 +72,13 @@ program
 program
   .command('init')
   .description(
-    'Wizard that takes a clean machine to a working installation: writes starter config, policy, and ' +
-      'profiles, reviews the hard-blocked origin list, reports browser tier availability, and finishes with ' +
-      'relay doctor. Never prompts when run without a terminal, e.g. in CI.',
+    'Wizard that takes a clean machine to a working installation: writes starter config and policy, ' +
+      'reviews the hard-blocked origin list, and finishes with relay doctor. Never prompts when run without a terminal, e.g. in CI.',
   )
   .option('-c, --config <path>', 'runtime config path to write or check', DEFAULT_CONFIG_PATH)
   .option('-p, --policy <path>', 'policy path to write or check', DEFAULT_POLICY_PATH)
-  .option('--profiles <path>', 'profile registry path to write or check', DEFAULT_PROFILES_PATH)
-  .option('--profiles-example <path>', 'worked example copied into --profiles', DEFAULT_PROFILES_EXAMPLE_PATH)
   .option('-y, --yes', 'never prompt; use flags and built-in defaults only, for CI and scripts', false)
   .option('--force', 'overwrite an existing file instead of leaving it untouched', false)
-  .option('--skip-profiles', 'do not write or offer to write a profile registry', false)
-  .option(
-    '--with-example-profiles',
-    'with --yes and no profiles file yet, copy the worked example instead of leaving profiles unconfigured',
-    false,
-  )
   .option(
     '--hard-blocked-origin <origin>',
     'an origin to add to the hard-blocked list, on top of the built-in defaults (repeatable)',
@@ -116,12 +91,8 @@ program
     async (options: {
       config: string
       policy: string
-      profiles: string
-      profilesExample: string
       yes: boolean
       force: boolean
-      skipProfiles: boolean
-      withExampleProfiles: boolean
       hardBlockedOrigin: string[]
       databaseUrl: string
       redisUrl: string
@@ -129,12 +100,8 @@ program
       const result = await runInit({
         configPath: options.config,
         policyPath: options.policy,
-        profilesPath: options.profiles,
-        profilesExamplePath: options.profilesExample,
         yes: options.yes,
         force: options.force,
-        skipProfiles: options.skipProfiles,
-        withExampleProfiles: options.withExampleProfiles,
         hardBlockedOrigins: options.hardBlockedOrigin,
         databaseUrl: options.databaseUrl,
         redisUrl: options.redisUrl,
@@ -143,159 +110,6 @@ program
       process.exitCode = result.exitCode
     },
   )
-
-program
-  .command('profile-login')
-  .argument('<name>', 'the short name of a profile in the registry')
-  .description(
-    'Open a registered browser profile in a normal window so you can sign in to the sites it is for. Relay has ' +
-      'no credentials and never will, so this one step is done by hand, once; after it, the profile\'s own cookie ' +
-      'jar carries the session. Refuses a profile Relay could never drive, rather than leaving you with a working ' +
-      'login and a broken profile.',
-  )
-  .option('--profiles <path>', 'profile registry path', PROFILE_LOGIN_PROFILES_PATH)
-  .action((name: string, options: { profiles: string }) => {
-    const result = runProfileLogin({ name, profilesPath: options.profiles })
-    process.stdout.write(`${result.report}\n`)
-    process.exitCode = result.exitCode
-  })
-
-program
-  .command('profile-list')
-  .description(
-    "List the Chrome profiles available to clone, with their display names and signed-in accounts. The first " +
-      'column is the folder name that profile-clone takes, which is the one thing Chrome never shows you.',
-  )
-  .action(() => {
-    process.stdout.write(`${formatChromeProfiles(listChromeProfiles())}\n`)
-  })
-
-program
-  .command('profile-clone')
-  .description(
-    "Copy an already-signed-in Chrome profile into a dedicated automation directory Relay can drive. The " +
-      'cookies come with it, so you do not sign in again. Chrome must be quit: copying a live cookie store ' +
-      'yields a clone that is silently signed out.',
-  )
-  .requiredOption('--from <folder>', 'the Chrome profile FOLDER name, e.g. "Profile 10" (see relay profile-list)')
-  .requiredOption('--to <name>', 'the Relay profile name, also the new directory name')
-  .option('--root <path>', 'where cloned profiles are written (default: ~/chrome-profiles)')
-  .option('--force', 'overwrite an existing destination', false)
-  .option(
-    '--origin <pattern>',
-    'an origin the cloned profile may reach. Repeatable. Given at least one, the clone REGISTERS itself in the profile registry, so there is nothing to paste by hand',
-    collect,
-    [],
-  )
-  .option('--project <name>', 'the project or client this profile belongs to, used when resolving a profile for a task')
-  .option('--classification <kind>', 'work, client or personal (default: client)')
-  .option('--no-register', 'clone only, and print the registry entry instead of writing it')
-  .action((options: { from: string; to: string; root?: string; force: boolean; origin: string[]; project?: string; classification?: string; register: boolean }) => {
-    const result = runProfileClone({
-      from: options.from,
-      to: options.to,
-      force: options.force,
-      suppressRegistryBlock: options.register !== false && options.origin.length > 0,
-      ...(options.root !== undefined ? { root: options.root } : {}),
-    })
-    process.stdout.write(`${result.report}\n`)
-    process.exitCode = result.exitCode
-
-    // Registration is a second, separate step on purpose: a clone that
-    // succeeded is worth keeping even if the registry edit is refused, and
-    // the operator should be able to see which of the two failed.
-    if (result.exitCode !== 0 || options.register === false || options.origin.length === 0) {
-      if (result.exitCode === 0 && options.origin.length === 0) {
-        process.stdout.write(
-          `\nNot registered: no --origin was given, and a profile with no allowlist is refused by FR-PRF-1.\n` +
-            `Register it once you know what it should reach:\n` +
-            `  relay profile-add ${options.to} --dir ${result.destination ?? `~/chrome-profiles/${options.to}`} --origin example.com\n`,
-        )
-      }
-      return
-    }
-
-    const registered = runProfileAdd({
-      name: options.to,
-      dir: result.destination ?? '',
-      origins: options.origin,
-      force: options.force,
-      ...(options.project !== undefined ? { project: options.project } : {}),
-      ...(options.classification !== undefined ? { classification: options.classification } : {}),
-    })
-    process.stdout.write(`\n${registered.report}\n`)
-    if (registered.exitCode !== 0) process.exitCode = registered.exitCode
-  })
-
-program
-  .command('profile-add')
-  .argument('<name>', 'the short name a task will use to ask for this profile')
-  .description(
-    'Register a browser profile directory so Relay can drive it. Use this for a directory that already exists, ' +
-      'including one relay profile-clone made earlier. Every profile must declare the origins it may reach.',
-  )
-  .requiredOption('--dir <path>', "the profile's user-data directory")
-  .option('--origin <pattern>', 'an origin this profile may reach. Repeatable', collect, [])
-  .option('--profile-directory <name>', "Chrome's profile folder inside that directory (default: Default)")
-  .option('--classification <kind>', 'work, client or personal (default: client)')
-  .option('--project <name>', 'the project or client this profile belongs to')
-  .option('--description <text>', 'what this profile is for')
-  .option('--tier <n>', 'pin to browser tier 2 or 3, where origin scoping is ENFORCED (client profiles default to 2)', (value: string) => Number.parseInt(value, 10))
-  .option('--force', 'replace an existing entry of the same name', false)
-  .option('--profiles <path>', 'profile registry path', DEFAULT_PROFILES_PATH)
-  .action((name: string, options: { dir: string; origin: string[]; profileDirectory?: string; classification?: string; project?: string; description?: string; tier?: number; force: boolean; profiles: string }) => {
-    const result = runProfileAdd({
-      name,
-      dir: options.dir,
-      origins: options.origin,
-      force: options.force,
-      profilesPath: options.profiles,
-      ...(options.profileDirectory !== undefined ? { profileDirectory: options.profileDirectory } : {}),
-      ...(options.classification !== undefined ? { classification: options.classification } : {}),
-      ...(options.project !== undefined ? { project: options.project } : {}),
-      ...(options.description !== undefined ? { description: options.description } : {}),
-      ...(options.tier !== undefined ? { tier: options.tier } : {}),
-    })
-    process.stdout.write(`${result.report}\n`)
-    process.exitCode = result.exitCode
-  })
-
-program
-  .command('profile-origins')
-  .argument('<name>', 'the registered profile to re-scope')
-  .description(
-    'Change what a registered profile may reach. This is the edit that recurs: an allowlist starts narrow and ' +
-      'widens as real tasks are refused. An edit that would leave a profile with no allowed origins is refused.',
-  )
-  .option('--allow <pattern>', 'add an allowed origin. Repeatable', collect, [])
-  .option('--deny <pattern>', 'add a denied origin, which overrides the allowlist. Repeatable', collect, [])
-  .option('--remove <pattern>', 'remove a pattern from both lists. Repeatable', collect, [])
-  .option('--profiles <path>', 'profile registry path', DEFAULT_PROFILES_PATH)
-  .action((name: string, options: { allow: string[]; deny: string[]; remove: string[]; profiles: string }) => {
-    const result = runProfileOrigins({
-      name,
-      allow: options.allow,
-      deny: options.deny,
-      remove: options.remove,
-      profilesPath: options.profiles,
-    })
-    process.stdout.write(`${result.report}\n`)
-    process.exitCode = result.exitCode
-  })
-
-program
-  .command('profile-remove')
-  .argument('<name>', 'the registered profile to unregister')
-  .description(
-    'Unregister a profile. The cloned directory and its cookies are left on disk: deleting credential material ' +
-      'as a side effect of a config edit is the wrong default in the direction you cannot undo.',
-  )
-  .option('--profiles <path>', 'profile registry path', DEFAULT_PROFILES_PATH)
-  .action((name: string, options: { profiles: string }) => {
-    const result = runProfileRemove({ name, profilesPath: options.profiles })
-    process.stdout.write(`${result.report}\n`)
-    process.exitCode = result.exitCode
-  })
 
 program
   .command('install-service')
@@ -337,27 +151,13 @@ program
   })
 
 program
-  .command('profile-registry')
-  .description(
-    'Show the profiles Relay has registered and what each may reach. profile-list shows Chrome profiles ' +
-      'available to clone; this shows the ones Relay can actually drive.',
-  )
-  .option('--profiles <path>', 'profile registry path', DEFAULT_PROFILES_PATH)
-  .action((options: { profiles: string }) => {
-    const result = runProfileRegistry({ profilesPath: options.profiles })
-    process.stdout.write(`${result.report}\n`)
-    process.exitCode = result.exitCode
-  })
-
-program
   .command('smoke')
   .description(
-    'Proves the installation actually works: Postgres, Redis, migrations, Slack, and browser tier ' +
-      'availability always run; a real end-to-end agent run only runs with --run-agent, since it costs money.',
+    'Proves the installation actually works: Postgres, Redis, migrations and Slack ' +
+      'always run; a real end-to-end agent run only runs with --run-agent, since it costs money.',
   )
   .option('-c, --config <path>', 'runtime config path', DEFAULT_SMOKE_CONFIG_PATH)
   .option('-p, --policy <path>', 'policy path', DEFAULT_SMOKE_POLICY_PATH)
-  .option('--profiles <path>', 'profile registry path', DEFAULT_SMOKE_PROFILES_PATH)
   .option('--migrations-dir <path>', 'directory of SQL migrations to apply', DEFAULT_MIGRATIONS_DIR)
   .option(
     '--run-agent',
@@ -365,11 +165,10 @@ program
     false,
   )
   .action(
-    async (options: { config: string; policy: string; profiles: string; migrationsDir: string; runAgent: boolean }) => {
+    async (options: { config: string; policy: string; migrationsDir: string; runAgent: boolean }) => {
       const result = await runSmoke({
         configPath: options.config,
         policyPath: options.policy,
-        profilesPath: options.profiles,
         migrationsDir: options.migrationsDir,
         runAgent: options.runAgent,
       })
@@ -761,12 +560,8 @@ program
         runInit({
           configPath: options.config,
           policyPath: options.policy,
-          profilesPath: DEFAULT_PROFILES_PATH,
-          profilesExamplePath: DEFAULT_PROFILES_EXAMPLE_PATH,
           yes: false,
           force: false,
-          skipProfiles: true,
-          withExampleProfiles: false,
           hardBlockedOrigins: [],
           databaseUrl: DEFAULT_DATABASE_URL,
           redisUrl: DEFAULT_REDIS_URL,

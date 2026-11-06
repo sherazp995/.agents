@@ -19,3 +19,14 @@ ui:
   port: 7766
 secrets:
   provider: keychain
+slack:
+  # Slackbot reminders that mention Relay start a read-only task here, run as
+  # the owner below (README, "Reminders"). Anyone who can post in a listed
+  # channel can set one, so list only channels you trust.
+  reminders:
+    - channel: C0CDW07KZ27 # cohabit-hassan
+      act_as: U0BP0RW8FCH
+    - channel: C0CE4CX137T # cohabit-zubair
+      act_as: U0BP0RW8FCH
+    - channel: C0CGAM76QBS # insitu-hassan
+      act_as: U0BP0RW8FCH
