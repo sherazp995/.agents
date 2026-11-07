@@ -156,6 +156,18 @@ export function isStopInstruction(text: Untrusted<string>): boolean {
   return unwrapForAudit(text).trim().toLowerCase() === STOP_INSTRUCTION_TEXT
 }
 
+/**
+ * Ending a thread's autonomous task for good, matched the same way as Stop.
+ * Stop only pauses an autonomous task (the thread stays open for the next
+ * message); "relay end" is the deliberate way to close it, and two words
+ * nobody types in passing keep it from firing by accident.
+ */
+export const END_INSTRUCTION_TEXT = 'relay end'
+
+export function isEndInstruction(text: Untrusted<string>): boolean {
+  return unwrapForAudit(text).trim().toLowerCase() === END_INSTRUCTION_TEXT
+}
+
 /** Outbound activity a caller wants an adapter to perform. */
 export type ChatAction =
   /**

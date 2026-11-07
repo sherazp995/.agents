@@ -11,9 +11,9 @@ import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { processGroupAlive, spawnGated } from '../../src/process/gated-spawn.js'
-import { acquireLease, addNote, intakeMention, loadTask, type AutonomousTask } from '../../src/autonomous/store.js'
+import { acquireLease, addNote, intakeMention, loadTask, PAUSED_NOTE, updateTask, type AutonomousTask } from '../../src/autonomous/store.js'
 import { downloadTaskFiles, type FileFetch } from '../../src/autonomous/files.js'
-import { createScheduler, stopAutonomousTask, type SchedulerEffects, type TurnRequestContext, type TurnResult } from '../../src/autonomous/scheduler.js'
+import { createScheduler, pauseAutonomousTask, stopAutonomousTask, type SchedulerEffects, type TurnRequestContext, type TurnResult } from '../../src/autonomous/scheduler.js'
 import type { TurnOutcome } from '../../src/autonomous/worker.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 
@@ -453,6 +453,46 @@ describe('autonomous scheduler', () => {
     await s.tick()
     expect(h.turns).toHaveLength(1)
 
+  })
+
+  it('Stop that pauses kills the worker, refuses its late writes, and the next message runs a turn on that message only', async () => {
+    const { workspaceId, task, say } = await newTask()
+    const dir = mkdtempSync(join(tmpdir(), 'relay-pause-'))
+    const bin = join(dir, 'claude')
+    writeFileSync(bin, '#!/bin/sh\nsleep 30\n')
+    chmodSync(bin, 0o755)
+    const child = spawnGated({ bin, args: [], cwd: dir, env: process.env, timeoutMs: 60_000 })
+    const killedTurn = await acquireLease(pool, task.id, 'killed-turn', 60_000)
+    if (!killedTurn) throw new Error('expected a lease')
+    await pool.query('UPDATE autonomous_tasks SET worker_pid = $2, worker_pgid = $2 WHERE id = $1', [task.id, child.pgid])
+    const h = harness([async () => reply('Answered the new message.')])
+
+    const result = await pauseAutonomousTask(pool, h.effects, task.id, new Date().toISOString())
+
+    expect(result.kind).toBe('paused')
+    expect(processGroupAlive(child.pgid)).toBe(false)
+    expect(h.cleaned).toEqual([task.id])
+    expect(await updateTask(pool, killedTurn, { accountKey: 'late write' })).toBeUndefined()
+    const paused = await loadTask(pool, task.id)
+    expect(paused?.cancelRequestedAt).toBeNull()
+    expect(paused?.workerPgid).toBeNull()
+    await child.done
+
+    await say('what is the disk status?')
+    await scheduler(workspaceId, h).tick()
+    expect(h.turns).toHaveLength(1)
+    expect(h.turns[0]?.prompt).toContain('what is the disk status?')
+    expect(h.turns[0]?.prompt).toContain(PAUSED_NOTE)
+    expect(h.turns[0]?.prompt).not.toContain('fix the login bug')
+  })
+
+  it('Stop that pauses leaves an ended task ended', async () => {
+    const { task } = await newTask()
+    const h = harness([])
+    await stopAutonomousTask(pool, h.effects, task.id)
+
+    expect(await pauseAutonomousTask(pool, h.effects, task.id, new Date().toISOString())).toEqual({ kind: 'ended' })
+    expect((await loadTask(pool, task.id))?.phase).toBe('stopped')
   })
 
   it('stops every open task when the kill switch is engaged', async () => {

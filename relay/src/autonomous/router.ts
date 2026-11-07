@@ -22,7 +22,13 @@ const INTAKE_ATTEMPTS = 3
 /** Waits between attempts; together they stay inside two seconds. */
 const RETRY_DELAYS_MS = [250, 750]
 
-export const STOPPED_TEXT = 'This task is stopped.'
+export const STOPPED_TEXT = 'This task has ended. Start a new message to begin a new task.'
+/**
+ * A message that lands while a Stop is still shutting the work down. The pause keeps only messages
+ * Relay received after the "stop" (by the adapter's receive time), so one sent just before it but
+ * routed late is dropped: the reply promises only what holds in both cases.
+ */
+export const STILL_STOPPING_TEXT = 'Still stopping. Messages sent after the stop will be picked up once it finishes.'
 export const REMINDER_NO_FOLDER_TEXT =
   "I could not tell which folder this reminder is about. Name the repo in the reminder's text, or put the folder in this channel's description."
 
@@ -88,9 +94,14 @@ export async function routeAutonomousEvent(
   if (result.kind === 'appended' && result.duplicate) return 'handled'
 
   const task = result.task
-  // A stopped task takes no more work; the message is answered, never acted on.
-  if (task.phase === 'stopped' || task.cancelRequestedAt !== null) {
+  // An ended task takes no more work; the message is answered, never acted on.
+  if (task.phase === 'stopped') {
     await deps.outbox.enqueue({ kind: 'post', ref: thread.replyRef, text: STOPPED_TEXT }, event.workspaceId)
+    return 'handled'
+  }
+  // A Stop still in progress: the message stays pending and the pause wakes the task for it.
+  if (task.cancelRequestedAt !== null) {
+    await deps.outbox.enqueue({ kind: 'post', ref: thread.replyRef, text: STILL_STOPPING_TEXT }, event.workspaceId)
     return 'handled'
   }
   const preference = result.kind === 'created' ? parseAgentPreference(text) : null

@@ -10,6 +10,9 @@ import {
   acquireLease,
   intakeMention,
   loadTask,
+  markTaskPaused,
+  markTaskStopped,
+  PAUSED_NOTE,
   renewLease,
   requestCancel,
   updateTask,
@@ -166,6 +169,62 @@ describe('autonomous store', () => {
     await pool.query(`UPDATE autonomous_tasks SET lease_expires_at = NULL WHERE id = $1`, [taskId])
     expect(await acquireLease(pool, taskId, 'daemon-c', 60_000)).toBeUndefined()
     expect((await loadTask(pool, taskId))?.cancelRequestedAt).not.toBeNull()
+  })
+
+  describe('markTaskPaused', () => {
+    const file = (slackFileId: string) => ({ slackFileId, name: `${slackFileId}.txt`, url: `https://files.slack.com/${slackFileId}`, sizeBytes: 1, status: 'pending' as const })
+
+    it('drops the messages and files up to the stop, keeps later ones, leaves one stopped note and fences the old lease', async () => {
+      const { workspaceId, principalId } = await setup()
+      const before = intakeParams(workspaceId, principalId, 'C1:7.1', 'C1:7.1')
+      const created = await intakeMention(pool, { ...before, event: { ...before.event, fileIds: ['F_OLD'], receivedAt: '2026-11-07T06:00:00.000Z' }, files: [file('F_OLD')] })
+      if (created.kind !== 'created') throw new Error('expected a new task')
+      const taskId = created.task.id
+      const after = intakeParams(workspaceId, principalId, 'C1:7.1', 'C1:7.3')
+      await intakeMention(pool, { ...after, event: { ...after.event, fileIds: ['F_NEW'], receivedAt: '2026-11-07T06:00:02.000Z' }, files: [file('F_NEW')] })
+      await pool.query(`UPDATE autonomous_tasks SET pending_notes = '["an old relay note"]'::jsonb WHERE id = $1`, [taskId])
+      const held = await acquireLease(pool, taskId, 'daemon-a', 60_000)
+      if (!held) throw new Error('expected a lease')
+      await requestCancel(pool, taskId)
+
+      const result = await markTaskPaused(pool, taskId, '2026-11-07T06:00:01.000Z')
+
+      if (result.kind !== 'paused') throw new Error(`expected paused, got ${result.kind}`)
+      const task = result.task
+      expect(task.cancelRequestedAt).toBeNull()
+      expect(task.phase).toBe(created.task.phase)
+      expect(task.pendingEvents.map((event) => event.id)).toEqual(['C1:7.3'])
+      expect(task.files.map((kept) => kept.slackFileId)).toEqual(['F_NEW'])
+      expect(task.pendingNotes).toEqual([PAUSED_NOTE])
+      expect(task.nextWakeupAt).not.toBeNull()
+      expect(task.leaseGeneration).toBe(held.generation + 1)
+      expect(await updateTask(pool, held, { accountKey: 'claude' })).toBeUndefined()
+      expect(await acquireLease(pool, taskId, 'daemon-b', 60_000)).toBeDefined()
+    })
+
+    it('leaves no wakeup when nothing was sent after the stop', async () => {
+      const { workspaceId, principalId } = await setup()
+      const created = await intakeMention(pool, intakeParams(workspaceId, principalId, 'C1:8.1', 'C1:8.1'))
+      if (created.kind !== 'created') throw new Error('expected a new task')
+
+      const result = await markTaskPaused(pool, created.task.id, new Date(Date.now() + 1_000).toISOString())
+
+      if (result.kind !== 'paused') throw new Error(`expected paused, got ${result.kind}`)
+      expect(result.task.pendingEvents).toEqual([])
+      expect(result.task.nextWakeupAt).toBeNull()
+    })
+
+    it('never reopens an ended task', async () => {
+      const { workspaceId, principalId } = await setup()
+      const created = await intakeMention(pool, intakeParams(workspaceId, principalId, 'C1:9.1', 'C1:9.1'))
+      if (created.kind !== 'created') throw new Error('expected a new task')
+      await markTaskStopped(pool, created.task.id)
+
+      expect(await markTaskPaused(pool, created.task.id, new Date().toISOString())).toEqual({ kind: 'ended' })
+      const task = await loadTask(pool, created.task.id)
+      expect(task?.phase).toBe('stopped')
+      expect(task?.cancelRequestedAt).not.toBeNull()
+    })
   })
 
   it('leaves existing approval rows readable with a null receipt and the standard kind', async () => {

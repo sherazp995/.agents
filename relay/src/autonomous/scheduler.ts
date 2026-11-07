@@ -36,6 +36,7 @@ import {
   listDueWakeups,
   listTasksWithWorker,
   loadTask,
+  markTaskPaused,
   markTaskStopped,
   recordWorker,
   releaseLease,
@@ -44,6 +45,7 @@ import {
   updateTask,
   type AutonomousTask,
   type Lease,
+  type PauseResult,
   type TaskUpdate,
 } from './store.js'
 import type { TurnInbox, TurnOutcome } from './worker.js'
@@ -177,6 +179,34 @@ export async function stopAutonomousTask(pool: Pool, effects: Pick<SchedulerEffe
   const stopped = await markTaskStopped(pool, taskId)
   if (stopped) await effects.cleanupStopped(stopped)
   return stopped
+}
+
+/**
+ * Stop for an autonomous task that stays open: the same durable cancel,
+ * worker kill and cleanup as stopAutonomousTask, then markTaskPaused instead
+ * of the final "stopped" phase, so the thread's next message carries on.
+ *
+ * The cancel flag stays set until the worker group has exited and the
+ * cleanup (team members, operations, approvals) is done, because clearing it
+ * is what lets every later lease, spawn and dispatch through again. A worker
+ * that will not exit leaves nothing safe to reopen, so the task is ended
+ * instead, exactly as "relay end" would.
+ */
+export async function pauseAutonomousTask(pool: Pool, effects: Pick<SchedulerEffects, 'cleanupStopped'>, taskId: string, stoppedAt: string): Promise<PauseResult> {
+  const existing = await loadTask(pool, taskId)
+  if (!existing) return { kind: 'missing' }
+  if (existing.phase === 'stopped') return { kind: 'ended' }
+  const cancelled = await requestCancel(pool, taskId)
+  if (!cancelled) return { kind: 'missing' }
+  if (cancelled.workerPgid !== null) {
+    if (!(await killWorkerGroup(cancelled.workerPgid))) {
+      await stopAutonomousTask(pool, effects, taskId)
+      return { kind: 'ended' }
+    }
+    await clearWorker(pool, taskId, cancelled.workerPgid)
+  }
+  await effects.cleanupStopped(cancelled)
+  return markTaskPaused(pool, taskId, stoppedAt)
 }
 
 export function createScheduler(deps: SchedulerDeps): Scheduler {

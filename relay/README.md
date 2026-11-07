@@ -228,6 +228,14 @@ relay kill engage "reason"    # a running daemon stops all work within one tick
 relay kill clear
 ```
 
+In a Slack thread, reply with exactly one of these:
+
+- `stop` halts the work running now (within seconds) and keeps the thread
+  open. Messages sent before it are dropped, so the stopped work is not
+  redone; the next message carries on.
+- `relay end` halts the work and closes the thread's task for good. Later
+  replies there are refused; start a new message for new work.
+
 ### Check it
 
 ```bash
@@ -388,7 +396,9 @@ ticket, create a PR, review a PR) becomes a team request:
   check the merged commit, with two repair rounds at most.
 - Commits stay local. Members cannot push or open PRs at all; the lead's
   push or PR still shows you the approval card.
-- Stop and the kill switch stop the lead and every member. A daemon
+- Stop, `relay end` and the kill switch stop the lead and every member.
+  After a Stop the team run is cancelled, not paused: the thread stays
+  open, and a team has to be proposed again. A daemon
   shutdown stops running members and queues them again; after a restart,
   a member that was working runs once more, then is marked failed. The guard is a speed bump, not a sandbox: members have
   the same machine rights as the single agent.

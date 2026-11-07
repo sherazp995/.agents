@@ -8,9 +8,9 @@ import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
 import { findOrCreateSession } from '../../src/sessions/store.js'
 import { IntakeFailedError, type ChatAction, type ChatEvent } from '../../src/chat/contract.js'
-import { loadTaskBySession, markTaskStopped, type IntakeOutbox } from '../../src/autonomous/store.js'
+import { loadTask, loadTaskBySession, markTaskStopped, requestCancel, type IntakeOutbox } from '../../src/autonomous/store.js'
 import { findActiveSession } from '../../src/sessions/store.js'
-import { REMINDER_NO_FOLDER_TEXT, routeAutonomousEvent, STOPPED_TEXT, type RouterDeps } from '../../src/autonomous/router.js'
+import { REMINDER_NO_FOLDER_TEXT, routeAutonomousEvent, STILL_STOPPING_TEXT, STOPPED_TEXT, type RouterDeps } from '../../src/autonomous/router.js'
 import { attachSessionToEngineChat, ReadOnlySessionError } from '../../src/sessions/store.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { getTestDatabaseUrl } from '../support/database.js'
@@ -188,6 +188,24 @@ describe('autonomous router', () => {
     expect(d.wakes).toBe(1)
     const posts = (await box.queued(workspaceId)).filter((action) => action.kind === 'post')
     expect(posts.at(-1)).toMatchObject({ text: STOPPED_TEXT })
+  })
+
+  it('keeps a message sent while a Stop is still in progress and answers that messages sent after the stop are kept, without waking the scheduler', async () => {
+    const { workspaceId, requester } = await setup()
+    const box = outbox()
+    const d = deps({ outbox: box })
+    const where = thread('18.1')
+    await routeAutonomousEvent(d, event(workspaceId, requester, 'fix it', '18.1'), where)
+    const session = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: where.threadRef })
+    const taskId = (await loadTaskBySession(pool, session?.id ?? ''))?.id ?? ''
+    await requestCancel(pool, taskId)
+
+    expect(await routeAutonomousEvent(d, event(workspaceId, requester, 'and the disk?', '18.2'), where)).toBe('handled')
+
+    expect(d.wakes).toBe(1)
+    const posts = (await box.queued(workspaceId)).filter((action) => action.kind === 'post')
+    expect(posts.at(-1)).toMatchObject({ text: STILL_STOPPING_TEXT })
+    expect((await loadTask(pool, taskId))?.pendingEvents.map((pending) => pending.text)).toContain('and the disk?')
   })
 
   it('a duplicate delivery runs once', async () => {
