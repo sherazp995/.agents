@@ -43,7 +43,7 @@ import { unwrapForAudit } from './agent/untrusted.js'
 import type { RequestApproval } from './policy/engine.js'
 import type { Policy } from './config/schema.js'
 import type { ChatAdapter, ChatEvent, ChatRef } from './chat/contract.js'
-import { isStopInstruction, sessionRefFor } from './chat/contract.js'
+import { isEndInstruction, isStopInstruction, sessionRefFor } from './chat/contract.js'
 import type { OutboxDrainResult } from './chat/outbox.js'
 import { ProgressReporter, truncateToBytes } from './chat/progress.js'
 import { resolvePrincipal } from './chat/principals.js'
@@ -72,6 +72,7 @@ import type { TeamProposer } from './projects/proposals.js'
 import { createTeamProposer, repoLookupFromRegistry } from './projects/team-proposer.js'
 import { failCutOffProposals, handleProposalClick, proposalCardPoster, supersededCardCloser } from './chat/slack/team-proposal-card.js'
 import { isFolder } from './autonomous/folder.js'
+import { STOPPED_TEXT } from './autonomous/router.js'
 import { loadRepoRegistryIfPresent } from './config/load.js'
 import { homedir } from 'node:os'
 import { CancellationRegistry } from './runs/cancel.js'
@@ -636,11 +637,16 @@ async function handleStopInstruction(
   // An autonomous task has no in-process run to cancel: its Stop is durable
   // (worker tree killed, operations cancelled, approvals expired) and needs
   // no cancellation registry.
+  // It pauses rather than ends: the thread stays open for the next message,
+  // and "relay end" (handleEndInstruction) is how a task is closed for good.
   const session = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
-  if (session && session.mode === 'autonomous' && deps.autonomous && (await deps.autonomous.stopSession(session.id))) {
-    log.info({ sessionId: session.id }, 'received a Stop instruction; autonomous task stopped')
-    await dispatcher.perform({ kind: 'post', ref: replyRef, text: 'Stopped.' })
-    return
+  if (session && session.mode === 'autonomous' && deps.autonomous) {
+    const outcome = await deps.autonomous.pauseSession(session.id, event.receivedAt)
+    if (outcome !== 'missing') {
+      log.info({ sessionId: session.id, outcome }, 'received a Stop instruction; autonomous task paused')
+      await dispatcher.perform({ kind: 'post', ref: replyRef, text: outcome === 'paused' ? PAUSED_TEXT : STOPPED_TEXT })
+      return
+    }
   }
 
   if (!cancellationRegistry) {
@@ -671,6 +677,25 @@ async function handleStopInstruction(
     ref: replyRef,
     text: 'Stopping.',
   })
+}
+
+export const PAUSED_TEXT = 'Stopped. Send a message to carry on.'
+export const ENDED_TEXT = 'Ended. Start a new message for a new task.'
+export const NOTHING_TO_END_TEXT = 'Nothing to end here.'
+
+/**
+ * Handles "relay end": ends the thread's autonomous task for good, the way
+ * Stop did before it learned to pause. Only an autonomous task can be ended;
+ * any other thread is told so rather than left without an answer.
+ */
+async function handleEndInstruction(deps: OrchestratorDeps, event: ChatEvent, threadRef: string, replyRef: ChatRef): Promise<void> {
+  const session = await findActiveSession(deps.pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
+  if (session && session.mode === 'autonomous' && deps.autonomous && (await deps.autonomous.stopSession(session.id))) {
+    deps.log.info({ sessionId: session.id }, 'received an End instruction; autonomous task stopped')
+    await deps.dispatcher.perform({ kind: 'post', ref: replyRef, text: ENDED_TEXT })
+    return
+  }
+  await deps.dispatcher.perform({ kind: 'post', ref: replyRef, text: NOTHING_TO_END_TEXT })
 }
 
 // ---------------------------------------------------------------------------
@@ -723,8 +748,10 @@ export type OrchestratorDeps = {
 export type AutonomousRouting = {
   /** Takes the event into its thread's autonomous task; `not_autonomous` when the thread belongs to another mode. Throws IntakeFailedError when intake failed after retries. */
   route(event: ChatEvent, thread: { threadRef: string; replyRef: ChatRef }, options?: { adopt?: boolean; chatCwd?: string }): Promise<'handled' | 'not_autonomous'>
-  /** Stops the session's autonomous task; false when the session has none. */
+  /** Ends the session's autonomous task for good ("relay end", the kill switch); false when the session has none. */
   stopSession(sessionId: string): Promise<boolean>
+  /** Stop that keeps the thread open: cancels the running work and leaves the task waiting for the next message sent after `stoppedAt`. */
+  pauseSession(sessionId: string, stoppedAt: string): Promise<'paused' | 'ended' | 'missing'>
 }
 
 /**
@@ -802,6 +829,10 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
       return
     }
     await handleStopInstruction(deps, event, threadRef, replyRef)
+    return
+  }
+  if (event.origin !== 'reminder' && isEndInstruction(event.text)) {
+    await handleEndInstruction(deps, event, threadRef, replyRef)
     return
   }
 

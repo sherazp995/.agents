@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { wrapUntrusted } from '../../src/agent/untrusted.js'
 import type { AdapterCapabilities, ChatAction, ChatEvent, ChatRef } from '../../src/chat/contract.js'
-import { describeCapabilities, sessionRefFor } from '../../src/chat/contract.js'
+import { describeCapabilities, isEndInstruction, isStopInstruction, sessionRefFor } from '../../src/chat/contract.js'
 
 // --- Type level assertions --------------------------------------------------
 //
@@ -118,5 +118,14 @@ describe('describeCapabilities', () => {
     expect(describeCapabilities(caps)).toBe(
       'buttons: no, editMessage: yes, fileUpload: yes, modals: yes, threads: yes, maxMessageBytes: 40000',
     )
+  })
+})
+
+describe('isEndInstruction', () => {
+  it('matches "relay end" exactly, trimmed and case folded, and nothing Stop or a longer message says', () => {
+    expect(isEndInstruction(wrapUntrusted('relay end'))).toBe(true)
+    expect(isEndInstruction(wrapUntrusted('  Relay End \n'))).toBe(true)
+    for (const text of ['relay end now', 'end', 'stop', 'relayend']) expect(isEndInstruction(wrapUntrusted(text))).toBe(false)
+    expect(isStopInstruction(wrapUntrusted('relay end'))).toBe(false)
   })
 })

@@ -65,10 +65,14 @@ import type {
 import {
   buildFinalReport,
   createProductionSlackAdapter,
+  ENDED_TEXT,
   handleChatEvent,
   isKnownSessionQuery,
+  NOTHING_TO_END_TEXT,
+  PAUSED_TEXT,
   scheduleOutboxDrain,
 } from '../src/orchestrator.js'
+import { STOPPED_TEXT } from '../src/autonomous/router.js'
 import type { Drainable } from '../src/orchestrator.js'
 import { getTestDatabaseUrl } from './support/database.js'
 
@@ -410,14 +414,16 @@ describeDb('orchestrator', () => {
   // -------------------------------------------------------------------------
 
   describe('handleChatEvent: autonomous routing', () => {
-    function fakeAutonomous(answer: 'handled' | 'not_autonomous') {
+    function fakeAutonomous(answer: 'handled' | 'not_autonomous', pauseAnswer: 'paused' | 'ended' | 'missing' = 'paused') {
       const routed: string[] = []
       const adopted: boolean[] = []
       const stopped: string[] = []
+      const paused: string[] = []
       return {
         routed,
         adopted,
         stopped,
+        paused,
         routing: {
           async route(event: ChatEvent, _thread: unknown, options?: { adopt?: boolean }) {
             routed.push(event.platformEventId)
@@ -427,6 +433,10 @@ describeDb('orchestrator', () => {
           async stopSession(sessionId: string) {
             stopped.push(sessionId)
             return true
+          },
+          async pauseSession(sessionId: string) {
+            paused.push(sessionId)
+            return pauseAnswer
           },
         },
       }
@@ -480,6 +490,9 @@ describeDb('orchestrator', () => {
         },
         async stopSession() {
           return true
+        },
+        async pauseSession() {
+          return 'paused' as const
         },
       }
       const adapter = new MockAdapter()
@@ -537,19 +550,54 @@ describeDb('orchestrator', () => {
       expect(auto.adopted).toEqual([true])
     })
 
-    it('stops the autonomous task on Stop in its thread, without a cancellation registry', async () => {
+    async function autonomousThread(text: string) {
       const { workspaceId, principalId } = await createFixtures()
-      const auto = fakeAutonomous('handled')
-      const adapter = new MockAdapter()
-      const event = buildEvent({ workspaceId, principalId, text: 'stop' })
+      const event = buildEvent({ workspaceId, principalId, text })
       const threadRef = composeThreadRef(event.ref.channel, event.ref.message ?? '')
       const session = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'test', threadRef })
       await pool.query(`UPDATE sessions SET mode = 'autonomous' WHERE id = $1`, [session.id])
+      return { event, session }
+    }
+
+    it.each([
+      ['paused', PAUSED_TEXT],
+      ['ended', STOPPED_TEXT],
+    ] as const)('pauses the autonomous task on Stop in its thread, without a cancellation registry, and answers a %s task', async (outcome, text) => {
+      const { event, session } = await autonomousThread('stop')
+      const auto = fakeAutonomous('handled', outcome)
+      const adapter = new MockAdapter()
+
+      await handleChatEvent({ pool, dispatcher: adapter, log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, autonomous: auto.routing }, event)
+
+      expect(auto.paused).toEqual([session.id])
+      expect(auto.stopped).toEqual([])
+      expect(adapter.performed).toEqual([expect.objectContaining({ kind: 'post', text })])
+    })
+
+    it('ends the autonomous task for good on "relay end" in its thread', async () => {
+      const { event, session } = await autonomousThread('Relay End')
+      const auto = fakeAutonomous('handled')
+      const adapter = new MockAdapter()
 
       await handleChatEvent({ pool, dispatcher: adapter, log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, autonomous: auto.routing }, event)
 
       expect(auto.stopped).toEqual([session.id])
-      expect((adapter.performed[0] as { text: string }).text).toContain('Stopped')
+      expect(auto.paused).toEqual([])
+      expect(auto.routed).toEqual([])
+      expect(adapter.performed).toEqual([expect.objectContaining({ kind: 'post', text: ENDED_TEXT })])
+    })
+
+    it('answers "relay end" in a thread with no autonomous task, and ends nothing', async () => {
+      const { workspaceId, principalId } = await createFixtures()
+      const auto = fakeAutonomous('handled')
+      const adapter = new MockAdapter()
+
+      await handleChatEvent({ pool, dispatcher: adapter, log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, autonomous: auto.routing }, buildEvent({ workspaceId, principalId, text: 'relay end' }))
+
+      expect(auto.stopped).toEqual([])
+      expect(auto.routed).toEqual([])
+      expect(adapter.performed).toEqual([expect.objectContaining({ kind: 'post', text: NOTHING_TO_END_TEXT })])
+      expect(await runCount(workspaceId)).toBe(0)
     })
 
     describe("the channel description's folder", () => {
@@ -573,6 +621,9 @@ describeDb('orchestrator', () => {
           },
           async stopSession() {
             return true
+          },
+          async pauseSession() {
+            return 'paused' as const
           },
         }
         const adapter = new MockAdapter()
@@ -748,6 +799,7 @@ describeDb('orchestrator', () => {
 
         expect(auto.routed).toEqual([])
         expect(auto.stopped).toEqual([])
+        expect(auto.paused).toEqual([])
         expect(replies(adapter)).toEqual([NOT_YOUR_THREAD_REPLY, NOT_YOUR_THREAD_REPLY])
         expect(await runCount(workspaceId)).toBe(0)
       })
@@ -764,7 +816,7 @@ describeDb('orchestrator', () => {
         await handle(buildEvent({ workspaceId, principalId: memberId, channel: first.ref.channel, message: first.ref.message ?? '', text: 'stop' }), auto, new MockAdapter())
 
         expect(auto.routed).toEqual([first.platformEventId])
-        expect(auto.stopped).toEqual([session.id])
+        expect(auto.paused).toEqual([session.id])
       })
 
       it.each(['direct', 'live'] as const)('refuses a member in their own thread once it is a %s chat', async (kind) => {

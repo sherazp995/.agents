@@ -32,7 +32,7 @@ import { findOpenSessionName } from '../live/open-session.js'
 import { WORKER_BRIEF } from './prompt.js'
 import { routeAutonomousEvent } from './router.js'
 import { TEAM_PROPOSAL_PATH, teamProposalRoute } from './team-proposal-route.js'
-import { createScheduler, killWorkerGroup, stopAutonomousTask, type Scheduler } from './scheduler.js'
+import { createScheduler, killWorkerGroup, pauseAutonomousTask, stopAutonomousTask, type Scheduler } from './scheduler.js'
 import { loadTask, loadTaskBySession, wakeTask, type AutonomousTask } from './store.js'
 import { renderThreadHistory, slackThreadReplies } from './thread-history.js'
 import { runTurnOnPool, type SpawnPlan, type SpawnPlanParams, type TurnRunnerDeps } from './turn-runner.js'
@@ -223,6 +223,11 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
       if (!task) return false
       await stopAutonomousTask(pool, { cleanupStopped }, task.id)
       return true
+    },
+    async pauseSession(sessionId, stoppedAt) {
+      const task = await loadTaskBySession(pool, sessionId)
+      if (!task) return 'missing'
+      return (await pauseAutonomousTask(pool, { cleanupStopped }, task.id, stoppedAt)).kind
     },
   }
 

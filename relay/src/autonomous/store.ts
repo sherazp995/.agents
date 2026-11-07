@@ -430,6 +430,44 @@ export async function markTaskStopped(pool: Pool | PoolClient, taskId: string): 
   return rows[0] ? toTask(rows[0]) : undefined
 }
 
+/** The one note a paused task's next turn reads: it resumes the same transcript, which still holds the stopped work. */
+export const PAUSED_NOTE = 'The operator stopped your last turn with "stop". Do not continue or redo that work unless a new message asks for it; answer the new messages only.'
+
+export type PauseResult = { kind: 'paused'; task: AutonomousTask } | { kind: 'ended' } | { kind: 'missing' }
+
+/**
+ * Stop's final write for a task that stays open (the "relay end" and kill
+ * switch path is markTaskStopped). Bumps the lease generation like Stop, so a
+ * killed worker's late writes are refused, then clears the stop flag so the
+ * next message wakes the task. Messages received up to the "stop" belong to
+ * the stopped work and are dropped with their files not yet downloaded;
+ * later ones are kept and wake the task. Relay's pending notes are replaced
+ * by PAUSED_NOTE. An ended task is never reopened.
+ */
+export async function markTaskPaused(pool: Pool, taskId: string, stoppedAt: string): Promise<PauseResult> {
+  return inTransaction(pool, async (client): Promise<PauseResult> => {
+    const { rows } = await client.query<TaskRow>('SELECT * FROM autonomous_tasks WHERE id = $1 FOR UPDATE', [taskId])
+    const row = rows[0]
+    if (!row) return { kind: 'missing' }
+    if (row.phase === 'stopped') return { kind: 'ended' }
+    const cutoff = Date.parse(stoppedAt)
+    const kept = row.pending_events.filter((event) => Date.parse(event.receivedAt) > cutoff)
+    const droppedFileIds = new Set(row.pending_events.filter((event) => !kept.includes(event)).flatMap((event) => event.fileIds))
+    const keptFileIds = new Set(kept.flatMap((event) => event.fileIds))
+    const files = row.files.filter((file) => !(file.status === 'pending' && droppedFileIds.has(file.slackFileId) && !keptFileIds.has(file.slackFileId)))
+    const { rows: updated } = await client.query<TaskRow>(
+      `UPDATE autonomous_tasks
+       SET lease_owner = NULL, lease_expires_at = NULL, lease_generation = lease_generation + 1,
+           cancel_requested_at = NULL, pending_events = $2::jsonb, files = $3::jsonb, pending_notes = $4::jsonb,
+           next_wakeup_at = CASE WHEN jsonb_array_length($2::jsonb) > 0 THEN now() ELSE NULL END, updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [taskId, JSON.stringify(kept), JSON.stringify(files), JSON.stringify([PAUSED_NOTE])],
+    )
+    return { kind: 'paused', task: toTask(requireRow(updated[0])) }
+  })
+}
+
 /** Stop: durable even while the task is parked; the scheduler, guard and executor all check it. */
 export async function requestCancel(pool: Pool | PoolClient, taskId: string): Promise<AutonomousTask | undefined> {
   const { rows } = await pool.query<TaskRow>(
