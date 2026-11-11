@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Records one captioned video per version of a scenario; with --full, also joins them into
+// Records one video per version of a scenario; with --full, also joins them into
 // a single before/after film with title cards. See ../SKILL.md for the format.
 import { chromium } from 'playwright-core';
 import { execFileSync } from 'node:child_process';
@@ -49,8 +49,9 @@ if (!scenarioPath) {
 }
 
 const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8'));
-// --captions overrides the scenario's "captions"; without captions there is no caption strip and holds are shorter.
-const CAPTIONS = captionsFlag ? captionsFlag === 'on' : scenario.captions !== false;
+// Captions are off by default; "captions": true or --captions on turns them on (the flag wins).
+// Without captions there is no caption strip and holds are shorter.
+const CAPTIONS = captionsFlag ? captionsFlag === 'on' : scenario.captions === true;
 const TRIM = scenario.trimWaits !== false;
 // --full overrides the scenario's "full": it adds the combined film, the banner clips and side-by-side.
 const FULL = Boolean(fullFlag) || scenario.full === true;

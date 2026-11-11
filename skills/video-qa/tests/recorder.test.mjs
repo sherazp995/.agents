@@ -121,7 +121,7 @@ const frameHeight = (file) => Number(execFileSync('ffprobe', ['-v', 'error', '-s
 
 test('a check failing on BEFORE and passing on AFTER is FIXED, and --full adds the combined film with % titles and banners', { skip }, async () => {
   const run = await withServers([page({ fixed: false }), page({ fixed: true })],
-    ([before, after]) => record(scenario('Discount shows 20% off', before, after), ['--full']));
+    ([before, after]) => record(scenario('Discount shows 20% off', before, after), ['--full', '--captions=on']));
   try {
     assert.equal(run.code, 0, run.stderr);
     assert.equal(run.results.verdict, 'FIXED');
@@ -199,9 +199,9 @@ test('a page that covers the viewport edges at the end skips the frame check ins
   }
 });
 
-test('--captions off drops the caption strip, and without --full there is no combined film', { skip }, async () => {
+test('captions are off by default with no caption strip, and without --full there is no combined film', { skip }, async () => {
   const run = await withServers([page({ fixed: false }), page({ fixed: true })],
-    ([before, after]) => record(scenario('No captions', before, after), ['--captions=off']));
+    ([before, after]) => record(scenario('No captions', before, after)));
   try {
     assert.equal(run.code, 0, run.stderr);
     assert.equal(run.results.captions, false);

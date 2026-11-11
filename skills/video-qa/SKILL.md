@@ -1,11 +1,11 @@
 ---
 name: video-qa
-description: Record a captioned before and after video that proves a fix or feature works. Replays the same scripted user flow against the base version and the changed version, with a visible cursor, natural pauses, burned-in step captions saying what was done and what happened, and a verdict (FIXED, STILL BROKEN, NOT REPRODUCED, INCOMPLETE). Use when the user asks for a QA video, a demo or proof video of a fix, "record what was failing and now works", or a video to attach to a PR. For screenshot comparisons and a full QA report use branch-visual-qa; the two combine.
+description: Record a before and after video that proves a fix or feature works. Replays the same scripted user flow against the base version and the changed version, with a visible cursor, natural pauses, no captions by default (burned-in step captions only when asked), and a verdict (FIXED, STILL BROKEN, NOT REPRODUCED, INCOMPLETE). Use when the user asks for a QA video, a demo or proof video of a fix, "record what was failing and now works", or a video to attach to a PR. For screenshot comparisons and a full QA report use branch-visual-qa; the two combine.
 ---
 
 # Video QA
 
-Produce two MP4s, one showing step by step how a bug was triggered on the base version and one showing the same steps working on the changed version, and with `--full` a combined film of both. Each step is captioned, and every check ends with PASS or FAIL in the caption. The video is evidence, so it must show what really happened.
+Produce two MP4s, one showing step by step how a bug was triggered on the base version and one showing the same steps working on the changed version, and with `--full` a combined film of both. Videos have no captions by default; with `--captions on` each step is captioned and every check ends with PASS or FAIL in the caption. `results.json` and the `.srt` files always record each step's PASS or FAIL. The video is evidence, so it must show what really happened.
 
 ## Who does what: the session coordinates, one runner records
 
@@ -37,7 +37,7 @@ Create the run folder `<repo root>/tmp/video-qa/<YYYYMMDD-HHMMSS>/` (add a numer
 | `versions` | One or two of `{label, detail, baseUrl, role?, storageState?}`. A label containing `BEFORE` or `AFTER` sets `role` (red or green banner); otherwise set `role` to `before` or `after`. Two versions need one of each. `detail` is `<ref> <short sha>` |
 | `storageState` | Path to a Playwright storage state for a signed-in session (keep it out of the repo and report) |
 | `pace` | Omit for human pacing; `"fast"` for quick debugging runs |
-| `captions` | Omit for step captions; `false` for a video without them (the `--captions` flag overrides it) |
+| `captions` | Omit for a video without captions (the default); `true` for step captions (the `--captions` flag overrides it) |
 | `full` | `true` also makes the combined film, banner clips and side-by-side (the `--full` flag sets it too) |
 | `trimWaits` | Omit to cut page loads and check waits from the video; `false` keeps real time, for a slowness bug |
 | `steps` | Ordered actions and checks, each with a `caption` |
@@ -59,7 +59,7 @@ cd <this skill's directory>/scripts && [ -d node_modules ] || npm install
 node <this skill's directory>/scripts/record.mjs <run folder>/scenario.json <run folder> [--captions on|off] [--full]
 ```
 
-`--captions off` records the same flow with no caption strip and shorter holds, for a clean video. The `.srt` files are still written. Use it when the user asks for a video without captions.
+Without captions (the default) the video has no caption strip and shorter holds. The `.srt` files are still written. `--captions on` adds the caption strip and longer holds; use it only when the user asks for captions.
 
 `--full` adds the combined `<id>.mp4` (title card, BEFORE, AFTER, verdict card, with version banners), `side-by-side.mp4` and the banner clips `before.mp4` and `after.mp4`. Use it only when the user asks for a combined film.
 
@@ -84,13 +84,13 @@ The frame check: after the last step the recorder shows magenta markers on the b
 
 An invalid scenario (unknown action or role, no check, wrong version count, `captions`, `trimWaits` or `full` not `true` or `false`, an odd viewport width or height), a `--captions` value other than `on` or `off`, or a value on `--full` exits 2 before recording.
 
-Before reporting, look at the video yourself: the recorder writes `before-sheet.png` and `after-sheet.png`, twelve frames spread across each whole clean clip (`<id>-before.mp4`, `<id>-after.mp4`). Read both, then pull one full-size frame from each clean clip (`ffmpeg -y -sseof -1 -i <id>-before.mp4 -frames:v 1 before-frame.png`, the same for after) and read it: at contact sheet size a grey band or a cut-off page is easy to miss. `*-final.png` is a page screenshot, not a video frame, so it cannot show this. Confirm the page fills the frame down to the caption strip, the captions match what is on screen, the bug is visible on BEFORE and the fix on AFTER. A wrong selector or a check that passes for the wrong reason makes the video misleading: fix the scenario and record again. Never edit captions or cut footage to change what a check showed.
+Before reporting, look at the video yourself: the recorder writes `before-sheet.png` and `after-sheet.png`, twelve frames spread across each whole clean clip (`<id>-before.mp4`, `<id>-after.mp4`). Read both, then pull one full-size frame from each clean clip (`ffmpeg -y -sseof -1 -i <id>-before.mp4 -frames:v 1 before-frame.png`, the same for after) and read it: at contact sheet size a grey band or a cut-off page is easy to miss. `*-final.png` is a page screenshot, not a video frame, so it cannot show this. Confirm the page fills the frame (down to the caption strip when captions are on), any captions match what is on screen, the bug is visible on BEFORE and the fix on AFTER. A wrong selector or a check that passes for the wrong reason makes the video misleading: fix the scenario and record again. Never edit captions or cut footage to change what a check showed.
 
 ## Outputs
 
-Unless captions are off, every video, contact sheet and `*-final.png` shows the step captions in a dark strip below the page, sized for the longest caption, so a caption never covers the page. In the run folder:
+With captions on, every video, contact sheet and `*-final.png` shows the step captions in a dark strip below the page, sized for the longest caption, so a caption never covers the page. In the run folder:
 
-- `<id>-before.mp4` and `<id>-after.mp4`: each version on its own, with its step captions but no version banner, title or verdict card. These are the deliverables to share, one video per version (a single-version run makes only its own, `<id>-<role>.mp4`, or `<id>-<slug>.mp4` without a role).
+- `<id>-before.mp4` and `<id>-after.mp4`: each version on its own, with no version banner, title or verdict card. These are the deliverables to share, one video per version (a single-version run makes only its own, `<id>-<role>.mp4`, or `<id>-<slug>.mp4` without a role).
 - `*-sheet.png` contact sheets of those clips, `*.srt` captions, `*-final.png` last frames.
 - `results.json`: verdict, per step PASS or FAIL, console errors per version. It records that the run was automated. `video` and `sideBySide` are null without `--full`.
 - Only with `--full`: `<id>.mp4` (title card, BEFORE clip, AFTER clip, verdict card, with the version banner), `side-by-side.mp4` (both banner clips next to each other; `"sideBySide": false` skips it), and the banner clips `before.mp4` and `after.mp4`.
