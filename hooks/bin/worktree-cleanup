@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Stop: ask the agent, once per worktree, to remove the worktrees its session created that are safe to remove.
+
+A worktree counts as created by this session when a shell command in the session transcript ran
+`git worktree add <path>` (Claude Bash or Codex exec). Worktrees the session only visited are never
+named: they may be the user's own checkouts or another tool's (Relay, an IDE).
+
+Safe to remove means nothing can be lost: no uncommitted or untracked changes, no ignored file outside
+the rebuildable list (node_modules, tmp, log, ...), not locked, not the main checkout, not under
+`.claude/worktrees/` (the Workflow tool removes its own), and after `git fetch --prune` its HEAD is on a
+remote branch. A failed or slow fetch names nothing for that repo, since old remote refs may be stale.
+
+The hook only asks: the agent removes a worktree when it and the user are done, and the branch stays.
+It stays silent while a Stop hook already sent the agent back or a background task is still running,
+reminds about each path once per session, and allows on any error.
+
+State lives in tmp/worktree-cleanup/ of this hub (git-ignored).
+"""
+from importlib.machinery import SourceFileLoader
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+from urllib.parse import unquote, urlparse
+
+HUB = Path(__file__).resolve().parents[2]
+STATE = HUB / 'tmp' / 'worktree-cleanup'
+# Transcript readers that understand both Claude and Codex records.
+turns = SourceFileLoader('related_tests', str(Path(__file__).with_name('related-tests'))).load_module()
+done_check = SourceFileLoader('done_check', str(Path(__file__).with_name('done-check'))).load_module()
+
+FETCH_BUDGET = 8.0  # seconds for all fetches in one stop
+FETCH_REUSE = 5 * 60  # a repo fetched this recently by this session is not fetched again
+GIT_TIMEOUT = 5
+SEGMENT = re.compile(r'&&|\|\||;|\||\n')
+SHELL_WRAPPERS = ('-c', '-lc')  # `/bin/zsh -lc "<command>"`, how Codex records what it ran
+# `git worktree add` options that take a value, so the value is not the path.
+ADD_VALUE_OPTIONS = {'-b', '-B', '--reason', '--orphan'}
+# Ignored files a worktree may hold and still be removed: all rebuilt by installs, builds or runs.
+REBUILDABLE_NAMES = {'node_modules', 'tmp', 'log', 'coverage', '.bundle', 'dist', 'build', '__pycache__',
+                     '.cache', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.next', '.turbo', 'target',
+                     '.venv', '.DS_Store', '.sass-cache', '.parcel-cache'}
+REBUILDABLE_PREFIXES = ('vendor/bundle/', 'public/packs/', 'public/packs-test/', 'public/assets/')
+NO_PROMPT_ENV = {'GIT_TERMINAL_PROMPT': '0', 'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes'}
+
+
+def git(path, *args, timeout=GIT_TIMEOUT):
+    """Stdout of a git command run in `path`; raises on failure or timeout."""
+    return subprocess.run(['git', *args], cwd=path, capture_output=True, text=True, check=True,
+                          timeout=timeout, env={**os.environ, **NO_PROMPT_ENV}).stdout
+
+
+def resolve(path, base):
+    return Path(base, os.path.expanduser(path)).resolve(strict=False)
+
+
+def added_paths(command, cwd):
+    """Paths each `git worktree add` in one shell command names, resolved against a `cd` or `-C` before it."""
+    here = cwd
+    found = []
+    for segment in SEGMENT.split(command):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            continue
+        if len(words) >= 2 and words[0] == 'cd':
+            here = str(resolve(words[1], here))
+            continue
+        if not words or words[0] != 'git':
+            continue
+        base, rest = here, words[1:]
+        while len(rest) >= 2 and rest[0] in ('-C', '-c'):
+            if rest[0] == '-C':
+                base = str(resolve(rest[1], base))
+            rest = rest[2:]
+        if rest[:2] != ['worktree', 'add']:
+            continue
+        args, skip = rest[2:], False
+        for word in args:
+            if skip:
+                skip = False
+            elif word in ADD_VALUE_OPTIONS:
+                skip = True
+            elif not word.startswith('-'):
+                found.append(resolve(word, base))
+                break
+    return found
+
+
+def codex_executions(record):
+    """(command, workdir) of a command Codex ran, from its `item_completed` CommandExecution event: argv
+    `[shell, -lc, command]` and a `file://` cwd. Newer Codex records its calls only this way."""
+    payload = record.get('payload')
+    item = payload.get('item') if isinstance(payload, dict) and payload.get('type') == 'item_completed' else None
+    if not isinstance(item, dict) or item.get('type') != 'CommandExecution':
+        return
+    argv = item.get('command')
+    if isinstance(argv, list) and len(argv) >= 3 and argv[-2] in SHELL_WRAPPERS:
+        command = str(argv[-1])
+    elif isinstance(argv, list):
+        command = shlex.join(str(part) for part in argv)
+    else:
+        command = str(argv or '')
+    cwd = item.get('cwd')
+    if isinstance(cwd, str) and cwd.startswith('file://'):
+        cwd = unquote(urlparse(cwd).path)
+    yield command, cwd if isinstance(cwd, str) and cwd else None
+
+
+def read_session(transcript_path, cwd):
+    """(created worktree paths in order, background work still running) for the whole session."""
+    created, launched, finished = [], {}, set()
+    with open(transcript_path or '', encoding='utf-8', errors='replace') as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            commands = [(command, workdir) for _, command, workdir in done_check.shell_commands(record)]
+            for command, workdir in commands + list(codex_executions(record)):
+                for path in added_paths(command, workdir or cwd):
+                    if path not in created:
+                        created.append(path)
+            launched.update(dict.fromkeys(turns.background_launches(record), turns.record_time(record)))
+            finished.update(turns.finished_tasks(record))
+    return created, bool(turns.still_running(launched, finished))
+
+
+def worktree_entries(path):
+    """[(worktree path, locked)] from `git worktree list --porcelain`; the first is the main checkout."""
+    entries = []
+    for line in git(path, 'worktree', 'list', '--porcelain').splitlines():
+        if line.startswith('worktree '):
+            entries.append([Path(line[len('worktree '):]).resolve(strict=False), False])
+        elif line.startswith('locked') and entries:
+            entries[-1][1] = True
+    return entries
+
+
+def rebuildable(name):
+    return name.startswith(REBUILDABLE_PREFIXES) or any(part in REBUILDABLE_NAMES for part in name.rstrip('/').split('/'))
+
+
+def kept_ignored(path):
+    """Ignored files in the worktree that a removal would lose and no build recreates."""
+    lines = git(path, 'status', '--porcelain', '--ignored=matching', '--untracked-files=normal').splitlines()
+    return [line[3:] for line in lines if line.startswith('!! ') and not rebuildable(line[3:])]
+
+
+def local_candidate(path):
+    """(main checkout, branch label) when `path` is a clean, unlocked, linked worktree, else None."""
+    if not path.is_dir() or '/.claude/worktrees/' in f'{path}/':
+        return None
+    if Path(git(path, 'rev-parse', '--show-toplevel').strip()).resolve() != path:
+        return None
+    entries = worktree_entries(path)
+    if not entries or entries[0][0] == path:
+        return None
+    locked = next((lock for entry, lock in entries if entry == path), None)
+    if locked is None or locked:
+        return None
+    if git(path, 'status', '--porcelain', '--untracked-files=all').strip() or kept_ignored(path):
+        return None
+    branch = git(path, 'branch', '--show-current').strip() or 'detached'
+    return entries[0][0], branch
+
+
+def on_remote(path):
+    """True when HEAD is on a remote branch (refs/remotes/*, not the */HEAD alias)."""
+    refs = git(path, 'for-each-ref', '--contains', 'HEAD', '--format=%(refname)', 'refs/remotes').split()
+    return any(not ref.endswith('/HEAD') for ref in refs)
+
+
+def fetch(main, deadline, fetched):
+    """Fetch and prune all remotes of the repo once per FETCH_REUSE; False when it failed or ran out of time."""
+    key = str(main)
+    if time.time() - fetched.get(key, 0) < FETCH_REUSE:
+        return True
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return False
+    try:
+        git(main, 'fetch', '--all', '--prune', '--quiet', timeout=left)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    fetched[key] = time.time()
+    return True
+
+
+def state_file(session):
+    return STATE / f'{re.sub(r"[^A-Za-z0-9_.-]", "_", session)}.json'
+
+
+def load_state(file):
+    try:
+        data = json.loads(file.read_text())
+    except (OSError, ValueError):
+        return {'reminded': [], 'fetched': {}}
+    return {'reminded': list(data.get('reminded') or []), 'fetched': dict(data.get('fetched') or {})}
+
+
+def save_state(file, data):
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(json.dumps(data))
+
+
+def reminder(safe):
+    lines = '\n'.join(f'- `{path}` (branch `{branch}`): '
+                      f'`cd {shlex.quote(str(main))} && git worktree remove {shlex.quote(str(path))}`'
+                      for path, main, branch in safe)
+    return ('These worktrees you created are clean and their commits are on the remote:\n'
+            f'{lines}\n'
+            'If you and the user are done with one, remove it with its command; the branch stays. '
+            'If it may still be needed, keep it and say why in one line. Then finish.')
+
+
+def verdict(event):
+    session = event.get('session_id')
+    if not session or event.get('stop_hook_active') or not event.get('transcript_path'):
+        return None
+    cwd = event.get('cwd') or os.getcwd()
+    created, busy = read_session(event['transcript_path'], cwd)
+    if busy:
+        return None
+    file = state_file(session)
+    state = load_state(file)
+    candidates = []
+    for path in created:
+        if str(path) in state['reminded']:
+            continue
+        try:
+            found = local_candidate(path)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if found:
+            candidates.append((path, *found))
+    if not candidates:
+        return None
+    deadline = time.monotonic() + FETCH_BUDGET
+    safe = []
+    for path, main, branch in candidates:
+        try:
+            if fetch(main, deadline, state['fetched']) and on_remote(path):
+                safe.append((path, main, branch))
+        except (OSError, subprocess.SubprocessError):
+            continue
+    state['reminded'].extend(str(path) for path, _, _ in safe)
+    save_state(file, state)
+    if not safe:
+        return None
+    return {'decision': 'deny', 'reason': reminder(safe)}
+
+
+if __name__ == '__main__':
+    try:
+        result = verdict(json.loads(sys.stdin.read() or '{}'))
+    except Exception:  # a convenience hook never blocks work
+        result = None
+    if result:
+        print(json.dumps(result))

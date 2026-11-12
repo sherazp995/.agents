@@ -79,6 +79,7 @@ hooks = [
   { name = "agents-sync", event = "SessionStart", kind = "command", matcher = "", timeout = 15 },
   { name = "workstream-context", event = "SessionStart", kind = "command", matcher = "", timeout = 10 },
   { name = "workstream-check", event = "Stop", kind = "command", matcher = "", timeout = 10 },
+  { name = "worktree-cleanup", event = "Stop", kind = "command", matcher = "", timeout = 20 },
 ]
 
 [[clients]]
@@ -111,6 +112,7 @@ hooks = [
   { name = "agents-sync", event = "SessionStart", kind = "command", matcher = "", timeout = 15 },
   { name = "workstream-context", event = "SessionStart", kind = "command", matcher = "", timeout = 10 },
   { name = "workstream-check", event = "Stop", kind = "command", matcher = "", timeout = 10 },
+  { name = "worktree-cleanup", event = "Stop", kind = "command", matcher = "", timeout = 20 },
 ]
 
 [[clients]]

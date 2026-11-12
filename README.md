@@ -145,6 +145,7 @@ agent stops or is blocked unexpectedly, one of these is usually why.
 | `related-tests` | at stop | runs only the tests for files changed this turn; a failure blocks the stop once |
 | `done-check` | at stop, when a task says it is done | makes the agent run a fresh checker for completion, correctness, rules 59 and 60, and saved memories, ending with `DONE-CHECK: PASS` or `OPEN` |
 | `workstream-context`, `workstream-check` | start and stop | show and update shared workstreams |
+| `worktree-cleanup` | at stop, when the session created a worktree | asks once to remove each worktree it created that is clean, holds no ignored file a build cannot recreate, and whose commit is on the remote after `git fetch --prune`; the branch stays |
 
 Details for each are in `AGENTS-CONFIG.md` and at the top of its script in
 `hooks/bin/`.

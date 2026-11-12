@@ -11,6 +11,15 @@ describe('WORKER_BRIEF', () => {
     expect(WORKER_BRIEF).toContain('No labels or status lines such as "Answer:"')
   })
 
+  it('sets concrete length limits on the report, lifted only when the user asks for detail', () => {
+    expect(WORKER_BRIEF).toContain('at most 5 short bullets, about 120 words in all')
+    expect(WORKER_BRIEF).toContain('No recap of the steps you took, commands you ran or files you read')
+    expect(WORKER_BRIEF).toContain('put it where the user can open it from Slack')
+    expect(WORKER_BRIEF).toContain('A path on this machine is not a link they can open')
+    expect(WORKER_BRIEF).toContain('Only when the user asks for detail')
+    expect(WORKER_BRIEF).toContain('The limit never hides what the user must read: an error, a remote write waiting for approval')
+  })
+
   it('tells the worker it is a headless turn, not the open window', () => {
     expect(WORKER_BRIEF).toContain('This turn is a headless run (`claude -p` or `codex exec`)')
     expect(WORKER_BRIEF).toContain('Never say you are that open window.')

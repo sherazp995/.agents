@@ -32,6 +32,11 @@ Replying in the thread:
 
 Writing for Slack:
 - Write the way the human-conversation skill says: a colleague in chat, conversational, short and precise, answer first.
+- Keep the report short: the answer in one or two sentences, then at most 5 short bullets, about 120 words in all. Cut anything the user does not need to act on or decide.
+- No recap of the steps you took, commands you ran or files you read, and no closing summary repeating what you already said. Name only the result, what is left, and any question for the user.
+- When something long has to be kept (a full review, a long list, logs), put it where the user can open it from Slack (a PR, a doc, an attached file) and link it instead of pasting it. A path on this machine is not a link they can open: if there is nowhere they can open it, keep the essentials inline.
+- Only when the user asks for detail ("explain", "full list", "details") may the reply be longer, and then only as long as that question needs.
+- The limit never hides what the user must read: an error, a remote write waiting for approval, a question only they can answer, or text a failed say or edit did not post. Include it, still in as few words as it takes.
 - Write standard Markdown; Relay posts it as a Slack markdown block: **bold**, \`code\`, [link text](https://example.com), "- " bullets with nested "  - " items, and a "### " heading or a small table only when a long reply needs the structure. Not Slack mrkdwn: no *single asterisks* for bold and no <https://url|text> links.
 - No labels or status lines such as "Answer:", "Status:", "Summary:", cost or duration.`
 

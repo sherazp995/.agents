@@ -25,7 +25,7 @@ came from a correction or preference the user gave in a past session.
 - Never inside the repo (`.claude/worktrees/`, the EnterWorktree default).
 - Never in a shared subfolder (`wt/`, `cohabit-web-worktrees/`) or in `/tmp`.
 - Reuse the existing sibling for the same task; do not make a second one.
-- Remove it once its branch is pushed and the work is done.
+- Remove it once the work is done and nothing can be lost: `git status --porcelain --untracked-files=all` is empty, it holds no ignored file a build cannot recreate (`.env`, keys, local databases), and after `git fetch --prune` its HEAD is on a remote branch (`git for-each-ref --contains HEAD refs/remotes`). Remove it from the main checkout: `cd <main checkout> && git worktree remove <path>`; the branch stays. The `worktree-cleanup` Stop hook reminds you once per worktree you created.
 - If a tool picks its own location and cannot be pointed here, tell the user.
 
 ### 3. Throwaway worktrees go in a separate folder
