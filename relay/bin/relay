@@ -11,6 +11,8 @@ while [ -L "$source" ]; do
   [[ $source == /* ]] || source="$dir/$source"
 done
 root=$(cd -P "$(dirname "$source")/.." && pwd)
+# This checkout holds the config; without RELAY_HOME, Relay run from any other folder would use ~/.relay.
+export RELAY_HOME="${RELAY_HOME:-$root}"
 
 if [ "${1:-}" = update ]; then
   shift

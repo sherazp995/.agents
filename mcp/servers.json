@@ -13,7 +13,7 @@
       "command": "npx",
       "args": ["-y", "@playwright/mcp@latest", "--extension"],
       "env": {},
-      "env_vars": ["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]
+      "env_vars": ["PLAYWRIGHT_MCP_EXTENSION_TOKEN", "PLAYWRIGHT_MCP_PROFILE_DIR_NAME"]
     }
   }
 }

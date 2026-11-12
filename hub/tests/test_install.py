@@ -136,6 +136,24 @@ class InstallTests(HubCase):
 
         self.assertEqual((self.home / '.local/bin/relay').resolve(), wrapper)
 
+    def test_the_relay_link_points_relay_home_at_its_checkout_unless_already_set(self):
+        wrapper = self.hub / 'relay/bin/relay'
+        wrapper.parent.mkdir(parents=True)
+        shutil.copy(CHECKOUT / 'relay/bin/relay', wrapper)
+        cli = self.hub / 'relay/dist/src/cli.js'
+        cli.parent.mkdir(parents=True)
+        cli.write_text('console.log(process.env.RELAY_HOME)\n')
+        install(self.hub, self.home)
+        link = self.home / '.local/bin/relay'
+        environment = {k: v for k, v in os.environ.items() if k != 'RELAY_HOME'}
+
+        unset = subprocess.run([str(link)], cwd=self.home, env=environment, capture_output=True, text=True)
+        kept = subprocess.run([str(link)], cwd=self.home, env={**environment, 'RELAY_HOME': '/elsewhere'},
+                              capture_output=True, text=True)
+
+        self.assertEqual(unset.stdout.strip(), str((self.hub / 'relay').resolve()), unset.stderr)
+        self.assertEqual(kept.stdout.strip(), '/elsewhere')
+
     def test_first_run_wires_everything_and_a_second_run_changes_nothing(self):
         first = install(self.hub, self.home)
         second = install(self.hub, self.home)
