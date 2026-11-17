@@ -46,7 +46,7 @@ import { relaySecretsHelperPath } from './secrets/keychain.js'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runReposAdd } from './cli/repos.js'
-import { runDbCreate } from './cli/db.js'
+import { runDbCreate, runDbMove } from './cli/db.js'
 import { buildSetupSteps, promptHidden, promptLine, runSetup } from './cli/setup.js'
 
 /** The relay checkout or package this CLI runs from: dist/src/cli.js sits two folders below it. */
@@ -257,7 +257,7 @@ liveOptions(liveCommand.command('wait'))
 liveOptions(liveCommand.command('say'))
   .description('Post an answer back into the thread, with an optional file')
   .option('--text <text>', 'the message to post')
-  .option('--file <path>', 'a file to attach, such as a .md report (up to 1 GB)')
+  .option('--file <path>', 'a file to attach, such as a .md report (up to 100 MB)')
   .action(async (options: LiveOptions & { file?: string }) => {
     await withLivePool(options, (pool, workspaceId) =>
       runLiveSay({ pool, workspaceId, channel: options.channel, thread: options.thread, text: options.text ?? '', ...(options.file ? { file: options.file } : {}) }),
@@ -450,7 +450,7 @@ program
   .option('--to <slack user id>', 'a mapped Slack user to message instead of the operators')
   .option('--workspace-id <uuid>', 'the workspace, when more than one Slack workspace exists')
   .option('--no-attach', 'do not route replies back to the Claude Code chat running this command')
-  .option('--file <path>', 'a file to post in the DM thread, such as a .md plan to review (up to 1 GB)')
+  .option('--file <path>', 'a file to post in the DM thread, such as a .md plan to review (up to 100 MB)')
   .option('--peer <name [ref]>', 'this chat exactly as ListAgents names it, e.g. "agents-39 [a1a227]", so replies reach it even when other chats share the folder')
   .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
   .action(async (text: string | undefined, options: { to?: string; workspaceId?: string; attach: boolean; peer?: string; file?: string; config: string }) => {
@@ -464,7 +464,7 @@ program
         text: body,
         ...(options.to ? { to: options.to } : {}),
         ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
-        ...(chatId ? { attach: { engineSessionId: chatId, cwd: process.cwd(), ...(options.peer ? { peer: options.peer } : {}) } } : {}),
+        ...(chatId ? { attach: { engineSessionId: chatId, cwd: process.cwd(), ...(options.peer ? { peer: options.peer } : {}), ...(config.failover ? { host: config.failover.host } : {}) } } : {}),
         ...(options.file ? { file: options.file } : {}),
       })
       for (const { userId, attached, fileQueued } of sent) {
@@ -536,6 +536,22 @@ dbCommand
   .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
   .action(async (options: { config: string }) => {
     const result = await runDbCreate({ configPath: options.config })
+    process.stdout.write(`${result.report}\n`)
+    process.exitCode = result.exitCode
+  })
+
+dbCommand
+  .command('move')
+  .description(
+    'Copy this Relay database into an empty Postgres once (the shared one for failover), check every table, then point ' +
+      'database.url at it through the keystore. Stop the daemon first. Pass the URL on stdin to keep its password out of ' +
+      'your shell history and the process list.',
+  )
+  .argument('[url]', 'the target postgres:// URL; read from stdin when left out')
+  .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
+  .action(async (url: string | undefined, options: { config: string }) => {
+    if (url === undefined && process.stdin.isTTY) process.stderr.write('Paste the target database URL, then press Enter and Ctrl-D:\n')
+    const result = await runDbMove({ configPath: options.config, targetUrl: url ?? (await readStdin()) })
     process.stdout.write(`${result.report}\n`)
     process.exitCode = result.exitCode
   })

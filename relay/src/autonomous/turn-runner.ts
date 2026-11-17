@@ -5,6 +5,11 @@
  *
  * How the CLI is configured (hook settings, codex overrides, folder) is
  * injected as `spawnPlan`, so this file holds the account rules only.
+ *
+ * With failover on (`chats`), a task's Claude chat is restored from the
+ * shared database before the turn when this laptop's copy is older, and
+ * saved after a reply, before the scheduler records the turn
+ * (src/failover/chats.ts).
  */
 
 import { realpath } from 'node:fs/promises'
@@ -12,6 +17,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Pool } from 'pg'
 import type { InvocationContext } from '../engine/hook-bridge.js'
+import type { ChatSync, RestoreResult } from '../failover/chats.js'
 import { createRun, finishRun, startRun } from '../runs/store.js'
 import { chooseAccount, COOLDOWN_MS, orderForSubject, type Account, type AccountClient, type CooldownStore } from './accounts.js'
 import type { TurnRequestContext, TurnResult } from './scheduler.js'
@@ -96,6 +102,13 @@ export type TurnRunnerDeps = {
   runTurn?: (request: TurnRequest) => Promise<TurnOutcome>
   /** Injected for tests; production reads the account's real projects folder. */
   projectsDir?: (account: Account) => Promise<string | null>
+  /** Saves and restores a task's Claude chat for the other laptop; absent with failover off. */
+  chats?: ChatSync
+}
+
+/** The folder a turn's CLI runs in: a member's worktree, the task's chat folder, or the home folder for a task made before chat folders. */
+export function turnCwd(context: TurnRequestContext, subject: TurnSubject): string {
+  return subject.cwd ?? context.task.chatCwd ?? (process.env.HOME ?? '/')
 }
 
 /** The default Claude login, whose projects folder holds a chat relay took over. */
@@ -107,11 +120,16 @@ async function claudeProjects(account: Account): Promise<string | null> {
   return realpath(join(account.configDir ?? join(homedir(), '.claude'), 'projects')).catch(() => null)
 }
 
-/** Resumes on the account that owns the session, or on any Claude login sharing its projects folder; anything else starts fresh. */
-async function resumeFor(deps: TurnRunnerDeps, subject: TurnSubject, account: Account): Promise<string | undefined> {
+/**
+ * Resumes on the account that owns the session, on any Claude login sharing
+ * its projects folder, or on any Claude login the saved chat was just
+ * restored into (`restored`), whichever laptop's login made it; anything
+ * else starts fresh.
+ */
+async function resumeFor(deps: TurnRunnerDeps, subject: TurnSubject, account: Account, restored: boolean): Promise<string | undefined> {
   const { engineSessionId, accountKey, chatSessionId } = subject
   if (engineSessionId === null) return undefined
-  if (accountKey === account.key) return engineSessionId
+  if (accountKey === account.key || restored) return engineSessionId
   const projectsDir = deps.projectsDir ?? claudeProjects
   const mine = await projectsDir(account)
   if (mine === null) return undefined
@@ -186,7 +204,9 @@ async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, sub
   let plan: SpawnPlan | undefined
   try {
     await startRun(deps.pool, run.id)
-    const resume = await resumeFor(deps, subject, account)
+    const restored = await restoreChat(deps, context, subject, account)
+    // A newer chat is stored but could not be put in place: resuming this laptop's older copy would drop the other laptop's turns.
+    const resume = restored === 'failed' ? undefined : await resumeFor(deps, subject, account, restored === 'current')
     // A turn that cannot resume its own session needs the thread so far: a fresh session, or the taken-over chat after another session's turns.
     const fresh = resume !== subject.engineSessionId && context.freshPrompt ? { ...context, prompt: await context.freshPrompt() } : context
     plan = await deps.spawnPlan({ context: fresh, subject, account, hookToken: token, resume })
@@ -209,7 +229,27 @@ async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, sub
     deps.revokeToken(token)
     await plan?.dispose?.()
   }
+  if (outcome.kind === 'reply' && plan !== undefined) await saveChat(deps, context, subject, account, outcome.sessionId, plan.cwd)
   const runOutcome = outcome.kind === 'reply' ? 'succeed' : outcome.kind === 'stopped' || outcome.kind === 'not_started' ? 'cancel' : 'fail'
   await finishRun(deps.pool, run.id, runOutcome).catch(() => undefined)
   return { outcome, runId: run.id }
+}
+
+/** Only a task's own Claude chat is shared: a member's session and a Codex chat stay on their laptop. */
+async function sharedChatDir(deps: TurnRunnerDeps, subject: TurnSubject, account: Account): Promise<string | null> {
+  if (deps.chats === undefined || subject.assignment !== undefined || account.client !== 'claude') return null
+  return (deps.projectsDir ?? claudeProjects)(account)
+}
+
+async function restoreChat(deps: TurnRunnerDeps, context: TurnRequestContext, subject: TurnSubject, account: Account): Promise<RestoreResult> {
+  if (subject.engineSessionId === null) return 'none'
+  const projectsDir = await sharedChatDir(deps, subject, account)
+  if (projectsDir === null || deps.chats === undefined) return 'none'
+  return deps.chats.restore({ taskId: context.task.id, sessionId: subject.engineSessionId, cwd: turnCwd(context, subject), projectsDir })
+}
+
+async function saveChat(deps: TurnRunnerDeps, context: TurnRequestContext, subject: TurnSubject, account: Account, sessionId: string, cwd: string): Promise<void> {
+  const projectsDir = await sharedChatDir(deps, subject, account)
+  if (projectsDir === null || deps.chats === undefined) return
+  await deps.chats.save({ taskId: context.task.id, workspaceId: context.task.workspaceId, sessionId, cwd, projectsDir })
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
@@ -10,6 +10,7 @@ import { applyMigrations } from '../../src/db/migrate.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { DEFAULT_MOCK_CAPABILITIES, MockAdapter } from '../../src/chat/mock.js'
 import { Outbox, TransportError } from '../../src/chat/outbox.js'
+import { queueUpload, readUploadFile } from '../../src/cli/upload.js'
 import { registerSecretValue, resetSecretScrubberForTests } from '../../src/secrets/scrubber.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 import type { ChatAction, ChatAdapter } from '../../src/chat/contract.js'
@@ -322,7 +323,7 @@ describeDb('Outbox', () => {
     },
   )
 
-  it('reads an upload queued by path when it is sent, and fails the row when the file is gone', async () => {
+  it('still reads an older upload queued by path when it is sent, and fails the row when the file is gone', async () => {
     const workspaceId = await createWorkspace()
     const adapter = new MockAdapter({ ...DEFAULT_MOCK_CAPABILITIES, fileUpload: true })
     const outbox = new Outbox(pool, adapter, { maxAttempts: 1, now: () => new Date(0) })
@@ -340,6 +341,35 @@ describeDb('Outbox', () => {
     expect(await outbox.drain()).toEqual({ sent: 1, failed: 1 })
     const sent = adapter.performed[0] as Extract<ChatAction, { kind: 'upload' }>
     expect(Buffer.from(sent.bytes).toString()).toBe('<h1>QA</h1>')
+  })
+
+  it('posts a file queued by another process from its stored bytes, and deletes them once sent or failed for good', async () => {
+    const workspaceId = await createWorkspace()
+    const adapter = new MockAdapter({ ...DEFAULT_MOCK_CAPABILITIES, fileUpload: true })
+    const outbox = new Outbox(pool, adapter, { maxAttempts: 1 })
+    const dir = mkdtempSync(join(tmpdir(), 'relay-outbox-'))
+    const path = join(dir, 'qa.html')
+    writeFileSync(path, '<h1>QA</h1>')
+    // Its own pool stands in for the other laptop; the local file is gone before the daemon posts.
+    const otherLaptop = createPool(await getTestDatabaseUrl())
+    const file = await readUploadFile(path)
+    await queueUpload(otherLaptop, workspaceId, { channel: 'D1', thread: '1.1' }, file)
+    await queueUpload(otherLaptop, workspaceId, { channel: 'D1', thread: '1.1' }, file)
+    await closePool(otherLaptop)
+    rmSync(dir, { recursive: true })
+    // queueUpload writes Slack rows; this outbox drains the mock adapter's.
+    await pool.query(`UPDATE outbox SET adapter = $2, next_attempt_at = to_timestamp(0) WHERE workspace_id = $1`, [workspaceId, adapter.name])
+    const storedFiles = async () => (await pool.query('SELECT 1 FROM outbox_files WHERE workspace_id = $1', [workspaceId])).rowCount
+    expect(await storedFiles()).toBe(2)
+
+    expect(await outbox.drain({ lane: 'uploads' })).toEqual({ sent: 1, failed: 0 })
+    const sent = adapter.performed[0] as Extract<ChatAction, { kind: 'upload' }>
+    expect([sent.filename, Buffer.from(sent.bytes).toString()]).toEqual(['qa.html', '<h1>QA</h1>'])
+    expect(await storedFiles()).toBe(1)
+
+    adapter.failNextPerform(new Error('channel_not_found'))
+    expect(await outbox.drain({ lane: 'uploads' })).toEqual({ sent: 0, failed: 1 })
+    expect(await storedFiles()).toBe(0)
   })
 
   it('drains uploads in their own lane, one at a time, so a post never waits behind one', async () => {

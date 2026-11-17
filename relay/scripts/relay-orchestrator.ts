@@ -26,6 +26,7 @@
  * watch for. This file only has to run correctly when asked; it does not
  * run itself as part of `pnpm test`.
  */
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadPolicy, loadRelayConfig } from '../src/config/load.js'
@@ -38,14 +39,17 @@ import { DEFAULT_UI_PORT } from '../src/config/schema.js'
 import { createLogger, type Logger } from '../src/obs/logger.js'
 import { createRotatingLogDestination } from '../src/obs/rotation.js'
 import { createPool, closePool } from '../src/db/pool.js'
-import { applyMigrations } from '../src/db/migrate.js'
-import { startOrchestrator, type StartOrchestratorOptions } from '../src/orchestrator.js'
+import { applyMigrations, newestMigrationName, pendingMigrations } from '../src/db/migrate.js'
+import { failoverTablesExist, otherHostsHaveRunningWorkers } from '../src/failover/lease.js'
+import { FailoverRunner } from '../src/failover/run.js'
+import { startOrchestrator, type OrchestratorHandle, type StartOrchestratorOptions } from '../src/orchestrator.js'
 import { createRedis } from '../src/redis/client.js'
 import { APPROVAL_RECEIPT_KEY_SECRET } from '../src/secrets/keychain.js'
 import type { SecretProvider } from '../src/secrets/provider.js'
 
 const CONFIG_PATH = process.env.RELAY_CONFIG_PATH ?? 'config/relay.config.yaml'
 const POLICY_PATH = process.env.RELAY_POLICY_PATH ?? 'config/policy.yaml'
+const MIGRATIONS_DIR = 'src/db/migrations'
 
 /**
  * How long startup may take before the process gives up and exits.
@@ -234,6 +238,45 @@ async function autonomousRuntimeOptions(config: RelayConfig, secrets: SecretProv
   }
 }
 
+/** What startWithFailover drives; the real FailoverRunner in the daemon. */
+export type StandbyGate = Pick<FailoverRunner, 'register' | 'waitForClaim'>
+
+/**
+ * The failover start order (README, "Failover"). The very first start
+ * applies every pending migration under the migration lock, because the
+ * record does not exist before 0030. After that only the laptop holding the
+ * record migrates and starts: a waiting laptop never reaches `start`, so it
+ * opens no Slack connection and runs no scheduler. Undefined when stopped
+ * while waiting.
+ */
+export async function startWithFailover<T>(steps: {
+  gate: StandbyGate
+  tablesExist: () => Promise<boolean>
+  migrateAll: () => Promise<unknown>
+  migrateAsHolder: () => Promise<unknown>
+  start: () => Promise<T>
+}): Promise<T | undefined> {
+  if (!(await steps.tablesExist())) await steps.migrateAll()
+  await steps.gate.register()
+  if (!(await steps.gate.waitForClaim())) return undefined
+  await steps.migrateAsHolder()
+  return steps.start()
+}
+
+/** How often the holder rechecks before migrating while the other laptop finishes its turns. */
+const MIGRATION_WAIT_MS = 15_000
+
+/** The holder applies new migrations only once the other laptop's running turns, built on the old schema, have ended. */
+async function migrateAsHolder(pool: Parameters<typeof applyMigrations>[0], host: string, log: Logger): Promise<void> {
+  for (;;) {
+    if ((await pendingMigrations(pool, MIGRATIONS_DIR)).length === 0) return
+    if (!(await otherHostsHaveRunningWorkers(pool, host))) break
+    log.info('failover: waiting for the other laptop to finish its running turns before applying migrations')
+    await new Promise((resolve) => setTimeout(resolve, MIGRATION_WAIT_MS))
+  }
+  await applyMigrations(pool, MIGRATIONS_DIR, { log })
+}
+
 async function main(): Promise<void> {
   const config = loadRelayConfig(CONFIG_PATH)
   // AP-1 / FR-POL-2, Task 3: loaded, and validated, before anything else
@@ -247,13 +290,30 @@ async function main(): Promise<void> {
   const log = await createDaemonLogger(config)
   const secrets = createDaemonSecretProvider(config, resolveRelayHome().path)
   const pool = createPool(await resolveDatabaseUrl(config, secrets))
+  const failover = config.failover
+    ? new FailoverRunner({
+        pool,
+        log,
+        name: config.failover.host,
+        home: homedir(),
+        buildMigration: newestMigrationName(MIGRATIONS_DIR),
+        preferred: config.failover.preferred,
+      })
+    : undefined
+  // A standby laptop may wait for hours, so a stop must work before startup finishes.
+  const stopWaiting = (): void => {
+    void failover?.stop().finally(() => {
+      closePool(pool)
+        .catch(() => {})
+        .finally(() => process.exit(0))
+    })
+  }
+  if (failover) {
+    process.once('SIGINT', stopWaiting)
+    process.once('SIGTERM', stopWaiting)
+  }
 
   try {
-    log.info('applying any pending migrations before starting the orchestrator')
-    await applyMigrations(pool, 'src/db/migrations', { log })
-
-    const autonomousRuntime = await autonomousRuntimeOptions(config, secrets)
-    log.info('starting the orchestrator against the configured Slack workspace')
     // Bounded, because startOrchestrator can hang rather than fail. Observed:
     // Slack's REST API answered normally while the Socket Mode websocket
     // never completed its handshake, so the process sat alive and silent,
@@ -264,24 +324,50 @@ async function main(): Promise<void> {
     // does not cover. Exiting non-zero hands the problem to a supervisor,
     // which is the same posture as the health check itself, and a loud exit
     // beats an alive process that will never answer a message.
-    const handle = await withStartupDeadline(
-      startOrchestrator(pool, secrets, log, {
-        policy,
-        ...(config.autonomous ? { autonomous: config.autonomous } : {}),
-        ...(config.slack ? { slack: config.slack } : {}),
-        ...(autonomousRuntime ? { autonomousRuntime } : {}),
-        ui: {
-          enabled: config.ui?.enabled ?? true,
-          port: config.ui?.port ?? DEFAULT_UI_PORT,
-          personasDir: defaultPersonasDir(),
-          reposPath: process.env.RELAY_REPOS_PATH ?? defaultReposPath(),
-          ...(config.autonomous ? { claudeBin: config.autonomous.claude_bin } : {}),
-        },
-      }),
-      STARTUP_DEADLINE_MS,
-      log,
-      (late) => late.stop(),
-    )
+    const start = async (): Promise<OrchestratorHandle> => {
+      const autonomousRuntime = await autonomousRuntimeOptions(config, secrets)
+      log.info('starting the orchestrator against the configured Slack workspace')
+      return withStartupDeadline(
+        startOrchestrator(pool, secrets, log, {
+          policy,
+          ...(config.autonomous ? { autonomous: config.autonomous } : {}),
+          ...(config.slack ? { slack: config.slack } : {}),
+          ...(autonomousRuntime ? { autonomousRuntime } : {}),
+          ...(failover ? { failover } : {}),
+          ui: {
+            enabled: config.ui?.enabled ?? true,
+            port: config.ui?.port ?? DEFAULT_UI_PORT,
+            personasDir: defaultPersonasDir(),
+            reposPath: process.env.RELAY_REPOS_PATH ?? defaultReposPath(),
+            ...(config.autonomous ? { claudeBin: config.autonomous.claude_bin } : {}),
+          },
+        }),
+        STARTUP_DEADLINE_MS,
+        log,
+        (late) => late.stop(),
+      )
+    }
+
+    let handle: OrchestratorHandle
+    if (failover) {
+      log.info({ host: failover.host }, 'failover is on: waiting until this laptop holds the record before connecting to Slack')
+      const started = await startWithFailover({
+        gate: failover,
+        tablesExist: () => failoverTablesExist(pool),
+        migrateAll: () => applyMigrations(pool, MIGRATIONS_DIR, { log }),
+        migrateAsHolder: () => migrateAsHolder(pool, failover.host, log),
+        start,
+      })
+      // Stopped while waiting: stopWaiting closes the pool and exits.
+      if (started === undefined) return
+      handle = started
+      process.off('SIGINT', stopWaiting)
+      process.off('SIGTERM', stopWaiting)
+    } else {
+      log.info('applying any pending migrations before starting the orchestrator')
+      await applyMigrations(pool, MIGRATIONS_DIR, { log })
+      handle = await start()
+    }
     log.info(
       'orchestrator is running: Socket Mode is connected, the outbox drain is scheduled. ' +
         'Mention Relay, DM it, or reply in an existing Relay thread. Press Ctrl+C to stop.',
@@ -327,7 +413,7 @@ async function main(): Promise<void> {
     healthTimer.unref()
 
     let shuttingDown = false
-    const shutdown = (signal: string): void => {
+    const shutdown = (signal: string, code = 0): void => {
       clearInterval(healthTimer)
       if (shuttingDown) return
       shuttingDown = true
@@ -337,6 +423,8 @@ async function main(): Promise<void> {
         .catch((error: unknown) => {
           log.error({ err: error }, 'error while stopping the orchestrator')
         })
+        // Hands the record over at once on a clean stop; a step down already released it.
+        .then(() => failover?.stop())
         .finally(() => {
           closePool(pool)
             .catch(() => {
@@ -344,9 +432,13 @@ async function main(): Promise<void> {
               // failed close here must not mask the shutdown itself.
             })
             .finally(() => {
-              process.exit(0)
+              process.exit(code)
             })
         })
+    }
+    if (failover) {
+      // Exit 1 after a step down, so launchd and systemd restart this laptop as standby.
+      failover.attach({ closeSlack: () => handle.closeSlack(), busy: () => handle.busy(), exit: (code) => shutdown('failover step down', code) })
     }
     process.on('SIGINT', () => shutdown('SIGINT'))
     process.on('SIGTERM', () => shutdown('SIGTERM'))

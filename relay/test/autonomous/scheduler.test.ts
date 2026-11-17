@@ -1,6 +1,6 @@
 import type { TeamHooks } from '../../src/teams/types.js'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -11,9 +11,11 @@ import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { processGroupAlive, spawnGated } from '../../src/process/gated-spawn.js'
-import { acquireLease, addNote, intakeMention, loadTask, PAUSED_NOTE, updateTask, type AutonomousTask } from '../../src/autonomous/store.js'
+import { acquireLease, addNote, intakeMention, loadTask, PAUSED_NOTE, pinReminderTask, updateTask, type AutonomousTask } from '../../src/autonomous/store.js'
 import { downloadTaskFiles, type FileFetch } from '../../src/autonomous/files.js'
-import { createScheduler, pauseAutonomousTask, stopAutonomousTask, type SchedulerEffects, type TurnRequestContext, type TurnResult } from '../../src/autonomous/scheduler.js'
+import { createScheduler, INTERRUPTED_NOTE, pauseAutonomousTask, stopAutonomousTask, type SchedulerDeps, type SchedulerEffects, type TurnRequestContext, type TurnResult } from '../../src/autonomous/scheduler.js'
+import { missingFolderText, placeTaskTurn, repositoryFallbackText } from '../../src/autonomous/runtime.js'
+import type { FailoverGate } from '../../src/failover/types.js'
 import type { TurnOutcome } from '../../src/autonomous/worker.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 
@@ -38,8 +40,8 @@ describe('autonomous scheduler', () => {
   })
 
 
-  async function newTask(text = 'fix the login bug'): Promise<{ workspaceId: string; task: AutonomousTask; say: (text: string) => Promise<void> }> {
-    const workspaceId = await resolveWorkspaceId(pool, 'slack', `T_${randomUUID()}`)
+  async function newTask(text = 'fix the login bug', inWorkspace?: string): Promise<{ workspaceId: string; task: AutonomousTask; say: (text: string) => Promise<void> }> {
+    const workspaceId = inWorkspace ?? (await resolveWorkspaceId(pool, 'slack', `T_${randomUUID()}`))
     const principalId = await provisionPrincipal(pool, workspaceId, 'slack', `U_${randomUUID()}`, 'Requester', ['member'])
     const threadRef = `slack:C1:${randomUUID()}`
     const intake = (message: string, ts: string) =>
@@ -93,7 +95,11 @@ describe('autonomous scheduler', () => {
   }
 
   function scheduler(workspaceId: string, h: Harness, options: { engaged?: () => boolean; leaseTtlMs?: number; tickMs?: number; team?: TeamHooks } = {}) {
-    return createScheduler({
+    return createScheduler(schedulerDeps(workspaceId, h, options))
+  }
+
+  function schedulerDeps(workspaceId: string, h: Harness, options: { engaged?: () => boolean; leaseTtlMs?: number; tickMs?: number; team?: TeamHooks } = {}): SchedulerDeps {
+    return {
       pool,
       workspaceId,
       owner: `test-${randomUUID()}`,
@@ -110,7 +116,7 @@ describe('autonomous scheduler', () => {
       ...(options.leaseTtlMs !== undefined ? { leaseTtlMs: options.leaseTtlMs } : {}),
       ...(options.tickMs !== undefined ? { tickMs: options.tickMs } : {}),
       ...(options.team !== undefined ? { team: options.team } : {}),
-    })
+    }
   }
 
   function teamSpy(): TeamHooks & { calls: string[] } {
@@ -502,5 +508,161 @@ describe('autonomous scheduler', () => {
     expect((await loadTask(pool, task.id))?.phase).toBe('stopped')
     expect(h.turns).toHaveLength(0)
     expect(h.posts[0]).toContain('kill switch')
+  })
+
+  describe('with failover', () => {
+    const name = (laptop: string): string => `${laptop}-${randomUUID().slice(0, 8)}`
+    const laptop = async (host: string, lastSeen: 'now' | 'gone'): Promise<void> => {
+      await pool.query(
+        `INSERT INTO failover_hosts (name, home, build_migration, last_seen_at) VALUES ($1, $2, '0030', now() - $3::interval)`,
+        [host, `/Users/${host}`, lastSeen === 'now' ? '0 seconds' : '2 minutes'],
+      )
+    }
+    function gate(host: string, allowed: { value: boolean } = { value: true }): FailoverGate & { downs: string[] } {
+      const downs: string[] = []
+      return { host, downs, holdsFresh: () => allowed.value, mayStartWork: async () => allowed.value, stepDown: (reason) => void downs.push(reason) }
+    }
+    function sleeper(): ReturnType<typeof spawnGated> {
+      const dir = mkdtempSync(join(tmpdir(), 'relay-other-'))
+      const bin = join(dir, 'claude')
+      writeFileSync(bin, '#!/bin/sh\nsleep 30\n')
+      chmodSync(bin, 0o755)
+      return spawnGated({ bin, args: [], cwd: dir, env: process.env, timeoutMs: 60_000 })
+    }
+
+    it("never signals a worker another laptop recorded, at startup, on a turn, or on Stop", async () => {
+      const { workspaceId, task } = await newTask()
+      const here = name('laptop-a')
+      const other = name('laptop-b')
+      await laptop(other, 'now')
+      // A live group whose pgid the other laptop recorded: here it is some unrelated process.
+      const child = sleeper()
+      await pool.query('UPDATE autonomous_tasks SET worker_pid = $2, worker_pgid = $2, worker_host = $3 WHERE id = $1', [task.id, child.pgid, other])
+      const h = harness([async () => reply('Done here.')])
+
+      const s = createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here) })
+      await s.start()
+      await s.tick()
+      await stopAutonomousTask(pool, h.effects, task.id, here)
+      await s.stop()
+
+      expect(h.posts).toEqual(['Done here.'])
+      expect(processGroupAlive(child.pgid)).toBe(true)
+      process.kill(-child.pgid, 'SIGKILL')
+      await child.done
+    })
+
+    it('marks a turn cut off on a laptop that went quiet interrupted, and tells its thread exactly once', async () => {
+      const { workspaceId, task } = await newTask()
+      const here = name('laptop-a')
+      const gone = name('laptop-b')
+      await laptop(gone, 'gone')
+      await pool.query(
+        `UPDATE autonomous_tasks SET lease_owner = $2, lease_expires_at = now() - interval '1 second', worker_pid = 999999, worker_pgid = 999999, worker_host = $3 WHERE id = $1`,
+        [task.id, `relay-4242@${gone}`, gone],
+      )
+      const h = harness([async () => reply('should not run')])
+
+      const s = createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here) })
+      await s.start()
+      await s.tick()
+      await s.tick()
+      await s.stop()
+
+      expect(h.posts).toEqual([INTERRUPTED_NOTE])
+      expect(h.turns).toHaveLength(0)
+      // The message stays for the turn the next mention starts.
+      expect(await loadTask(pool, task.id)).toMatchObject({ nextWakeupAt: null, leaseOwner: null, workerPgid: null, workerHost: null, pendingEvents: [expect.objectContaining({ text: 'fix the login bug' })] })
+    })
+
+    it('runs a reminder task only on the laptop it is pinned to', async () => {
+      const { workspaceId, task } = await newTask('check the deploy')
+      const pinned = name('laptop-b')
+      // A reminder's task is read-only; pinned the way the runtime pins it after intake.
+      await pool.query('UPDATE autonomous_tasks SET read_only = true WHERE id = $1', [task.id])
+      const { rows } = await pool.query<{ thread_ref: string }>('SELECT thread_ref FROM sessions WHERE id = $1', [task.sessionId])
+      await pinReminderTask(pool, workspaceId, rows[0]?.thread_ref ?? '', pinned)
+      const h = harness([async () => reply('Deploy is green.')])
+
+      await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(name('laptop-a')) }).tick()
+      expect(h.turns).toHaveLength(0)
+
+      await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(pinned) }).tick()
+      expect(h.posts).toEqual(['Deploy is green.'])
+    })
+
+    it('starts nothing once the record is lost, steps down, and lets the running turn finish and post', async () => {
+      const first = await newTask('first thread')
+      const allowed = { value: true }
+      const failover = gate(name('laptop-a'), allowed)
+      let release: () => void = () => undefined
+      const h = harness([
+        async () => {
+          await new Promise<void>((resolve) => {
+            release = resolve
+          })
+          return reply('First answered.')
+        },
+        async () => reply('should not run'),
+      ])
+      const s = createScheduler({ ...schedulerDeps(first.workspaceId, h), failover })
+      s.wake()
+      const deadline = Date.now() + 3000
+      while (h.turns.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+
+      allowed.value = false
+      const second = await newTask('second thread', first.workspaceId)
+      s.wake()
+      while (failover.downs.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+      const drained = s.drain()
+      release()
+      await drained
+
+      expect(h.turns).toHaveLength(1)
+      expect(h.posts).toEqual(['First answered.'])
+      expect(failover.downs.length).toBeGreaterThan(0)
+      expect((await loadTask(pool, second.task.id))?.pendingEvents).toHaveLength(1)
+    })
+
+    it('runs a turn whose worktree is missing here in its repository, saying so once', async () => {
+      const { workspaceId, task, say } = await newTask()
+      const root = mkdtempSync(join(tmpdir(), 'relay-place-'))
+      const repo = join(root, 'shop')
+      mkdirSync(repo)
+      const worktree = join(root, 'shop-login-fix')
+      await pool.query('UPDATE autonomous_tasks SET chat_cwd = $2 WHERE id = $1', [task.id, worktree])
+      const h = harness([async () => reply('First.'), async () => reply('Second.')])
+      h.effects.placeTurn = (placed, lease) => placeTaskTurn({ pool, home: root, repos: () => [repo], tell: async (_task, text) => void h.posts.push(text) }, placed, lease)
+      const s = createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(name('laptop-a')) })
+
+      await s.tick()
+      await say('and the signup page')
+      await s.tick()
+
+      expect(h.turns.map((turn) => turn.task.chatCwd)).toEqual([repo, repo])
+      expect(h.posts).toEqual([repositoryFallbackText(worktree, repo), 'First.', 'Second.'])
+    })
+
+    it('asks for a folder when neither the folder nor its repository is here, and runs where the requester then says', async () => {
+      const { workspaceId, task, say } = await newTask()
+      const root = mkdtempSync(join(tmpdir(), 'relay-place-'))
+      const missing = join(root, 'gone', 'project')
+      mkdirSync(join(root, 'answer'))
+      await pool.query('UPDATE autonomous_tasks SET chat_cwd = $2 WHERE id = $1', [task.id, missing])
+      const h = harness([async () => reply('Fixed it.')])
+      h.effects.placeTurn = (placed, lease) => placeTaskTurn({ pool, home: root, repos: () => [], tell: async (_task, text) => void h.posts.push(text) }, placed, lease)
+      const s = createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(name('laptop-a')) })
+
+      await s.tick()
+      expect(h.turns).toHaveLength(0)
+      expect(h.posts).toEqual([missingFolderText(missing)])
+      expect((await loadTask(pool, task.id))?.nextWakeupAt).toBeNull()
+
+      await say('use ~/answer')
+      await s.tick()
+      expect(h.turns[0]?.task.chatCwd).toBe(join(root, 'answer'))
+      expect(h.turns[0]?.prompt).toContain('fix the login bug')
+      expect(h.posts.at(-1)).toBe('Fixed it.')
+    })
   })
 })

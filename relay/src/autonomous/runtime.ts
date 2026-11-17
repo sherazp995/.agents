@@ -3,10 +3,16 @@
  * and every effect it runs, composed from the pieces in this folder.
  * startOrchestrator starts it when `autonomous.enabled` and hands the
  * orchestrator its routing.
+ *
+ * With failover on (`failover`), work starts only while this laptop holds
+ * the "who is answering" record, workers and leases carry this laptop's
+ * name, stored folders are mapped to this laptop's home, and Claude chats
+ * are saved for the other laptop. `drain()` is the step down's wait.
  */
 
 import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, dirname, join, sep } from 'node:path'
 import type { Pool, PoolClient } from 'pg'
 import type { ResolveApprovalResult } from '../approvals/store.js'
 import type { ChatAction, ChatEvent, ChatRef } from '../chat/contract.js'
@@ -23,24 +29,27 @@ import type { SecretProvider } from '../secrets/provider.js'
 import { readAccountPool, RedisCooldownStore, type Account } from './accounts.js'
 import { codexVersion, isProvenEligible, readCodexEligibility } from './codex-probe.js'
 import { downloadTaskFiles } from './files.js'
-import { chatFolder, textFolder } from './folder.js'
+import { chatFolder, isFolder, namedFolder, textFolder } from './folder.js'
 import { createAutonomousGuard, killSwitchCheck } from './guard.js'
 import { cancelTaskWork, requestShellWrite, settleTaskOperations, sweepExpiredApprovals, threadChatRef } from './operations.js'
 import { buildReplyCommand } from '../live/control.js'
 import { deliverViaCourier } from '../live/courier.js'
 import { findOpenSessionName } from '../live/open-session.js'
+import { createChatSync } from '../failover/chats.js'
+import { knownHomes, mapPath } from '../failover/paths.js'
+import { ALWAYS_ACTIVE, type FailoverGate } from '../failover/types.js'
 import { WORKER_BRIEF } from './prompt.js'
 import { routeAutonomousEvent } from './router.js'
 import { TEAM_PROPOSAL_PATH, teamProposalRoute } from './team-proposal-route.js'
 import { createScheduler, killWorkerGroup, pauseAutonomousTask, stopAutonomousTask, type Scheduler } from './scheduler.js'
-import { loadTask, loadTaskBySession, wakeTask, type AutonomousTask } from './store.js'
+import { leaseOwnerName, loadTask, loadTaskBySession, pinReminderTask, updateTask, wakeTask, type AutonomousTask, type Lease } from './store.js'
 import { renderThreadHistory, slackThreadReplies } from './thread-history.js'
-import { runTurnOnPool, type SpawnPlan, type SpawnPlanParams, type TurnRunnerDeps } from './turn-runner.js'
+import { runTurnOnPool, turnCwd, type SpawnPlan, type SpawnPlanParams, type TurnRunnerDeps } from './turn-runner.js'
 import { defaultPersonasDir } from '../projects/persona-files.js'
 import { leadTurnSubject } from '../teams/lead-brief.js'
 import { teamRoute } from '../teams/route.js'
 import { createTeamScheduler } from '../teams/scheduler.js'
-import { loadAssignment } from '../teams/store.js'
+import { loadAssignment, ownWorkerGroups } from '../teams/store.js'
 import { TEAM_PATH, type TeamHooks } from '../teams/types.js'
 import { ensureMemberWorktree, headOf } from '../teams/worktrees.js'
 import { buildClaudeSettings, buildCodexHookOverrides } from './worker-config.js'
@@ -71,16 +80,22 @@ export type AutonomousRuntimeOptions = {
   teamProposer?: TeamProposer
   /** The global persona library; Relay home's `personas/` unless set. */
   personasDir?: string
+  /** Whether this laptop may start work, and its name; ALWAYS_ACTIVE (failover off) unless set. */
+  failover?: FailoverGate
 }
 
 export type AutonomousRuntime = {
   routing: AutonomousRouting
   onApprovalResolved(result: ResolveApprovalResult): Promise<void>
+  /** For the failover step down: starts no new task or member turn, and resolves once the running ones have ended and posted. */
+  drain(): Promise<void>
   stop(): Promise<void>
 }
 
 export async function startAutonomousRuntime(options: AutonomousRuntimeOptions): Promise<AutonomousRuntime> {
   const { pool, workspaceId, dispatcher, log, config, relayHome } = options
+  const gate = options.failover ?? ALWAYS_ACTIVE
+  const owner = leaseOwnerName(process.pid, gate.host)
   const installedCodexVersion = codexVersion(config.codex_bin).catch(() => 'unknown')
   const taskDir = (taskId: string): string => join(relayHome, 'tasks', taskId)
   const post = (action: ChatAction, executor?: PoolClient): Promise<string> => dispatcher.enqueue(action, workspaceId, executor)
@@ -115,7 +130,8 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
         repo: (name) => loadRepoRegistryIfPresent(options.repoRegistryPath).repos.find((entry) => entry.name === name),
         wake: () => team.wake(),
         killGroups: async (pgids) => {
-          for (const pgid of pgids) await killWorkerGroup(pgid)
+          // A process group id from another laptop names nothing here.
+          for (const pgid of await ownWorkerGroups(pool, pgids, gate.host)) await killWorkerGroup(pgid)
         },
       }),
     },
@@ -141,29 +157,47 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
     issueToken: (context) => bridge.issueToken(context),
     revokeToken: (token) => bridge.revokeToken(token),
     spawnPlan,
+    ...(gate.host !== null ? { chats: createChatSync(pool, gate.host, log) } : {}),
   }
+  const repoPaths = (): string[] => loadRepoRegistryIfPresent(options.repoRegistryPath).repos.map((entry) => entry.path)
+  const localPath = async (path: string): Promise<string> => mapPath(path, await knownHomes(pool), homedir())
 
   // --- the scheduler -------------------------------------------------------------
   const threadReplies = slackThreadReplies(botToken)
   const team = createTeamScheduler({
     pool,
     workspaceId,
-    owner: `relay-${process.pid}`,
+    owner,
     runTurn: (context) => runTurnOnPool(turnDeps, context),
     ensureWorktree: ensureMemberWorktree,
     headOf,
     log,
+    failover: gate,
   })
+  const placeTurnHere = (task: AutonomousTask, lease: Lease): Promise<AutonomousTask | null> =>
+    placeTaskTurn(
+      {
+        pool,
+        home: homedir(),
+        repos: repoPaths,
+        tell: async (target, text) => {
+          await post({ kind: 'post', ref: await replyRef(target), text })
+        },
+      },
+      task,
+      lease,
+    )
   const cleanupStopped = withTeamStop(team, (task) => cancelTaskWork(pool, { outbox: dispatcher }, task))
   const scheduler: Scheduler = createScheduler({
     team,
     pool,
     workspaceId,
-    owner: `relay-${process.pid}`,
+    owner,
     post,
     replyRef,
     isKillSwitchEngaged: killSwitchCheck(options.killSwitch),
     log,
+    failover: gate,
     effects: {
       // In a project channel whose team has a lead, the thread's agent leads it; otherwise the subject is today's.
       runTurn: async (context) => runTurnOnPool(turnDeps, { ...context, subject: await leadTurnSubject(pool, context.task) }),
@@ -190,7 +224,7 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
         const replyCommand = buildReplyCommand(await replyRef(task))
         // The courier takes the first Claude login that is not cooling down; only a blocked login moves on (src/live/courier.ts).
         const outcome = await deliverViaCourier(
-          { targetCwd: task.chatCwd, targetName: name, body: text, replyCommand, senderLabel: 'your operator' },
+          { targetCwd: await localPath(task.chatCwd), targetName: name, body: text, replyCommand, senderLabel: 'your operator' },
           { accounts: { readAccounts: turnDeps.readAccounts, cooldowns: turnDeps.cooldowns }, log },
         )
         if (outcome.outcome === 'delivered') {
@@ -201,6 +235,8 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
         return false
       },
       extensionTokenChanged: async (task) => extensionTokens.changedSince(task.id, (await replyRef(task)).channel),
+      // Folders only move between laptops with failover on; a single laptop runs where the task says, as before.
+      ...(gate.host !== null ? { placeTurn: placeTurnHere } : {}),
       settleApprovals: (_task, lease) => settleTaskOperations(pool, lease),
       cleanupStopped,
       sweep: () => sweepExpiredApprovals(pool, workspaceId),
@@ -211,23 +247,26 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   const routing: AutonomousRouting = {
     async route(event: ChatEvent, thread, routeOptions) {
       const repos = () => loadRepoRegistryIfPresent(options.repoRegistryPath).repos
-      return routeAutonomousEvent(
+      const result = await routeAutonomousEvent(
         { pool, outbox: dispatcher, chatFolder: (text) => chatFolder(text, repos()), reminderFolder: (text) => textFolder(text, repos()), wake: () => scheduler.wake(), log },
         event,
         thread,
         routeOptions,
       )
+      // A reminder runs as the person this laptop's config names, so only this laptop runs its task.
+      if (result === 'handled' && event.origin === 'reminder' && gate.host !== null) await pinReminderTask(pool, workspaceId, thread.threadRef, gate.host)
+      return result
     },
     async stopSession(sessionId) {
       const task = await loadTaskBySession(pool, sessionId)
       if (!task) return false
-      await stopAutonomousTask(pool, { cleanupStopped }, task.id)
+      await stopAutonomousTask(pool, { cleanupStopped }, task.id, gate.host)
       return true
     },
     async pauseSession(sessionId, stoppedAt) {
       const task = await loadTaskBySession(pool, sessionId)
       if (!task) return 'missing'
-      return (await pauseAutonomousTask(pool, { cleanupStopped }, task.id, stoppedAt)).kind
+      return (await pauseAutonomousTask(pool, { cleanupStopped }, task.id, stoppedAt, gate.host)).kind
     },
   }
 
@@ -240,6 +279,9 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
       if (!task) return
       await wakeTask(pool, task.id)
       scheduler.wake()
+    },
+    async drain() {
+      await Promise.all([scheduler.drain(), team.drain()])
     },
     async stop() {
       await scheduler.stop()
@@ -260,7 +302,7 @@ export function buildSpawnPlan(setup: { claudeBin: string; codexBin: string; hoo
   const token = subject.noMcp ? undefined : extensionToken
   const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken, ...(token !== undefined ? { extensionToken: token } : {}) })
   // A member works in its worktree; a task's chat folder is set at intake, the home folder only for one created before that.
-  const cwd = subject.cwd ?? context.task.chatCwd ?? (process.env.HOME ?? '/')
+  const cwd = turnCwd(context, subject)
   const brief = subject.brief ?? WORKER_BRIEF
   const flags = { ...(params.resume !== undefined ? { resume: params.resume } : {}), ...(subject.model !== null ? { model: subject.model } : {}), ...(subject.noMcp ? { noMcp: true } : {}) }
   const readOnly = context.task.readOnly
@@ -290,4 +332,71 @@ export function withTeamStop(team: Pick<TeamHooks, 'stopTask'>, cleanup: (task: 
     await team.stopTask(task.id)
     await cleanup(task)
   }
+}
+
+/** Where a task's turn runs on this laptop, from the folder stored for it (README, "Failover"). */
+export type TaskFolder =
+  | { kind: 'here'; cwd: string }
+  /** The stored folder is missing here; its repository is not. */
+  | { kind: 'repository'; cwd: string; missing: string }
+  | { kind: 'missing'; missing: string }
+
+/**
+ * The stored folder mapped to this laptop's home; when it is not here (a
+ * worktree made on the other laptop), the registered repository it belongs
+ * to: the one it sits inside, or the one it is a `<repo>-<name>` sibling of.
+ */
+export function resolveTaskFolder(stored: string, place: { homes: readonly string[]; home: string; repos: readonly string[] }): TaskFolder {
+  const cwd = mapPath(stored, place.homes, place.home)
+  if (isFolder(cwd)) return { kind: 'here', cwd }
+  const repos = place.repos.map((repo) => mapPath(repo, place.homes, place.home))
+  const inside = repos.filter((repo) => cwd.startsWith(repo + sep))
+  const sibling = repos.filter((repo) => dirname(repo) === dirname(cwd) && basename(cwd).startsWith(`${basename(repo)}-`))
+  const repo = [...inside, ...sibling].filter(isFolder).sort((a, b) => b.length - a.length)[0]
+  return repo === undefined ? { kind: 'missing', missing: cwd } : { kind: 'repository', cwd: repo, missing: cwd }
+}
+
+export function repositoryFallbackText(missing: string, repo: string): string {
+  return `This thread's folder \`${missing}\` is not on this laptop (it was likely a worktree on the other one), so I am working in its repository \`${repo}\` instead. Work left uncommitted there is not here.`
+}
+
+export function missingFolderText(missing: string): string {
+  return `This thread's folder \`${missing}\` is not on this laptop, and neither is its repository. Reply here with the folder to use (for example \`~/code/project\`).`
+}
+
+export type PlaceTurnDeps = {
+  pool: Pool
+  home: string
+  /** The registered repositories' folders. */
+  repos: () => readonly string[]
+  /** Posts one line in the task's thread. */
+  tell: (task: AutonomousTask, text: string) => Promise<void>
+}
+
+/**
+ * The task as its turn runs here (the scheduler's placeTurn). A folder
+ * missing here moves the task to its repository, saying so once, since the
+ * move is stored; with no repository either, the thread is asked for a
+ * folder and the turn waits (null) until the requester names one that exists.
+ */
+export async function placeTaskTurn(deps: PlaceTurnDeps, task: AutonomousTask, lease: Lease): Promise<AutonomousTask | null> {
+  if (task.chatCwd === null) return task
+  const folder = resolveTaskFolder(task.chatCwd, { homes: await knownHomes(deps.pool), home: deps.home, repos: deps.repos() })
+  if (folder.kind === 'here') return folder.cwd === task.chatCwd ? task : { ...task, chatCwd: folder.cwd }
+  if (folder.kind === 'repository') {
+    if (!(await updateTask(deps.pool, lease, { chatCwd: folder.cwd }))) return null
+    await deps.tell(task, repositoryFallbackText(folder.missing, folder.cwd))
+    return { ...task, chatCwd: folder.cwd }
+  }
+  // An answer to the question below: the first existing folder the requester names in a waiting message.
+  const named = task.pendingEvents
+    .filter((event) => event.principalId === task.requesterPrincipalId)
+    .map((event) => namedFolder(event.text, deps.home))
+    .find((path) => path !== undefined)
+  if (named !== undefined) {
+    if (!(await updateTask(deps.pool, lease, { chatCwd: named }))) return null
+    return { ...task, chatCwd: named }
+  }
+  await deps.tell(task, missingFolderText(folder.missing))
+  return null
 }

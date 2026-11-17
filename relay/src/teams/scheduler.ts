@@ -12,11 +12,21 @@
  * member's worktree on its own client's logins with no MCP servers, and
  * never posts: its text goes to the lead as a note, written in the same
  * transaction as the assignment's result, so Stop fences both.
+ *
+ * Failover: a pass admits work only while `failover.mayStartWork()`, and a
+ * laptop signals only the member workers it recorded itself. A running
+ * assignment left by a laptop that went quiet is recovered like one left by
+ * a restart; one whose laptop is still seen is left to finish there.
  */
+
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 
 import { renderForModel, wrapUntrusted } from '../agent/untrusted.js'
 import { DEFAULT_LEASE_TTL_MS, killWorkerGroup, type TurnRequestContext, type TurnResult } from '../autonomous/scheduler.js'
-import { loadTask } from '../autonomous/store.js'
+import { hostGone, isOwnWorker, loadTask } from '../autonomous/store.js'
+import { knownHomes, mapPath } from '../failover/paths.js'
+import { ALWAYS_ACTIVE, type FailoverGate } from '../failover/types.js'
 import type { TurnSubject } from '../autonomous/turn-runner.js'
 import { memberBrief, memberFreshPrompt, memberPrompt } from './brief.js'
 import {
@@ -36,6 +46,7 @@ import {
   updateAssignment,
   updateAssignmentAndTellLead,
   type AssignmentUpdate,
+  type HostedAssignment,
 } from './store.js'
 import { MACHINE_MEMBER_LIMIT, type Assignment, type AssignmentLease, type SnapshotMember, type TeamHooks, type TeamRun, type TeamSchedulerDeps } from './types.js'
 
@@ -46,15 +57,33 @@ const MAX_RESTARTS = 1
 
 type Running = { taskId: string; teamId: string; controller: AbortController; done: Promise<void> }
 
-export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake(): void } {
+/** The team scheduler's options: the shared ones, and whether this laptop may start work (ALWAYS_ACTIVE when failover is off). */
+export type TeamSchedulerOptions = TeamSchedulerDeps & { readonly failover?: FailoverGate }
+
+export type TeamScheduler = TeamHooks & {
+  wake(): void
+  /** Admits nothing new from now on and resolves once every running member turn has ended. */
+  drain(): Promise<void>
+}
+
+export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
   const ttlMs = deps.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS
   const machineLimit = deps.machineLimit ?? MACHINE_MEMBER_LIMIT
+  const gate = deps.failover ?? ALWAYS_ACTIVE
   const running = new Map<string, Running>()
   let stopping = false
+  let draining = false
 
   async function tick(): Promise<void> {
-    if (stopping) return
+    if (stopping || draining) return
     const due = await listDueAssignments(deps.pool, deps.workspaceId)
+    // With failover off an idle pass costs one query, as before.
+    if (due.length === 0 && gate.host === null) return
+    if (!(await gate.mayStartWork())) {
+      gate.stepDown('the team scheduler may no longer start work')
+      return
+    }
+    if (gate.host !== null) await recoverGone(false)
     if (due.length === 0) return
     const counts = await countRunning(deps.pool)
     // A turn still winding down here (its row already left 'running') keeps its slot until it ends.
@@ -64,7 +93,7 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
     for (const entry of running.values()) local.set(entry.teamId, (local.get(entry.teamId) ?? 0) + 1)
     for (const [teamId, count] of local) byTeam.set(teamId, Math.max(byTeam.get(teamId) ?? 0, count))
     for (const assignment of due) {
-      if (stopping || total >= machineLimit) return
+      if (stopping || draining || total >= machineLimit) return
       if (running.has(assignment.id)) continue
       const teamRunning = byTeam.get(assignment.teamId) ?? 0
       if (teamRunning >= assignment.memberLimit) continue
@@ -76,7 +105,7 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
     }
   }
 
-  function start(assignment: Assignment, lease: AssignmentLease, teamId: string): void {
+  function start(assignment: HostedAssignment, lease: AssignmentLease, teamId: string): void {
     const controller = new AbortController()
     let lost = false
     const renewal = setInterval(() => {
@@ -106,14 +135,15 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
     running.set(assignment.id, { taskId: assignment.taskId, teamId, controller, done })
   }
 
-  async function runMember(assignment: Assignment, lease: AssignmentLease, signal: AbortSignal, isLost: () => boolean): Promise<void> {
+  async function runMember(assignment: HostedAssignment, lease: AssignmentLease, signal: AbortSignal, isLost: () => boolean): Promise<void> {
     const run = await loadRun(deps.pool, assignment.runId)
     const member = run?.snapshot.members.find((candidate) => candidate.id === assignment.memberId)
     if (!run || !member) {
       await failAndTell(assignment, lease, 'its team run or member is missing')
       return
     }
-    if (assignment.workerPgid !== null) {
+    // Another laptop's recorded worker is never signalled: holding the lease shows its turn there is over.
+    if (assignment.workerPgid !== null && isOwnWorker(assignment.workerHost, gate.host)) {
       // A worker left by an earlier turn of this assignment must exit before another starts.
       if (!(await killWorkerGroup(assignment.workerPgid))) {
         deps.log.error({ assignmentId: assignment.id }, 'a recorded member worker did not exit; not starting another')
@@ -150,7 +180,7 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
       signal,
       recordWorker: async (pid, pgid) => {
         workerPgid = pgid
-        return recordAssignmentWorker(deps.pool, lease, pid, pgid)
+        return recordAssignmentWorker(deps.pool, lease, pid, pgid, gate.host)
       },
       subject,
     }
@@ -164,8 +194,24 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
     await settle(prepared, member, lease, result)
   }
 
-  /** Makes the member's worktree on its first run; undefined when it could not (the lead is told) or the lease was lost. */
-  async function withWorktree(run: TeamRun, assignment: Assignment, lease: AssignmentLease): Promise<Assignment | undefined> {
+  /**
+   * Makes the member's worktree on its first run; undefined when it could not
+   * (the lead is told) or the lease was lost. With failover on, stored paths
+   * are mapped to this laptop's home, and a worktree the other laptop made is
+   * made again here.
+   */
+  async function withWorktree(stored: TeamRun, assignment: Assignment, lease: AssignmentLease): Promise<Assignment | undefined> {
+    let run = stored
+    if (gate.host !== null) {
+      const homes = await knownHomes(deps.pool)
+      const local = (path: string): string => mapPath(path, homes, homedir())
+      run = { ...stored, repoPath: local(stored.repoPath), worktreePath: stored.worktreePath === null ? null : local(stored.worktreePath) }
+      if (assignment.worktreePath !== null) {
+        const mapped = local(assignment.worktreePath)
+        if (existsSync(mapped)) return { ...assignment, worktreePath: mapped }
+        assignment = { ...assignment, worktreePath: null }
+      }
+    }
     if (assignment.worktreePath !== null) return assignment
     let made
     try {
@@ -260,10 +306,42 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
   /** Cancels a task's assignments, aborts their turns and kills their process groups. */
   async function stopTask(taskId: string): Promise<void> {
     // The durable cancel first: it bumps every generation, so a turn ending now writes nothing.
-    const pgids = await cancelTaskAssignments(deps.pool, taskId)
+    const pgids = await cancelTaskAssignments(deps.pool, taskId, gate.host)
     for (const entry of running.values()) if (entry.taskId === taskId) entry.controller.abort()
     for (const pgid of pgids) {
       if (!(await killWorkerGroup(pgid))) deps.log.error({ taskId, pgid }, 'a member worker did not exit on Stop')
+    }
+  }
+
+  /**
+   * Recovery with failover on. At startup (`restarted`) this laptop's own
+   * workers are killed and its running assignments rerun once, as a restart
+   * always did; on every pass, a running assignment whose lease names a
+   * laptop that went quiet is recovered the same way, without signalling
+   * anything. One whose laptop is still seen is left to finish there.
+   */
+  async function recoverGone(restarted: boolean): Promise<void> {
+    const host = gate.host
+    for (const assignment of await listInterruptedAssignments(deps.pool, deps.workspaceId)) {
+      if (running.has(assignment.id)) continue
+      const own = isOwnWorker(assignment.workerHost, host)
+      if (restarted && own && assignment.workerPgid !== null) {
+        if (!(await killWorkerGroup(assignment.workerPgid))) {
+          deps.log.error({ assignmentId: assignment.id }, 'a recorded member worker did not exit at startup')
+          continue
+        }
+        await clearAssignmentWorker(deps.pool, assignment.id, assignment.workerPgid)
+      }
+      if (assignment.state !== 'running') continue
+      const leaseHost = assignment.leaseOwner?.split('@')[1] ?? null
+      if (leaseHost === host) {
+        if (restarted) await recoverAssignment(deps.pool, assignment, MAX_RESTARTS)
+        continue
+      }
+      if (await hostGone(deps.pool, leaseHost, host)) {
+        await recoverAssignment(deps.pool, assignment, MAX_RESTARTS)
+        if (!own && assignment.workerPgid !== null) await clearAssignmentWorker(deps.pool, assignment.id, assignment.workerPgid)
+      }
     }
   }
 
@@ -276,6 +354,10 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
       for (const taskId of tasks) await stopTask(taskId)
     },
     async recover() {
+      if (gate.host !== null) {
+        await recoverGone(true)
+        return
+      }
       for (const assignment of await listInterruptedAssignments(deps.pool, deps.workspaceId)) {
         if (assignment.workerPgid !== null) {
           if (!(await killWorkerGroup(assignment.workerPgid))) {
@@ -291,6 +373,10 @@ export function createTeamScheduler(deps: TeamSchedulerDeps): TeamHooks & { wake
     async stop() {
       stopping = true
       for (const entry of running.values()) entry.controller.abort()
+      await Promise.all([...running.values()].map((entry) => entry.done))
+    },
+    async drain() {
+      draining = true
       await Promise.all([...running.values()].map((entry) => entry.done))
     },
     // The autonomous scheduler ticks every two seconds and calls tick(); a second loop here could race it.

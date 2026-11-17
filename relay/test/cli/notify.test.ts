@@ -120,7 +120,7 @@ describe('relay notify', () => {
       clearInterval(drain)
     }
     const upload = (await queued(workspaceId)).find((action) => (action as { kind: string }).kind === 'upload')
-    expect(upload).toMatchObject({ kind: 'upload', ref: { channel: 'D3', thread: ts }, filename: 'plan.md', path: plan })
+    expect(upload).toMatchObject({ kind: 'upload', ref: { channel: 'D3', thread: ts }, filename: 'plan.md', file_id: expect.any(String) })
 
     const before = (await queued(workspaceId)).length
     await expect(runNotify(pool, { workspaceId, text: 'x', file: join(dir, 'missing.md') })).rejects.toThrow('is not a file')

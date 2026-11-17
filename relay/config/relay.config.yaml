@@ -30,3 +30,9 @@ slack:
       act_as: U0BP0RW8FCH
     - channel: C0CGAM76QBS # insitu-hassan
       act_as: U0BP0RW8FCH
+# failover:
+#   # Two laptops sharing one cloud database; only one answers Slack at a
+#   # time (README, "Failover"). Each laptop names itself; the preferred one
+#   # takes the record back when it returns.
+#   host: hassan-mbp
+#   preferred: true

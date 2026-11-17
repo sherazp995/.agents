@@ -48,10 +48,12 @@ import type { OutboxDrainResult } from './chat/outbox.js'
 import { ProgressReporter, truncateToBytes } from './chat/progress.js'
 import { resolvePrincipal } from './chat/principals.js'
 import type { SecretProvider } from './secrets/provider.js'
-import { SLACK_BOT_TOKEN_SECRET, SlackAdapter } from './chat/slack/adapter.js'
+import { SLACK_APP_TOKEN_SECRET, SLACK_BOT_TOKEN_SECRET, SlackAdapter } from './chat/slack/adapter.js'
+import { createLiveSlackBoltApp, readRequiredSecret } from './chat/slack/api-client.js'
+import type { FailoverGate } from './failover/types.js'
 import { composeThreadRef } from './chat/slack/events.js'
 import { createRealAttachThreadToSession, listRecentEngineSessions } from './chat/slack/session-attach.js'
-import type { SlackAdapterCreateOptions } from './chat/slack/types.js'
+import type { SlackAdapterCreateOptions, SlackBoltApp } from './chat/slack/types.js'
 import { OutboundDispatcher } from './dispatch/outbound.js'
 import type { OutboundDispatcherOptions } from './dispatch/outbound.js'
 import type { Logger } from './obs/logger.js'
@@ -62,6 +64,7 @@ import { sessionRunContext } from './sessions/context.js'
 import { findActiveSession, findOrCreateSession, setSessionEngineSessionId } from './sessions/store.js'
 import { continueDirectSession } from './live/direct-router.js'
 import { startDirectThread } from './live/direct-thread.js'
+import { findOpenSessionName, openElsewhere } from './live/open-session.js'
 import type { DirectSessionDependencies } from './live/direct-session.js'
 import { CANCELLED_TEXT, FolderQuestions, folderGate } from './chat/slack/folder-questions.js'
 import { lazySlackChannelPurpose, lookupChannelFolder } from './chat/slack/channel-folder.js'
@@ -84,7 +87,6 @@ import {
   waitForClaim,
 } from './live/control.js'
 import { deliverViaCourier, type CourierAccounts } from './live/courier.js'
-import { findOpenSessionName } from './live/open-session.js'
 import { KillSwitchEngagedError, PostgresKillSwitchStore, createKillSwitch } from './killswitch.js'
 import type { KillSwitch } from './killswitch.js'
 import { createRun, finishRun, findActiveRunForSession } from './runs/store.js'
@@ -156,6 +158,8 @@ export type CreateProductionSlackAdapterOptions = Omit<
   folderQuestions?: FolderQuestions
   /** Injected for tests; production starts the real `claude` for `direct`. */
   directSession?: DirectSessionDependencies
+  /** With failover on, Slack events are left unacknowledged once this laptop stops answering. */
+  failover?: FailoverGate
 }
 
 /**
@@ -185,9 +189,10 @@ export async function createProductionSlackAdapter(
 ): Promise<{ adapter: SlackAdapter; workspaceId: string }> {
   let resolvedWorkspaceId: string | undefined
 
-  const { approvalReceiptKey, onApprovalResolved, folderQuestions, directSession, ...adapterOptions } = options
+  const { approvalReceiptKey, onApprovalResolved, folderQuestions, directSession, failover, ...adapterOptions } = options
   const adapter = await SlackAdapter.create(secrets, {
     ...adapterOptions,
+    ...(failover && !adapterOptions.boltApp ? { boltApp: await gatedBoltApp(secrets, adapterOptions, failover) } : {}),
     resolveWorkspaceId: async (platform, platformTeamId) => {
       resolvedWorkspaceId = await resolveWorkspaceId(pool, platform, platformTeamId)
       return resolvedWorkspaceId
@@ -254,11 +259,12 @@ export async function createProductionSlackAdapter(
         ...(folder?.kind === 'folder' ? { channelDirectory: folder.path } : {}),
         post,
         ...(options.log ? { log: options.log } : {}),
+        engineHost: failover?.host ?? null,
       }, directSession)
     },
     attachThreadToSession: async (params) => {
       if (!resolvedWorkspaceId) return undefined
-      return createRealAttachThreadToSession(pool, resolvedWorkspaceId)(params)
+      return createRealAttachThreadToSession(pool, resolvedWorkspaceId, failover?.host ?? null)(params)
     },
     // A click resolves the approval row it names. Until this binding the
     // adapter's default resolver was a no-op, so no click resolved anything.
@@ -292,6 +298,13 @@ export async function createProductionSlackAdapter(
   }
 
   return { adapter, workspaceId: resolvedWorkspaceId }
+}
+
+/** The live Bolt app with the failover gate in front of it, reading the same two tokens SlackAdapter.create reads. */
+async function gatedBoltApp(secrets: SecretProvider, options: SlackAdapterCreateOptions, failover: FailoverGate): Promise<SlackBoltApp> {
+  const botToken = await readRequiredSecret(secrets, options.botTokenSecretName ?? SLACK_BOT_TOKEN_SECRET)
+  const appToken = await readRequiredSecret(secrets, options.appTokenSecretName ?? SLACK_APP_TOKEN_SECRET)
+  return createLiveSlackBoltApp(botToken, appToken, failover)
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +755,8 @@ export type OrchestratorDeps = {
   readonly courierAccounts?: CourierAccounts
   /** Injected for tests; production starts the real `claude` for an answered `direct` request. */
   readonly directSession?: DirectSessionDependencies
+  /** This laptop's failover name: live chats started here are recorded with it, and ones recorded elsewhere are refused. */
+  readonly failoverHost?: string | null
 }
 
 /** The orchestrator's view of autonomous mode (src/autonomous/router.ts and scheduler.ts behind it). */
@@ -888,7 +903,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
         post,
         ...(autonomous ? { routeAutonomous: (routed: ChatEvent, chatCwd: string) => autonomous.route(routed, { threadRef, replyRef }, { chatCwd }) } : {}),
         startDirect: (text, folder) =>
-          startDirectThread(pool, { workspaceId: event.workspaceId, principalId, threadRef, text, channelDirectory: folder, post, log }, deps.directSession),
+          startDirectThread(pool, { workspaceId: event.workspaceId, principalId, threadRef, text, channelDirectory: folder, post, log, engineHost: deps.failoverHost ?? null }, deps.directSession),
         log,
       },
       event,
@@ -963,6 +978,12 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // run row here would claim a governed execution that never occurred.
   // Decided once above (liveAttached), so a parked event costs one process scan, not two.
   if (liveAttached || (!deps.autonomous && (await isLiveControlled(pool, session.id, event.workspaceId)))) {
+    // The chat runs on the other failover laptop: this one cannot reach it.
+    const elsewhere = await openElsewhere(pool, session.id, deps.failoverHost ?? null)
+    if (elsewhere !== null) {
+      await dispatcher.perform({ kind: 'post', ref: replyRef, text: elsewhere })
+      return
+    }
     const messageId = await enqueueLiveControlMessage(pool, {
       workspaceId: event.workspaceId,
       sessionId: session.id,
@@ -1311,6 +1332,17 @@ export type StartOrchestratorOptions = {
   slackAdapterOptions?: CreateProductionSlackAdapterOptions
   /** The local setup page (relay ui); absent or disabled starts no listener. */
   ui?: { readonly enabled: boolean; readonly port: number; readonly personasDir: string; readonly reposPath: string; readonly claudeBin?: string }
+  /** Two laptops sharing one database (README, "Failover"); absent means this laptop always answers. */
+  failover?: FailoverGate
+}
+
+export type OrchestratorHandle = {
+  stop(): Promise<void>
+  checkConnectivity(): Promise<void>
+  /** Closes the Slack connection only; replies already queued keep posting. Used when stepping down. */
+  closeSlack(): Promise<void>
+  /** True while a chat event handler is still running in this process. */
+  busy(): boolean
 }
 
 /**
@@ -1350,7 +1382,7 @@ export async function startOrchestrator(
   secrets: SecretProvider,
   log: Logger,
   options: StartOrchestratorOptions,
-): Promise<{ stop(): Promise<void>; checkConnectivity(): Promise<void> }> {
+): Promise<OrchestratorHandle> {
   const capabilities = options.capabilities ?? defaultCapabilities()
   const cancellationRegistry = new CancellationRegistry()
   const autonomousEnabled = options.autonomous?.enabled === true
@@ -1375,6 +1407,7 @@ export async function startOrchestrator(
     onApprovalResolved: async (result) => {
       await autonomousRuntime?.onApprovalResolved(result)
     },
+    ...(options.failover ? { failover: options.failover } : {}),
     ...options.slackAdapterOptions,
   })
 
@@ -1437,6 +1470,7 @@ export async function startOrchestrator(
       secrets,
       ...(teamProposer ? { teamProposer } : {}),
       ...(options.policy.approvals ? { approvalPolicy: options.policy.approvals } : {}),
+      ...(options.failover ? { failover: options.failover } : {}),
     })
   }
 
@@ -1445,6 +1479,9 @@ export async function startOrchestrator(
     ? { readAccounts: () => readAccountPool(undefined, log), cooldowns: new RedisCooldownStore(options.autonomousRuntime.redis) }
     : undefined
   const activeHandlers = new Set<Promise<void>>()
+  // Set once a failover step down asks the schedulers to finish and stop taking work.
+  let draining: Promise<void> | null = null
+  let drained = false
 
   await dispatcher.start(async (event) => {
     const handlerPromise = handleChatEvent(
@@ -1461,6 +1498,7 @@ export async function startOrchestrator(
         ...(autonomousRuntime ? { autonomous: autonomousRuntime.routing } : {}),
         ...(courierAccounts ? { courierAccounts } : {}),
         folderQuestions,
+        failoverHost: options.failover?.host ?? null,
       },
       event,
     )
@@ -1513,6 +1551,20 @@ export async function startOrchestrator(
      */
     async checkConnectivity(): Promise<void> {
       await adapter.checkConnectivity()
+    },
+
+    async closeSlack(): Promise<void> {
+      await dispatcher.stop()
+      // Start nothing new; turns already running finish and post.
+      if (autonomousRuntime && draining === null) {
+        draining = autonomousRuntime.drain().finally(() => {
+          drained = true
+        })
+      }
+    },
+
+    busy(): boolean {
+      return activeHandlers.size > 0 || (draining !== null && !drained)
     },
 
     /**

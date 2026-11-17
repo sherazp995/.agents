@@ -8,7 +8,7 @@
  * what was typed.
  */
 
-import { readPersona } from '../../projects/persona-files.js'
+import { personaText } from '../../projects/persona-library.js'
 import type { ChannelList, SlackChannel } from '../../projects/slack-channels.js'
 import { getMemberLimit, listMembers, listPersonas, type Persona, type Project, type TeamMember } from '../../projects/store.js'
 import { latestRunForProject, listRunAssignments } from '../../teams/store.js'
@@ -46,6 +46,8 @@ export async function hubHtml(ctx: RequestContext, project: Project, state: HubS
     latestRunForProject(ctx.pool, ctx.workspaceId, project.id),
   ])
   const assignments = run === undefined ? [] : await listRunAssignments(ctx.pool, run.id)
+  const shown = personas.filter((persona) => members.some((member) => member.personaId === persona.id))
+  const texts = new Map(await Promise.all(shown.map(async (persona) => [persona.id, await personaText(ctx.pool, ctx.workspaceId, ctx.deps.personasDir, persona)] as const)))
   const lead = members.find((member) => member.isLead)
   const registry = new Set(ctx.deps.repoNames())
   const facts = html`<dl class="facts">
@@ -57,7 +59,7 @@ export async function hubHtml(ctx: RequestContext, project: Project, state: HubS
   const editId = state.editMemberId ?? ctx.query.get('edit') ?? undefined
   const body = html`<p class="note">${TEAM_RUN_NOTE}</p>
     ${facts}
-    ${teamSection(ctx, project, members, personas, editId, state.typed)}
+    ${teamSection(ctx, project, members, personas, texts, editId, state.typed)}
     ${proposal}
     ${run === undefined ? '' : runSection(run, assignments)}
     <section aria-labelledby="settings-heading">
@@ -69,7 +71,13 @@ export async function hubHtml(ctx: RequestContext, project: Project, state: HubS
   return page({ title: project.name, csrf: ctx.csrf, crumbs: [PROJECTS_CRUMB], ...(state.flash !== undefined ? { flash: state.flash } : {}) }, body)
 }
 
-function teamSection(ctx: RequestContext, project: Project, members: readonly TeamMember[], personas: readonly Persona[], editId: string | undefined, typed: Typed): Safe {
+function teamSection(
+  ctx: RequestContext,
+  project: Project,
+  members: readonly TeamMember[],
+  personas: readonly Persona[],
+  texts: ReadonlyMap<string, string | undefined>,
+  editId: string | undefined, typed: Typed): Safe {
   const byId = new Map(personas.map((persona) => [persona.id, persona]))
   const roster = members.length === 0
     ? html`<div class="empty">
@@ -80,7 +88,7 @@ function teamSection(ctx: RequestContext, project: Project, members: readonly Te
     : html`<div class="table-wrap"><table>
         <caption>Team of ${project.name}</caption>
         <thead><tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Persona</th><th scope="col">Runs on</th><th scope="col">Lead</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
-        <tbody>${members.map((member) => (member.id === editId ? editRow(ctx, project, member, personas, typed === 'edit') : readRow(ctx, project, member, byId.get(member.personaId))))}</tbody>
+        <tbody>${members.map((member) => (member.id === editId ? editRow(ctx, project, member, personas, typed === 'edit') : readRow(ctx, project, member, byId.get(member.personaId), texts.get(member.personaId))))}</tbody>
       </table></div>`
   return html`<section aria-labelledby="team-heading">
       <h2 id="team-heading">Team</h2>
@@ -90,8 +98,7 @@ function teamSection(ctx: RequestContext, project: Project, members: readonly Te
     </section>`
 }
 
-function readRow(ctx: RequestContext, project: Project, member: TeamMember, persona: Persona | undefined): Safe {
-  const text = persona === undefined ? undefined : readPersona(ctx.deps.personasDir, persona.fileName)
+function readRow(ctx: RequestContext, project: Project, member: TeamMember, persona: Persona | undefined, text: string | undefined): Safe {
   const memberUrl = `/projects/${project.id}/team/members/${member.id}`
   return html`<tr id="member-${member.id}">
       <th scope="row">${member.name}</th>

@@ -299,11 +299,12 @@ export type AttachThreadToSessionResult = { readonly relaySessionId: string }
 export function createRealAttachThreadToSession(
   pool: Pool,
   workspaceId: string,
+  engineHost: string | null = null,
 ): (params: AttachThreadToSessionParams) => Promise<AttachThreadToSessionResult | undefined> {
   return async ({ threadRef, principalId, engineSessionId, engineCwd }) => {
     if (principalId === null) return undefined
     const session = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef })
-    await attachSessionToEngineChat(pool, session.id, engineSessionId, engineCwd)
+    await attachSessionToEngineChat(pool, session.id, engineSessionId, engineCwd, engineHost)
     return { relaySessionId: session.id }
   }
 }

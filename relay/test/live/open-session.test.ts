@@ -1,9 +1,17 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { randomUUID } from 'node:crypto'
+import type { Pool } from 'pg'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { findOpenSessionName } from '../../src/live/open-session.js'
+import { applyMigrations } from '../../src/db/migrate.js'
+import { closePool, createPool } from '../../src/db/pool.js'
+import { findOpenSessionName, openElsewhere, otherLaptopText } from '../../src/live/open-session.js'
+import { attachSessionToEngineChat, findOrCreateSession } from '../../src/sessions/store.js'
+import { provisionPrincipal } from '../../src/tenancy/principals.js'
+import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
+import { getTestDatabaseUrl } from '../support/database.js'
 
 /**
  * A thread is pushed to the chat that is open on its session. The folder is
@@ -47,5 +55,32 @@ describe('findOpenSessionName', () => {
 
   it('returns null when the registry folder does not exist', async () => {
     expect(await findOpenSessionName('s-1', { root: join(root, 'missing'), isAlive })).toBeNull()
+  })
+})
+
+describe('openElsewhere', () => {
+  let pool: Pool
+
+  beforeAll(async () => {
+    const databaseUrl = await getTestDatabaseUrl()
+    if (!new URL(databaseUrl).pathname.endsWith('_test')) throw new Error('refusing a non-test database')
+    pool = createPool(databaseUrl)
+    await applyMigrations(pool, 'src/db/migrations')
+  })
+
+  afterAll(async () => {
+    await closePool(pool)
+  })
+
+  it("refuses a live session whose chat is open on the other laptop, naming that laptop, and lets this laptop's through", async () => {
+    const workspaceId = await resolveWorkspaceId(pool, 'slack', `T_${randomUUID()}`)
+    const principalId = await provisionPrincipal(pool, workspaceId, 'slack', `U_${randomUUID()}`, 'Op', ['member'])
+    const session = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef: `slack:C1:${randomUUID()}` })
+    // Recorded the way the attach paths record it, not by hand.
+    await attachSessionToEngineChat(pool, session.id, randomUUID(), '/Users/hassan/code', 'hassan-mbp')
+
+    expect(await openElsewhere(pool, session.id, 'second-mbp')).toBe(otherLaptopText('hassan-mbp'))
+    expect(otherLaptopText('hassan-mbp')).toContain('hassan-mbp')
+    expect(await openElsewhere(pool, session.id, 'hassan-mbp')).toBeNull()
   })
 })

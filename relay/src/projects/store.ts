@@ -5,8 +5,10 @@
  * with its audit entry; reads take a Pool or a client.
  */
 
+import { homedir } from 'node:os'
 import type { Pool, PoolClient } from 'pg'
 import type { AccountClient } from '../autonomous/accounts.js'
+import { knownHomes, mapPath } from '../failover/paths.js'
 
 type Db = Pool | PoolClient
 
@@ -29,6 +31,8 @@ export type Persona = {
   readonly id: string
   readonly name: string
   readonly fileName: string
+  /** The persona's text as both laptops share it; null until a laptop with the file backfills it. */
+  readonly body: string | null
   /** Names of the projects whose team uses this persona. */
   readonly projects: readonly string[]
   /** Relay wrote it from an approved team proposal (not made by hand). */
@@ -135,10 +139,20 @@ export async function getProject(db: Db, workspaceId: string, projectId: string)
   return row === undefined ? undefined : toProject(row)
 }
 
-/** The folder of the project that owns this Slack channel, if one does. */
-export async function projectFolderForChannel(db: Db, workspaceId: string, channel: string): Promise<string | undefined> {
-  const { rows } = await db.query<{ folder: string }>('SELECT folder FROM projects WHERE workspace_id = $1 AND slack_channel = $2', [workspaceId, channel])
-  return rows[0]?.folder
+/**
+ * A stored project folder as this laptop should use it: the laptop that saved
+ * it may have another home folder (failover), so a path under a known home is
+ * moved under this one. The setup page shows and edits the stored value.
+ */
+export async function localProjectFolder(pool: Pool, folder: string): Promise<string> {
+  return mapPath(folder, await knownHomes(pool), homedir())
+}
+
+/** The folder of the project that owns this Slack channel, if one does, mapped to this laptop's home. */
+export async function projectFolderForChannel(pool: Pool, workspaceId: string, channel: string): Promise<string | undefined> {
+  const { rows } = await pool.query<{ folder: string }>('SELECT folder FROM projects WHERE workspace_id = $1 AND slack_channel = $2', [workspaceId, channel])
+  const folder = rows[0]?.folder
+  return folder === undefined ? undefined : localProjectFolder(pool, folder)
 }
 
 export async function createProject(client: PoolClient, workspaceId: string, input: ProjectInput): Promise<string> {
@@ -184,10 +198,10 @@ export async function deleteProject(client: PoolClient, workspaceId: string, pro
 
 // Personas
 
-type PersonaRow = { id: string; name: string; file_name: string; written_by_relay: boolean; projects: string[] | null }
+type PersonaRow = { id: string; name: string; file_name: string; body: string | null; written_by_relay: boolean; projects: string[] | null }
 
 const PERSONA_SELECT = `
-  SELECT pe.id, pe.name, pe.file_name, pe.written_by_relay,
+  SELECT pe.id, pe.name, pe.file_name, pe.body, pe.written_by_relay,
          array_remove(array_agg(DISTINCT p.name), NULL) AS projects
   FROM personas pe
   LEFT JOIN team_members m ON m.persona_id = pe.id AND m.workspace_id = pe.workspace_id
@@ -195,7 +209,7 @@ const PERSONA_SELECT = `
   LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = pe.workspace_id`
 
 function toPersona(row: PersonaRow): Persona {
-  return { id: row.id, name: row.name, fileName: row.file_name, projects: [...(row.projects ?? [])].sort(), writtenByRelay: row.written_by_relay }
+  return { id: row.id, name: row.name, fileName: row.file_name, body: row.body, projects: [...(row.projects ?? [])].sort(), writtenByRelay: row.written_by_relay }
 }
 
 export async function listPersonas(db: Db, workspaceId: string): Promise<Persona[]> {
@@ -209,16 +223,27 @@ export async function getPersona(db: Db, workspaceId: string, personaId: string)
   return row === undefined ? undefined : toPersona(row)
 }
 
-export async function insertPersona(client: PoolClient, workspaceId: string, input: { name: string; fileName: string }): Promise<string> {
-  const { rows } = await client.query<{ id: string }>('INSERT INTO personas (workspace_id, name, file_name) VALUES ($1, $2, $3) RETURNING id', [workspaceId, input.name, input.fileName])
+/** `body` is the persona's text, stored so the other laptop reads the same persona; omitted, the row is read from its file until backfilled. */
+export async function insertPersona(client: PoolClient, workspaceId: string, input: { name: string; fileName: string; body?: string }): Promise<string> {
+  const { rows } = await client.query<{ id: string }>('INSERT INTO personas (workspace_id, name, file_name, body) VALUES ($1, $2, $3, $4) RETURNING id', [
+    workspaceId,
+    input.name,
+    input.fileName,
+    input.body ?? null,
+  ])
   const id = rows[0]?.id
   if (id === undefined) throw new Error('insertPersona: INSERT returned no id')
   return id
 }
 
-export async function renamePersona(client: PoolClient, workspaceId: string, personaId: string, name: string): Promise<boolean> {
-  const { rowCount } = await client.query('UPDATE personas SET name = $3, updated_at = now() WHERE workspace_id = $1 AND id = $2', [workspaceId, personaId, name])
+export async function updatePersona(client: PoolClient, workspaceId: string, personaId: string, input: { name: string; body: string }): Promise<boolean> {
+  const { rowCount } = await client.query('UPDATE personas SET name = $3, body = $4, updated_at = now() WHERE workspace_id = $1 AND id = $2', [workspaceId, personaId, input.name, input.body])
   return (rowCount ?? 0) > 0
+}
+
+/** Stores text read from this laptop's file for a persona saved before bodies existed; a body set meanwhile wins. */
+export async function backfillPersonaBody(db: Db, workspaceId: string, personaId: string, body: string): Promise<void> {
+  await db.query('UPDATE personas SET body = $3 WHERE workspace_id = $1 AND id = $2 AND body IS NULL', [workspaceId, personaId, body])
 }
 
 /** Removes a persona no team uses; refuses one still on a team, naming the projects. */
@@ -324,9 +349,9 @@ export async function setMemberLimit(client: PoolClient, workspaceId: string, pr
   await client.query('UPDATE teams SET member_limit = $3 WHERE workspace_id = $1 AND project_id = $2', [workspaceId, projectId, limit])
 }
 
-/** The project that owns this Slack channel, with its repos. */
-export async function projectForChannelWithRepos(db: Db, workspaceId: string, channel: string): Promise<Project | undefined> {
-  const { rows } = await db.query<ProjectRow>(`${PROJECT_SELECT} WHERE p.workspace_id = $1 AND p.slack_channel = $2 GROUP BY p.id`, [workspaceId, channel])
+/** The project that owns this Slack channel, with its repos and its folder mapped to this laptop's home. */
+export async function projectForChannelWithRepos(pool: Pool, workspaceId: string, channel: string): Promise<Project | undefined> {
+  const { rows } = await pool.query<ProjectRow>(`${PROJECT_SELECT} WHERE p.workspace_id = $1 AND p.slack_channel = $2 GROUP BY p.id`, [workspaceId, channel])
   const row = rows[0]
-  return row === undefined ? undefined : toProject(row)
+  return row === undefined ? undefined : { ...toProject(row), folder: await localProjectFolder(pool, row.folder) }
 }

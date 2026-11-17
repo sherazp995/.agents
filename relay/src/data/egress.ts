@@ -44,6 +44,7 @@ export const EGRESS_CATEGORIES = [
   'code_reviewer',
   'git_remote',
   'approved_action_target',
+  'shared_database',
 ] as const
 export type EgressCategory = (typeof EGRESS_CATEGORIES)[number]
 
@@ -74,6 +75,23 @@ export type EgressDestination = {
 }
 
 export const EGRESS_INVENTORY: readonly EgressDestination[] = [
+  {
+    name: 'Shared failover database',
+    category: 'shared_database',
+    reason:
+      'With failover configured, two laptops share one Postgres (README, "Failover"), typically a cloud host the ' +
+      'owner chose. It holds what Relay\'s local database holds today (people and roles, projects, personas, ' +
+      'teams, tasks, approvals, the audit log, queued replies and their files) plus each Slack task thread\'s ' +
+      'saved Claude chat. Without failover, database.url points at the local Postgres and nothing leaves the machine.',
+    hosts: [],
+    requiresOperatorAcknowledgement: true,
+    wiredInThisBuild: true,
+    wiredBy: 'src/failover/lease.ts',
+    knownGaps: [
+      'The host is whatever database.url names, so a text scan cannot see it; the destination is the owner\'s ' +
+        'configuration: the owner chooses it by running `relay db move` with that URL.',
+    ],
+  },
   {
     name: 'Slack',
     category: 'chat_platform',
@@ -199,6 +217,9 @@ export const LOCAL_ONLY_SPAWN_BINARIES: Readonly<Record<string, string>> = {
   git:
     'only `git -C <path> rev-parse` and `symbolic-ref` from `relay repos add` (src/cli/repos.ts), which read the ' +
     'local repository to register it; neither subcommand contacts a remote',
+  tar:
+    'packs and unpacks a saved Claude chat between a local folder and a buffer (src/failover/chats.ts); reads ' +
+    'and writes local files only, no network call',
   open:
     'the macOS `open` command from `relay ui` (src/cli.ts), which hands the setup page\'s 127.0.0.1 login link to ' +
     'the local browser; the only connection it leads to is that loopback page',

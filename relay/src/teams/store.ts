@@ -159,6 +159,7 @@ type AssignmentRow = {
   lease_expires_at: Date | null
   worker_pid: number | null
   worker_pgid: number | null
+  worker_host: string | null
   attempts: number
   restarts: number
   next_wakeup_at: Date | null
@@ -166,7 +167,10 @@ type AssignmentRow = {
   created_at: Date
 }
 
-function toAssignment(row: AssignmentRow): Assignment {
+/** An assignment with the laptop its recorded worker runs on (0030_failover.sql); only the team scheduler reads it. */
+export type HostedAssignment = Assignment & { readonly workerHost: string | null }
+
+function toAssignment(row: AssignmentRow): HostedAssignment {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -196,6 +200,7 @@ function toAssignment(row: AssignmentRow): Assignment {
     leaseExpiresAt: row.lease_expires_at,
     workerPid: row.worker_pid,
     workerPgid: row.worker_pgid,
+    workerHost: row.worker_host,
     attempts: row.attempts,
     restarts: row.restarts,
     nextWakeupAt: row.next_wakeup_at,
@@ -228,7 +233,7 @@ export async function insertAssignment(db: Db, input: NewAssignment): Promise<{ 
   return { assignment: toAssignment(requireRow(existing.rows[0])), created: false }
 }
 
-export async function loadAssignment(db: Db, assignmentId: string): Promise<Assignment | undefined> {
+export async function loadAssignment(db: Db, assignmentId: string): Promise<HostedAssignment | undefined> {
   const { rows } = await db.query<AssignmentRow>('SELECT * FROM team_assignments WHERE id = $1', [assignmentId])
   return rows[0] ? toAssignment(rows[0]) : undefined
 }
@@ -258,7 +263,7 @@ export async function answerAssignment(db: Db, assignmentId: string, text: strin
 }
 
 /** Assignments due to run, oldest first, whose task is not cancelled and whose run is open. */
-export async function listDueAssignments(pool: Pool, workspaceId: string): Promise<(Assignment & { teamId: string; memberLimit: number })[]> {
+export async function listDueAssignments(pool: Pool, workspaceId: string): Promise<(HostedAssignment & { teamId: string; memberLimit: number })[]> {
   const { rows } = await pool.query<AssignmentRow & { team_id: string; member_limit: number }>(
     `SELECT a.*, r.snapshot->>'teamId' AS team_id, (r.snapshot->>'memberLimit')::int AS member_limit
      FROM team_assignments a
@@ -285,7 +290,7 @@ export async function countRunning(pool: Pool): Promise<{ total: number; byTeam:
 }
 
 /** Takes a queued assignment's lease and marks it running; each grant bumps the generation. */
-export async function acquireAssignmentLease(pool: Pool, assignmentId: string, owner: string, ttlMs: number): Promise<{ lease: AssignmentLease; assignment: Assignment } | undefined> {
+export async function acquireAssignmentLease(pool: Pool, assignmentId: string, owner: string, ttlMs: number): Promise<{ lease: AssignmentLease; assignment: HostedAssignment } | undefined> {
   const { rows } = await pool.query<AssignmentRow>(
     `UPDATE team_assignments a
      SET lease_owner = $2, lease_generation = a.lease_generation + 1, lease_expires_at = now() + ($3 * interval '1 millisecond'),
@@ -311,19 +316,33 @@ export async function renewAssignmentLease(pool: Pool, lease: AssignmentLease, t
   return rowCount === 1
 }
 
-/** Recorded before the member's start gate opens, so a dead daemon's survivor can always be found. */
-export async function recordAssignmentWorker(pool: Pool, lease: AssignmentLease, pid: number, pgid: number): Promise<boolean> {
+/** Recorded before the member's start gate opens, so a dead daemon's survivor can always be found, and only by the laptop it runs on. */
+export async function recordAssignmentWorker(pool: Pool, lease: AssignmentLease, pid: number, pgid: number, host: string | null = null): Promise<boolean> {
   const { rowCount } = await pool.query(
-    `UPDATE team_assignments SET worker_pid = $4, worker_pgid = $5, updated_at = now()
+    `UPDATE team_assignments SET worker_pid = $4, worker_pgid = $5, worker_host = $6, updated_at = now()
      WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3 AND state = 'running'`,
-    [lease.assignmentId, lease.owner, lease.generation, pid, pgid],
+    [lease.assignmentId, lease.owner, lease.generation, pid, pgid, host],
   )
   return rowCount === 1
 }
 
 /** Clears the recorded worker once its process group has exited. Not fenced: whoever confirmed the exit may clear it. */
 export async function clearAssignmentWorker(db: Db, assignmentId: string, pgid: number): Promise<void> {
-  await db.query('UPDATE team_assignments SET worker_pid = NULL, worker_pgid = NULL, updated_at = now() WHERE id = $1 AND worker_pgid = $2', [assignmentId, pgid])
+  await db.query('UPDATE team_assignments SET worker_pid = NULL, worker_pgid = NULL, worker_host = NULL, updated_at = now() WHERE id = $1 AND worker_pgid = $2', [assignmentId, pgid])
+}
+
+/**
+ * Of `pgids`, the ones a member worker of `host` recorded: a process group
+ * id is only meaningful on the laptop that recorded it. With failover off
+ * (host null) every one is this laptop's.
+ */
+export async function ownWorkerGroups(db: Db, pgids: readonly number[], host: string | null): Promise<number[]> {
+  if (host === null || pgids.length === 0) return [...pgids]
+  const { rows } = await db.query<{ worker_pgid: number }>(
+    'SELECT DISTINCT worker_pgid FROM team_assignments WHERE worker_pgid = ANY ($1::int[]) AND worker_host = $2',
+    [[...pgids], host],
+  )
+  return rows.map((row) => row.worker_pgid)
 }
 
 /** The columns a member's lease holder may change. */
@@ -436,25 +455,29 @@ export async function cancelAssignment(pool: Pool, assignmentId: string): Promis
   return cancelLive(pool, 'id = $1', [assignmentId])
 }
 
-/** Stop: cancels every live assignment of the task and every open run; returns the process groups to kill. */
-export async function cancelTaskAssignments(pool: Pool, taskId: string): Promise<number[]> {
+/**
+ * Stop: cancels every live assignment of the task and every open run;
+ * returns the process groups to kill, only `host`'s with failover on (another
+ * laptop's member loses its lease to the new generation and is killed there).
+ */
+export async function cancelTaskAssignments(pool: Pool, taskId: string, host: string | null = null): Promise<number[]> {
   return inTransaction(pool, async (client) => {
     await client.query(`UPDATE team_runs SET status = 'cancelled', closed_at = now() WHERE task_id = $1 AND status = 'open'`, [taskId])
-    return cancelLive(client, 'task_id = $1', [taskId])
+    return cancelLive(client, 'task_id = $1', [taskId], host)
   })
 }
 
 /** Cancels the live assignments `where` selects: the generation is bumped, so a running holder's writes all fail. */
-async function cancelLive(db: Db, where: string, values: unknown[]): Promise<number[]> {
-  const { rows } = await db.query<{ worker_pgid: number | null }>(
+async function cancelLive(db: Db, where: string, values: unknown[], host: string | null = null): Promise<number[]> {
+  const { rows } = await db.query<{ worker_pgid: number | null; worker_host: string | null }>(
     `UPDATE team_assignments
      SET state = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, lease_generation = lease_generation + 1,
          next_wakeup_at = NULL, updated_at = now()
      WHERE ${where} AND (state IN ('queued', 'running', 'waiting') OR worker_pgid IS NOT NULL)
-     RETURNING worker_pgid`,
+     RETURNING worker_pgid, worker_host`,
     values,
   )
-  return rows.flatMap((row) => (row.worker_pgid === null ? [] : [row.worker_pgid]))
+  return rows.flatMap((row) => (row.worker_pgid === null || (host !== null && row.worker_host !== host) ? [] : [row.worker_pgid]))
 }
 
 /** The kill switch: every live assignment in the workspace, whatever its task's phase. */
@@ -467,7 +490,7 @@ export async function listLiveAssignments(pool: Pool, workspaceId: string): Prom
 }
 
 /** Startup recovery: every assignment that still names a worker or is marked running. */
-export async function listInterruptedAssignments(pool: Pool, workspaceId: string): Promise<Assignment[]> {
+export async function listInterruptedAssignments(pool: Pool, workspaceId: string): Promise<HostedAssignment[]> {
   const { rows } = await pool.query<AssignmentRow>(`SELECT * FROM team_assignments WHERE workspace_id = $1 AND (state = 'running' OR worker_pgid IS NOT NULL)`, [workspaceId])
   return rows.map(toAssignment)
 }

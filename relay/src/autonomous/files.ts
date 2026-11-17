@@ -6,8 +6,12 @@
  * Only Slack's own file host is fetched, with the bot token, under a size
  * cap, into the task's inbox under a sanitised name. Anything else is
  * skipped with a reason the thread is told.
+ *
+ * A file marked downloaded whose copy is not on this laptop (the other
+ * laptop downloaded it before a failover) is downloaded again.
  */
 
+import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { ChatFile } from '../chat/contract.js'
@@ -48,16 +52,21 @@ export function sanitizeFileName(name: string, slackFileId: string): string {
   return `${id}-${cleaned === '' ? 'file' : cleaned}`
 }
 
+/** Pending, or downloaded with no local copy here. */
+function needsDownload(file: TaskFile): boolean {
+  return file.status === 'pending' || (file.status === 'downloaded' && (file.localPath === undefined || !existsSync(file.localPath)))
+}
+
 /**
- * Downloads every pending file and returns the whole list with each one
- * marked `downloaded` (with its path) or `skipped` (with its reason).
- * Files already settled are returned unchanged.
+ * Downloads every file that needs it and returns the whole list with each
+ * one marked `downloaded` (with its path) or `skipped` (with its reason).
+ * Files already settled and present are returned unchanged.
  */
 export async function downloadPendingFiles(files: readonly TaskFile[], deps: DownloadDeps): Promise<TaskFile[]> {
   const maxBytes = deps.maxBytes ?? DEFAULT_MAX_FILE_BYTES
   const settled: TaskFile[] = []
   for (const file of files) {
-    settled.push(file.status === 'pending' ? await downloadOne(file, deps, maxBytes) : file)
+    settled.push(needsDownload(file) ? await downloadOne(file, deps, maxBytes) : file)
   }
   return settled
 }
@@ -114,7 +123,7 @@ export function describeSkipped(files: readonly TaskFile[]): string[] {
 
 /** Downloads a task's pending files before a turn; returns one line per newly skipped file for the thread. */
 export async function downloadTaskFiles(pool: Pool, task: AutonomousTask, lease: Lease, deps: DownloadDeps): Promise<string[]> {
-  if (!task.files.some((file) => file.status === 'pending')) return []
+  if (!task.files.some(needsDownload)) return []
   const settled = await downloadPendingFiles(task.files, deps)
   // Merged by id into the list as it is now, so a file a message added during the download is kept.
   const byId = new Map(settled.map((file) => [file.slackFileId, file]))

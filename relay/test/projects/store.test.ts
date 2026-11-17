@@ -1,15 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Pool, PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { verifyAuditChain } from '../../src/audit/store.js'
 import { applyMigrations } from '../../src/db/migrate.js'
 import { closePool, createPool } from '../../src/db/pool.js'
-import { createPersona, editPersona, removePersona, type LibraryContext } from '../../src/projects/persona-library.js'
+import { createPersona, editPersona, personaText, removePersona, type LibraryContext } from '../../src/projects/persona-library.js'
 import { applyStarterTeam } from '../../src/projects/starter-team.js'
-import { addMember, createProject, deleteProject, listMembers, listPersonas, projectFolderForChannel, updateMember } from '../../src/projects/store.js'
+import { addMember, createProject, deleteProject, getPersona, getProject, insertPersona, listMembers, listPersonas, projectFolderForChannel, projectForChannelWithRepos, updateMember } from '../../src/projects/store.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 
@@ -61,6 +61,50 @@ describe('projects, the persona library and teams', () => {
     // Another workspace may use the same channel id.
     const other = await workspace()
     await expect(project(other.workspaceId, 'C1')).resolves.toEqual(expect.any(String))
+  })
+
+  it('maps a project folder saved under another laptop home to this home where it is used, and keeps the stored value for the page', async () => {
+    const { workspaceId } = await workspace()
+    const host = `t-${randomUUID().slice(0, 8)}`
+    const otherHome = `/Users/other-${host}`
+    await pool.query("INSERT INTO failover_hosts (name, home, build_migration) VALUES ($1, $2, '0030')", [host, otherHome])
+    try {
+      const id = await inTx((client) => createProject(client, workspaceId, { name: 'Web', slackChannel: 'C1', folder: `${otherHome}/code/web`, repos: [] }))
+
+      expect(await projectFolderForChannel(pool, workspaceId, 'C1')).toBe(join(homedir(), 'code/web'))
+      expect((await projectForChannelWithRepos(pool, workspaceId, 'C1'))?.folder).toBe(join(homedir(), 'code/web'))
+      expect((await getProject(pool, workspaceId, id))?.folder).toBe(`${otherHome}/code/web`)
+    } finally {
+      await pool.query('DELETE FROM failover_hosts WHERE name = $1', [host])
+    }
+  })
+
+  it('reads a persona written on one laptop with the same text on another through the database, rewriting a stale local file', async () => {
+    const laptopA = await workspace()
+    const dirB = join(mkdtempSync(join(tmpdir(), 'relay-personas-b-')), 'personas')
+    const id = await createPersona(laptopA.ctx, 'Developer', '# Dev')
+    const persona = async () => (await getPersona(pool, laptopA.workspaceId, id)) ?? expect.fail('persona missing')
+
+    expect(await personaText(pool, laptopA.workspaceId, dirB, await persona())).toBe('# Dev\n')
+    const fileB = join(dirB, (await persona()).fileName)
+    expect(readFileSync(fileB, 'utf8')).toBe('# Dev\n')
+
+    await editPersona(laptopA.ctx, id, 'Developer', '# Dev, edited')
+    expect(await personaText(pool, laptopA.workspaceId, dirB, await persona())).toBe('# Dev, edited\n')
+    expect(readFileSync(fileB, 'utf8')).toBe('# Dev, edited\n')
+  })
+
+  it('backfills a persona saved before bodies existed from this laptop file', async () => {
+    const { workspaceId, ctx } = await workspace()
+    const fileName = `old-${randomUUID().slice(0, 6)}.md`
+    const id = await inTx((client) => insertPersona(client, workspaceId, { name: 'Old', fileName }))
+    mkdirSync(ctx.dir, { recursive: true })
+    writeFileSync(join(ctx.dir, fileName), '# Old persona\n')
+    const before = (await getPersona(pool, workspaceId, id)) ?? expect.fail('persona missing')
+    expect(before.body).toBeNull()
+
+    expect(await personaText(pool, workspaceId, ctx.dir, before)).toBe('# Old persona\n')
+    expect((await getPersona(pool, workspaceId, id))?.body).toBe('# Old persona\n')
   })
 
   it('shares one persona across two projects\' teams and twice on one team, holds one lead per team, and refuses removing a persona in use', async () => {

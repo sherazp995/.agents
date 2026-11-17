@@ -195,3 +195,17 @@ function assertNoOwnTransactionControl(name: string, sql: string): void {
       'or roll back their own.',
   )
 }
+
+/** The newest migration file `directory` ships: the build's schema version, which failover compares against the database's. */
+export function newestMigrationName(directory: string): string {
+  const names = selectPendingMigrations(readdirSync(directory), new Set())
+  const newest = names[names.length - 1]
+  if (newest === undefined) throw new Error(`no migrations found in ${directory}`)
+  return newest
+}
+
+/** Migrations in `directory` the database has not applied yet; call only once schema_migrations exists. */
+export async function pendingMigrations(pool: Pool, directory: string): Promise<string[]> {
+  const { rows } = await pool.query<{ name: string }>('SELECT name FROM schema_migrations')
+  return selectPendingMigrations(readdirSync(directory), new Set(rows.map((row) => row.name)))
+}

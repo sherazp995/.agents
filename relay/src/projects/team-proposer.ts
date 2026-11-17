@@ -48,7 +48,7 @@ import {
   type SupersededCard,
   type TeamProposer,
 } from './proposals.js'
-import { getProject, listMembers, listPersonas, StoreConflict, type Persona, type Project, type TeamMember } from './store.js'
+import { getProject, listMembers, localProjectFolder, listPersonas, StoreConflict, type Persona, type Project, type TeamMember } from './store.js'
 
 export const DEFAULT_PROPOSAL_BUDGET_MS = 10 * 60 * 1000
 /** Twelve members with 8 KB personas, escaped in Claude's JSON envelope, fit well under this. */
@@ -335,8 +335,10 @@ export function createTeamProposer(deps: TeamProposerDeps): TeamProposer {
   const run = async (workspaceId: string, proposalId: string, projectId: string, signal: AbortSignal): Promise<void> => {
     const deadline = now() + budgetMs
     try {
-      const project = await getProject(deps.pool, workspaceId, projectId)
-      if (project === undefined) throw new StoreConflict('That project no longer exists.')
+      const stored = await getProject(deps.pool, workspaceId, projectId)
+      if (stored === undefined) throw new StoreConflict('That project no longer exists.')
+      // Claude runs in the folder as this laptop has it; the fingerprint below still hashes the stored value.
+      const project = { ...stored, folder: await localProjectFolder(deps.pool, stored.folder) }
       const repos = deps.repos(project.repos)
       const members = await listMembers(deps.pool, workspaceId, projectId)
       const personas = await listPersonas(deps.pool, workspaceId)

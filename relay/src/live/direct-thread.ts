@@ -24,6 +24,8 @@ export type DirectThreadRequest = {
   readonly channelDirectory?: string
   readonly post: (text: string) => Promise<unknown>
   readonly log?: Logger
+  /** The failover laptop the chat starts on; absent with failover off. */
+  readonly engineHost?: string | null
 }
 
 export async function startDirectThread(pool: Pool, request: DirectThreadRequest, deps: DirectSessionDependencies = {}): Promise<void> {
@@ -55,7 +57,7 @@ export async function startDirectThread(pool: Pool, request: DirectThreadRequest
     adapter: 'slack',
     threadRef: request.threadRef,
   })
-  await markSessionDirect(pool, session.id, outcome.sessionId, outcome.cwd)
+  await markSessionDirect(pool, session.id, outcome.sessionId, outcome.cwd, request.engineHost ?? null)
 
   await postAfterStart(request, outcome.text)
   // Scrubbed for the same reason every other reply path is: this text came

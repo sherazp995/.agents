@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -90,8 +90,20 @@ describe('downloadPendingFiles', () => {
 
   it('leaves already settled files untouched', async () => {
     const fetch = fetchReturning(200)
-    const settled = file({ status: 'downloaded', localPath: '/tmp/a' })
+    const here = join(mkdtempSync(join(tmpdir(), 'relay-files-')), 'a')
+    writeFileSync(here, 'kept')
+    const settled = file({ status: 'downloaded', localPath: here })
     expect(await downloadPendingFiles([settled], { fetch, botToken: 't', inboxDir: inboxDir() })).toEqual([settled])
     expect(fetch.calls).toHaveLength(0)
+  })
+
+  it('downloads again a file marked downloaded whose copy is not on this laptop', async () => {
+    const fetch = fetchReturning(200)
+    const dir = inboxDir()
+    const [result] = await downloadPendingFiles([file({ status: 'downloaded', localPath: '/Users/other-laptop/.relay/tasks/t/inbox/F1-notes.txt' })], { fetch, botToken: 't', inboxDir: dir })
+
+    expect(fetch.calls).toHaveLength(1)
+    expect(result).toMatchObject({ status: 'downloaded', localPath: join(dir, 'F1-notes.txt') })
+    expect(readFileSync(result?.localPath ?? '', 'utf8')).toBe('hello')
   })
 })

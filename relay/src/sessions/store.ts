@@ -327,12 +327,14 @@ export async function attachSessionToEngineChat(
   sessionId: string,
   engineSessionId: string,
   engineCwd: string,
+  /** The failover laptop the chat runs on; null with failover off. */
+  engineHost: string | null = null,
 ): Promise<void> {
   // A reminder's read-only task (0029_task_read_only.sql) must never be handed to a chat without that limit.
   const { rowCount } = await pool.query(
-    `UPDATE sessions SET engine_session_id = $2, engine_cwd = $3
+    `UPDATE sessions SET engine_session_id = $2, engine_cwd = $3, engine_host = $4
      WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM autonomous_tasks WHERE session_id = $1 AND read_only)`,
-    [sessionId, engineSessionId, engineCwd],
+    [sessionId, engineSessionId, engineCwd, engineHost],
   )
   if (rowCount !== 0) return
   const { rows } = await pool.query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])
@@ -389,9 +391,11 @@ export async function markSessionDirect(
   sessionId: string,
   engineSessionId: string,
   engineCwd: string,
+  /** The failover laptop the chat runs on; null with failover off. */
+  engineHost: string | null = null,
 ): Promise<void> {
   await pool.query(
-    "UPDATE sessions SET mode = 'direct', engine_session_id = $2, engine_cwd = $3, last_active_at = NOW() WHERE id = $1",
-    [sessionId, engineSessionId, engineCwd],
+    "UPDATE sessions SET mode = 'direct', engine_session_id = $2, engine_cwd = $3, engine_host = $4, last_active_at = NOW() WHERE id = $1",
+    [sessionId, engineSessionId, engineCwd, engineHost],
   )
 }

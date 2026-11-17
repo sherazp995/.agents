@@ -265,6 +265,182 @@ stayed alive having never completed the Socket Mode handshake.
 
 Then mention Relay in a channel it is in, or DM it.
 
+### Failover
+
+Two laptops can run the same Relay, so it keeps answering when one of them
+is closed, asleep or offline. Both keep Relay's memory (allowed people,
+projects, personas, teams, tasks, approvals, the audit log, queued replies
+and saved chats) in one cloud Postgres database instead of on one laptop.
+
+How it behaves:
+
+- One laptop answers at a time. It holds a "who is answering" record in
+  the database and renews it every 15 seconds. The other laptop waits: it
+  keeps no Slack connection open and starts no work.
+- When the answering laptop goes quiet, its record expires after 60
+  seconds and the waiting laptop takes over, so Relay answers again within
+  about a minute.
+- One laptop is preferred (Hassan's). When it comes back it takes new
+  messages back within about 30 seconds.
+- A turn already running on a laptop finishes there and its reply still
+  posts, even after the other laptop took over. A turn cut off because its
+  laptop died is lost; its thread gets a note asking you to mention Relay
+  again.
+- After each turn the Claude chat of a Slack thread is saved to the
+  database (compressed, kept 7 days after the thread's last turn, 300 MB in
+  total), so whichever laptop picks up the thread continues the same
+  conversation.
+- The kill switch lives in the database, so `relay kill engage` on either
+  laptop stops work on whichever laptop is answering.
+- `relay doctor` shows which laptop answers, how long ago it renewed the
+  record, this laptop's name and whether it is preferred, and whether
+  either laptop runs a build too old to answer.
+
+What is not shared:
+
+- Files on disk: uncommitted changes and worktrees stay on the laptop that
+  made them. A task whose worktree is missing runs in the same repository
+  on the other laptop and says so in the thread.
+- Codex chats: a Codex thread continues on the other laptop as a new chat
+  that reads the Slack thread.
+- Logins: each laptop runs work with its own Claude, Codex and GitHub
+  logins, so commits and pushes come from that laptop owner's accounts.
+- Reminders set to run as a person, chats attached to a terminal session,
+  and usage limit cooldowns (Redis) stay on their own laptop.
+
+#### 1. Create the cloud database
+
+1. Sign up at [supabase.com](https://supabase.com) with Hassan's account
+   and create a project on the free plan. Save the database password it
+   shows you somewhere safe.
+2. Open the project's SQL editor and run this, with two long passwords of
+   your own. `relay_owner` owns every Relay table; each laptop logs in as
+   its own role, which is a member of it, so either laptop can run
+   migrations and either login can be revoked on its own.
+
+   ```sql
+   CREATE ROLE relay_owner NOLOGIN;
+   GRANT USAGE, CREATE ON SCHEMA public TO relay_owner;
+   CREATE ROLE relay_hassan LOGIN PASSWORD 'first long password' IN ROLE relay_owner;
+   CREATE ROLE relay_second LOGIN PASSWORD 'second long password' IN ROLE relay_owner;
+   -- Each session starts as the owner, so new tables belong to relay_owner.
+   ALTER ROLE relay_hassan SET role = 'relay_owner';
+   ALTER ROLE relay_second SET role = 'relay_owner';
+   ```
+
+3. Click *Connect* and copy the **Direct connection** string. Relay's live
+   messages use Postgres notifications, which need a whole session, so the
+   **Transaction pooler** (port 6543) does not work. If your network has no
+   IPv6, use the **Session pooler** string instead (also port 5432).
+4. Put each laptop's login into that string in place of `postgres` and the
+   password. With the session pooler the user name keeps its project
+   suffix, for example `relay_hassan.abcdefghijkl`.
+5. So the connection is encrypted and goes to the real server, download
+   the project's CA certificate (*Project Settings*, *Database*, *SSL
+   Configuration*) to the same path on each laptop, for example
+   `~/.relay/supabase-ca.crt`, and add it to the URL with its full path.
+   You now have two URLs:
+
+   ```
+   postgresql://relay_hassan:<first password>@db.<project>.supabase.co:5432/postgres?sslmode=verify-full&sslrootcert=/Users/<you>/.relay/supabase-ca.crt
+   postgresql://relay_second:<second password>@db.<project>.supabase.co:5432/postgres?sslmode=verify-full&sslrootcert=/Users/<you>/.relay/supabase-ca.crt
+   ```
+
+#### 2. Move Hassan's database into it
+
+On Hassan's laptop, stop the daemon, so nothing writes while the rows are
+copied:
+
+```bash
+launchctl bootout gui/$(id -u)/com.relay.orchestrator   # Linux: systemctl --user stop relay
+relay db move                                           # paste relay_hassan's URL, then Enter and Ctrl-D
+```
+
+`relay db move` refuses while the daemon runs or anything else is
+connected to the local database, and refuses a target that already has
+Relay rows. It applies Relay's migrations to the cloud database, copies
+every table in one transaction, checks each table's row count, and only
+then stores the new URL in the Keychain as `relay-database-url` (the old one
+is kept as `relay-database-local-url`), sets `database.url` to
+`keystore:relay-database-url`, and removes `database.operator_url`, which
+named the local database. A failed move changes nothing on this laptop. It
+prints each table and its row count, never a password. Reading the URL from
+the paste prompt keeps its password out of your shell history; `relay db
+move <url>` also works.
+
+Then add this to `config/relay.config.yaml` and start the daemon again:
+
+```yaml
+failover:
+  host: hassan-mbp     # this laptop's name: letters, digits, dot, dash, underscore
+  preferred: true      # only on Hassan's laptop
+```
+
+```bash
+relay install-service --start
+relay doctor          # failover: hassan-mbp answers, renewed 3s ago ...
+```
+
+#### 3. Set up the second laptop
+
+1. Install everything in [Before you start](#before-you-start) and
+   [Install](#install), clone the repository, then run `pnpm install`,
+   `pnpm build` and `relay setup`. Paste the **same** Slack bot and app
+   tokens Hassan's laptop uses; both laptops are the same Slack app.
+2. Copy Hassan's two signing keys. On Hassan's laptop, read each one
+   (macOS asks; click *Allow*, never *Always Allow*) and pass it to the
+   second laptop by a channel you trust, never Slack:
+
+   ```bash
+   security find-generic-password -s relay-approval-receipt-key -w
+   security find-generic-password -s relay-audit-signing-key -w
+   ```
+
+   On the second laptop, store each one, pasting it at the prompt:
+
+   ```bash
+   relay secrets set relay-approval-receipt-key --replace
+   relay secrets set relay-audit-signing-key --replace
+   ```
+
+3. Store the second laptop's own database URL (the `relay_second` one),
+   again at the prompt:
+
+   ```bash
+   relay secrets set relay-database-url --replace
+   ```
+
+4. In its `config/relay.config.yaml`, make sure `database.url` is
+   `keystore:relay-database-url`, delete any `database.operator_url` line,
+   and add:
+
+   ```yaml
+   failover:
+     host: second-mbp
+     preferred: false
+   ```
+
+5. Clone the repositories Relay works in at the same place under your home
+   folder as on Hassan's laptop (`~/Documents/project` on one is
+   `~/Documents/project` on the other, whatever the user names are), and
+   register each with `relay repos add <path>`.
+6. Restart the daemon (`relay install-service --start`) and run `relay
+   doctor`. It should say Hassan's laptop answers and this one is not
+   preferred. Stop Hassan's daemon for a minute to see this laptop take
+   over, then start it again to see it hand back.
+
+Good to know:
+
+- A Playwright extension token in a channel description
+  ([below](#a-playwright-extension-token-per-channel)) belongs to one
+  laptop's Chrome, so browser work in that channel only works while that
+  laptop answers.
+- Without `database.operator_url`, commands you run yourself (`relay live`,
+  `relay notify`, `relay doctor`) read the database login from the
+  Keychain, so macOS may ask once per command; click *Allow*.
+- Update both laptops together. A laptop whose build is older than the
+  database refuses to answer, and `relay doctor` on both laptops says so.
+
 ### Who can use your Relay
 
 Relay ignores anyone you have not added. Add yourself as the owner, and

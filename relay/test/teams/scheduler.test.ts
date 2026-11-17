@@ -1,15 +1,16 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { Pool } from 'pg'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TurnRequestContext, TurnResult } from '../../src/autonomous/scheduler.js'
 import { loadTask } from '../../src/autonomous/store.js'
 import { applyMigrations } from '../../src/db/migrate.js'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { processGroupAlive } from '../../src/process/gated-spawn.js'
-import { createTeamScheduler } from '../../src/teams/scheduler.js'
+import { createTeamScheduler, type TeamSchedulerOptions } from '../../src/teams/scheduler.js'
 import { insertAssignment, loadAssignment } from '../../src/teams/store.js'
 import type { Assignment, SnapshotMember, TeamRun, TeamSchedulerDeps } from '../../src/teams/types.js'
+import type { FailoverGate } from '../../src/failover/types.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 import { openRun, snapshot, teamFixture, type TeamFixture } from './fixture.js'
 
@@ -64,7 +65,7 @@ describe('team scheduler', () => {
     await closePool(pool)
   })
 
-  function scheduler(fixture: TeamFixture, runTurn: TeamSchedulerDeps['runTurn'], overrides: Partial<TeamSchedulerDeps> = {}) {
+  function scheduler(fixture: TeamFixture, runTurn: TeamSchedulerDeps['runTurn'], overrides: Partial<TeamSchedulerOptions> = {}) {
     return createTeamScheduler({
       pool,
       workspaceId: fixture.workspaceId,
@@ -317,5 +318,46 @@ describe('team scheduler', () => {
     expect(notes).toHaveLength(2)
     expect(notes[0]).toContain('runs again')
     expect(notes[1]).toContain('marked failed')
+  })
+
+  it('starts no member turn and steps down when this laptop may no longer start work', async () => {
+    const fixture = await teamFixture(pool)
+    const run = await openRun(pool, fixture)
+    const assignment = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'stale')
+    const reasons: string[] = []
+    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => false, mayStartWork: async () => false, stepDown: (reason) => reasons.push(reason) }
+    const runTurn = vi.fn(async () => reply('never'))
+    const team = scheduler(fixture, runTurn, { failover })
+
+    await team.tick()
+
+    expect(await stateOf(assignment.id)).toBe('queued')
+    expect(runTurn).not.toHaveBeenCalled()
+    expect(reasons).toHaveLength(1)
+    await team.stop()
+  })
+
+  it("startup recovery with failover leaves another laptop's member alone while that laptop is seen, and reruns it without any signal once it went quiet", async () => {
+    const fixture = await teamFixture(pool)
+    const run = await openRun(pool, fixture)
+    const assignment = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'a')
+    const other = `laptop-b-${Math.random().toString(36).slice(2, 10)}`
+    await pool.query(`INSERT INTO failover_hosts (name, home, build_migration) VALUES ($1, '/Users/b', '0030')`, [other])
+    // A live group whose pgid the other laptop recorded: here it is some unrelated process.
+    const worker = fakeWorker()
+    workers.push(worker)
+    const pgid = worker.pid ?? 0
+    await pool.query(`UPDATE team_assignments SET state = 'running', lease_owner = $3, worker_pid = $2, worker_pgid = $2, worker_host = $4 WHERE id = $1`, [assignment.id, pgid, `relay-1@${other}`, other])
+    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => true, mayStartWork: async () => true, stepDown: () => undefined }
+    const team = scheduler(fixture, async () => reply('never'), { failover })
+
+    await team.recover()
+    expect(await stateOf(assignment.id)).toBe('running')
+
+    await pool.query(`UPDATE failover_hosts SET last_seen_at = now() - interval '2 minutes' WHERE name = $1`, [other])
+    await team.recover()
+    expect(await loadAssignment(pool, assignment.id)).toMatchObject({ state: 'queued', workerPgid: null })
+    expect(processGroupAlive(pgid)).toBe(true)
+    expect(await leadNotes(fixture)).toEqual([expect.stringContaining('runs again')])
   })
 })

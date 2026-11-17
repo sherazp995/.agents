@@ -4,9 +4,10 @@
  * behind the SlackBoltApp and SlackApiClient seams (src/chat/slack/types.ts),
  * and reading the two Slack tokens.
  */
-import { App } from '@slack/bolt'
+import { App, defaultProcessEventErrorHandler, SocketModeReceiver } from '@slack/bolt'
 import { ErrorCode, WebClient } from '@slack/web-api'
 import { CONFIRM_MODAL_BLOCK_ID, EDIT_MODAL_BLOCK_ID, EDIT_MODAL_CALLBACK_ID } from '../../approvals/blockkit.js'
+import { ALWAYS_ACTIVE, type FailoverGate } from '../../failover/types.js'
 import { SecretNotFoundError } from '../../secrets/provider.js'
 import type { SecretProvider } from '../../secrets/provider.js'
 import { TransportError } from '../outbox.js'
@@ -83,8 +84,45 @@ export function classifyTransportError(error: unknown): unknown {
 // Bolt's or WebClient's real types beyond this construction step.
 // ---------------------------------------------------------------------------
 
-export function createLiveSlackBoltApp(botToken: string, appToken: string): SlackBoltApp {
-  const app = new App({ token: botToken, appToken, socketMode: true })
+/** Thrown in front of Bolt when this laptop no longer answers, so the event is neither processed nor acknowledged. */
+export class StaleClaimError extends Error {
+  constructor() {
+    super('this laptop no longer holds the failover record; Slack will resend the event to the laptop that does')
+    this.name = 'StaleClaimError'
+  }
+}
+
+/**
+ * The Socket Mode receiver Relay's Bolt app runs on, with the failover check
+ * in front of Bolt's event processing. Bolt acknowledges an Events API event
+ * inside App.processEvent before any middleware runs, so a check in
+ * middleware would be too late: the event would be acknowledged and lost.
+ * Here a stale claim throws before processEvent, the error handler declines
+ * to acknowledge, and Slack resends the event once this laptop has closed
+ * its connection.
+ */
+export function createGatedSocketModeReceiver(appToken: string, gate: FailoverGate): SocketModeReceiver {
+  const receiver = new SocketModeReceiver({
+    appToken,
+    processEventErrorHandler: async (args) => (args.error instanceof StaleClaimError ? false : defaultProcessEventErrorHandler(args)),
+  })
+  const init = receiver.init.bind(receiver)
+  receiver.init = (app) => {
+    const processEvent = app.processEvent.bind(app)
+    app.processEvent = async (event) => {
+      if (!gate.holdsFresh()) {
+        gate.stepDown('a Slack event arrived after the failover claim went stale')
+        throw new StaleClaimError()
+      }
+      await processEvent(event)
+    }
+    init(app)
+  }
+  return receiver
+}
+
+export function createLiveSlackBoltApp(botToken: string, appToken: string, gate: FailoverGate = ALWAYS_ACTIVE): SlackBoltApp {
+  const app = new App({ token: botToken, receiver: createGatedSocketModeReceiver(appToken, gate) })
   return {
     event(eventType, listener) {
       app.event(eventType, async (args) => {

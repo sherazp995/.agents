@@ -5,8 +5,8 @@
  * from an approved team proposal carries a "written by Relay" mark.
  */
 
-import { PersonaFileNotSaved, readPersona } from '../../projects/persona-files.js'
-import { createPersona, editPersona, removePersona, type LibraryContext } from '../../projects/persona-library.js'
+import { PersonaFileNotSaved } from '../../projects/persona-files.js'
+import { createPersona, editPersona, personaText, removePersona, type LibraryContext } from '../../projects/persona-library.js'
 import { getPersona, listPersonas, StoreConflict, type Persona } from '../../projects/store.js'
 import { notFound, pageResult, savedRedirect, type HandlerResult, type RequestContext } from '../context.js'
 import { buttonClass, csrfField, html, TEAM_RUN_NOTE, page, postButton } from '../html.js'
@@ -20,8 +20,9 @@ function library(ctx: RequestContext): LibraryContext {
 
 export async function listPersonasPage(ctx: RequestContext): Promise<HandlerResult> {
   const personas = await listPersonas(ctx.pool, ctx.workspaceId)
-  const rows = personas.map((persona) => {
-    const missing = readPersona(ctx.deps.personasDir, persona.fileName) === undefined
+  const texts = await Promise.all(personas.map((persona) => personaText(ctx.pool, ctx.workspaceId, ctx.deps.personasDir, persona)))
+  const rows = personas.map((persona, index) => {
+    const missing = texts[index] === undefined
     return html`<tr>
       <th scope="row"><a href="/personas/${persona.id}">${persona.name}</a>${persona.writtenByRelay ? html` ${RELAY_MARK}` : ''}</th>
       <td><code>${persona.fileName}</code>${missing ? html` <span class="badge badge-danger">file missing</span>` : ''}</td>
@@ -48,7 +49,7 @@ export async function newPersonaPage(ctx: RequestContext): Promise<HandlerResult
 export async function editPersonaPage(ctx: RequestContext): Promise<HandlerResult> {
   const persona = await getPersona(ctx.pool, ctx.workspaceId, ctx.params[0] ?? '')
   if (persona === undefined) return notFound(page({ title: 'Persona not found', csrf: ctx.csrf, crumbs: [PERSONAS_CRUMB] }, html`<p><a href="/personas">Back to personas</a></p>`))
-  return pageResult(personaForm(ctx, persona, readPersona(ctx.deps.personasDir, persona.fileName), undefined))
+  return pageResult(personaForm(ctx, persona, await personaText(ctx.pool, ctx.workspaceId, ctx.deps.personasDir, persona), undefined))
 }
 
 export async function createPersonaAction(ctx: RequestContext): Promise<HandlerResult> {

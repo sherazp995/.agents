@@ -59,12 +59,17 @@ describe('relay live say', () => {
     truncateSync(join(dir, 'big.md'), UPLOAD_MAX_BYTES + 1)
 
     await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '2.1', text: 'Plan attached.', file: join(dir, 'plan.md') })
-    await expect(runLiveSay({ pool, workspaceId, channel: 'D1', thread: '2.1', text: '', file: join(dir, 'big.md') })).rejects.toThrow("Slack's limit is")
+    await expect(runLiveSay({ pool, workspaceId, channel: 'D1', thread: '2.1', text: '', file: join(dir, 'big.md') })).rejects.toThrow('relay stores files up to 100 MB')
     // A file alone has no text post to edit, so no status id is printed.
     expect(await runLiveSay({ pool, workspaceId, channel: 'D1', thread: '2.1', text: '', file: join(dir, 'plan.md') })).toBe('queued for D1:2.1; the relay daemon posts it.')
 
-    const { rows } = await pool.query<{ action: { kind: string; filename?: string; path?: string } }>('SELECT action FROM outbox WHERE workspace_id = $1 ORDER BY created_at', [workspaceId])
-    // The row holds the path, not the bytes: the daemon reads the file when it uploads.
-    expect(rows.map((row) => [row.action.kind, row.action.filename, row.action.path])).toEqual([['post', undefined, undefined], ['upload', 'plan.md', join(dir, 'plan.md')], ['upload', 'plan.md', join(dir, 'plan.md')]])
+    // The bytes are stored with the row, so a daemon on another laptop can post them.
+    const { rows } = await pool.query<{ kind: string; filename: string | null; content: string | null }>(
+      `SELECT o.action->>'kind' AS kind, o.action->>'filename' AS filename, convert_from(f.content, 'UTF8') AS content
+       FROM outbox o LEFT JOIN outbox_files f ON f.id = (o.action->>'file_id')::uuid
+       WHERE o.workspace_id = $1 ORDER BY o.created_at`,
+      [workspaceId],
+    )
+    expect(rows.map((row) => [row.kind, row.filename, row.content])).toEqual([['post', null, null], ['upload', 'plan.md', '# Plan\n'], ['upload', 'plan.md', '# Plan\n']])
   })
 })

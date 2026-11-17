@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { policySchema } from '../../src/config/schema.js'
+import { policySchema, relayConfigSchema } from '../../src/config/schema.js'
 
 /** The minimum a valid policy needs, per test/policy/classify.test.ts's own identical fixture. */
 function basePolicy(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -86,5 +86,19 @@ describe('policySchema: approvals section (FR-APR-4, FR-APR-5)', () => {
     expect(result.success).toBe(true)
     expect(result.success && result.data.approvals?.read?.requires_typed_confirmation).toBe(false)
     expect(result.success && result.data.approvals?.irreversible?.requires_typed_confirmation).toBe(true)
+  })
+})
+
+describe('relayConfigSchema: failover', () => {
+  const failover = relayConfigSchema.shape.failover
+
+  it('is off when absent, and preferred defaults to false', () => {
+    expect(failover.parse(undefined)).toBeUndefined()
+    expect(failover.parse({ host: 'zubair-mbp' })).toEqual({ host: 'zubair-mbp', preferred: false })
+  })
+
+  it('refuses a host name with spaces or slashes', () => {
+    expect(failover.safeParse({ host: 'my laptop' }).success).toBe(false)
+    expect(failover.safeParse({ host: 'a/b' }).success).toBe(false)
   })
 })

@@ -2,12 +2,14 @@
  * Persona changes as the page and the starter team make them: the file and
  * the row (with its audit entry) saved in the order persona-files.ts sets,
  * so a failure never leaves the two out of step in a way the page hides.
+ * The row keeps the text too (`body`), so the other failover laptop, with
+ * its own personas folder, reads the same persona.
  */
 
 import type { Pool } from 'pg'
 import { auditedChange } from '../ui/audit.js'
-import { movePersonaAside, newPersonaFileName, savePersonaFile, type FileOps } from './persona-files.js'
-import { deletePersona, getPersona, insertPersona, renamePersona, StoreConflict } from './store.js'
+import { movePersonaAside, newPersonaFileName, personaFileText, readPersona, savePersonaFile, writePersonaFile, type FileOps } from './persona-files.js'
+import { backfillPersonaBody, deletePersona, getPersona, insertPersona, StoreConflict, updatePersona, type Persona } from './store.js'
 
 export type LibraryContext = {
   readonly pool: Pool
@@ -26,7 +28,9 @@ export async function createPersona(ctx: LibraryContext, name: string, text: str
     ctx.dir,
     fileName,
     text,
-    () => auditedChange(ctx.pool, ctx.workspaceId, ctx.actor, { route: ctx.route, outcome: 'persona created', detail: { name, fileName } }, (client) => insertPersona(client, ctx.workspaceId, { name, fileName })),
+    () => auditedChange(ctx.pool, ctx.workspaceId, ctx.actor, { route: ctx.route, outcome: 'persona created', detail: { name, fileName } }, (client) =>
+      insertPersona(client, ctx.workspaceId, { name, fileName, body: personaFileText(text) }),
+    ),
     ctx.fileOps,
   )
 }
@@ -41,7 +45,7 @@ export async function editPersona(ctx: LibraryContext, personaId: string, name: 
     text,
     async () => {
       await auditedChange(ctx.pool, ctx.workspaceId, ctx.actor, { route: ctx.route, outcome: 'persona saved', detail: { personaId, name, fileName: persona.fileName } }, async (client) => {
-        if (!(await renamePersona(client, ctx.workspaceId, personaId, name))) throw new StoreConflict('That persona no longer exists.')
+        if (!(await updatePersona(client, ctx.workspaceId, personaId, { name, body: personaFileText(text) }))) throw new StoreConflict('That persona no longer exists.')
       })
     },
     ctx.fileOps,
@@ -65,4 +69,27 @@ export async function removePersona(ctx: LibraryContext, personaId: string, now:
   } catch {
     return { fileNotMoved: persona.fileName }
   }
+}
+
+/**
+ * The persona's text, with the database as the copy both laptops share: a
+ * stored body wins and is written to this laptop's file when that is missing
+ * or different, so agents reading the file see it; a persona saved before
+ * bodies existed is backfilled from this laptop's file. Undefined when there
+ * is neither. A file that cannot be written is left for the next read.
+ */
+export async function personaText(pool: Pool, workspaceId: string, dir: string, persona: Pick<Persona, 'id' | 'fileName' | 'body'>): Promise<string | undefined> {
+  const onDisk = readPersona(dir, persona.fileName)
+  if (persona.body === null) {
+    if (onDisk !== undefined) await backfillPersonaBody(pool, workspaceId, persona.id, onDisk)
+    return onDisk
+  }
+  if (onDisk !== persona.body) {
+    try {
+      writePersonaFile(dir, persona.fileName, persona.body)
+    } catch {
+      // The text is still right from the database; only the agents' copy is stale.
+    }
+  }
+  return persona.body
 }

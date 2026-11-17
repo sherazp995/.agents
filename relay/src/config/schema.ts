@@ -357,6 +357,15 @@ export const relayConfigSchema = z
       .strict() as z.ZodType<{
       provider: 'keychain' | 'libsecret'
     }>,
+    // Two laptops sharing one database (README, "Failover"): only the one
+    // holding the record answers Slack. Absent means off, as before.
+    failover: z
+      .object({
+        host: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/, 'host: letters, digits, dot, dash or underscore'),
+        preferred: z.boolean().default(false),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
 

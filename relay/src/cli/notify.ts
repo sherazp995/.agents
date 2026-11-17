@@ -39,7 +39,7 @@ export type NotifyParams = {
   /** Skips the lookup of the one Slack workspace. */
   workspaceId?: string
   /** The Claude Code chat to attach each DM thread to, once it is sent. */
-  attach?: { engineSessionId: string; cwd: string; peer?: string }
+  attach?: { engineSessionId: string; cwd: string; peer?: string; host?: string }
   /** A file to post in the DM's thread once the DM is sent, such as a plan to review. */
   file?: string
   sendWaitMs?: number
@@ -98,7 +98,7 @@ async function attachThread(pool: Pool, workspaceId: string, userId: string, sen
   const principalId = principals[0]?.id
   if (!principalId) return false
   const session = await findOrCreateSession(pool, { workspaceId, principalId, adapter: PLATFORM, threadRef: composeThreadRef(sent.channel, sent.message) })
-  await attachSessionToEngineChat(pool, session.id, attach.engineSessionId, attach.cwd)
+  await attachSessionToEngineChat(pool, session.id, attach.engineSessionId, attach.cwd, attach.host ?? null)
   if (attach.peer !== undefined) {
     // The exact chat is known, so the thread is claimed for it: replies park
     // and the courier pushes them to that chat without a process scan.

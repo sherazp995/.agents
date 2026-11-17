@@ -12,11 +12,16 @@
  *
  * Only the `.json` registry files are read. The `.key` files next to them are
  * secrets and are never opened.
+ *
+ * With failover, a thread's terminal chat may be open on the other laptop
+ * (sessions.engine_host), where this laptop cannot reach it; such a thread is
+ * refused with that laptop's name (openElsewhere).
  */
 
 import { readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { Pool, PoolClient } from 'pg'
 
 export type OpenSessionDependencies = {
   readonly root?: string
@@ -65,4 +70,21 @@ export async function findOpenSessionName(sessionId: string, deps: OpenSessionDe
     return record.name
   }
   return null
+}
+
+/** The reply for a thread whose terminal chat is open on another laptop. */
+export function otherLaptopText(laptop: string): string {
+  return `This thread's terminal chat is open on ${laptop}, not on this laptop, so I cannot reach it from here. Continue it on ${laptop}, or close it there and mention me to carry on.`
+}
+
+/**
+ * The refusal for a live session whose chat runs on another laptop, or null
+ * when it is this laptop's (or failover is off, `host` null, or the session
+ * predates failover).
+ */
+export async function openElsewhere(db: Pool | PoolClient, sessionId: string, host: string | null): Promise<string | null> {
+  if (host === null) return null
+  const { rows } = await db.query<{ engine_host: string | null }>('SELECT engine_host FROM sessions WHERE id = $1', [sessionId])
+  const laptop = rows[0]?.engine_host ?? null
+  return laptop === null || laptop === host ? null : otherLaptopText(laptop)
 }

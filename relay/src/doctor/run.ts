@@ -26,6 +26,8 @@ import './checks/audit.js'
 import './checks/supervisor.js'
 // Adds 'autonomous-setup' and 'autonomous-codex-hook': they report 'ok, off' unless autonomous mode is on.
 import './checks/autonomous.js'
+// Adds 'failover': "off" unless config.failover is set, else who answers and whether a build is too old.
+import './checks/failover.js'
 import { defaultChecks } from './registry.js'
 import type { Check, CheckContext } from './registry.js'
 

@@ -213,14 +213,37 @@ function serializeAction(action: ChatAction): unknown {
 }
 
 /**
- * An upload queued by `--file` stores the file's path, not its bytes, so a
- * video does not sit in a database row; it is read here, when it is sent.
+ * An upload queued by `--file` names its bytes in outbox_files by `file_id`
+ * (src/cli/upload.ts), so any laptop sharing the database can post it. Rows
+ * queued before that carry the file's local `path` instead, read here as
+ * before.
  */
-async function loadUploadFile(action: ChatAction): Promise<ChatAction> {
+async function loadUploadFile(client: PoolClient, action: ChatAction, workspaceId: string | null): Promise<ChatAction> {
   if (action.kind !== 'upload' || action.bytes !== undefined) return action
+  const fileId = uploadFileId(action)
+  if (fileId !== undefined) {
+    const { rows } = await client.query<{ content: Buffer }>(
+      'SELECT content FROM outbox_files WHERE id = $1 AND ($2::uuid IS NULL OR workspace_id = $2)',
+      [fileId, workspaceId],
+    )
+    const content = rows[0]?.content
+    if (content === undefined) throw new Error(`upload's stored file ${fileId} is gone`)
+    return { ...action, bytes: new Uint8Array(content) }
+  }
   const path = (action as { path?: unknown }).path
-  if (typeof path !== 'string') throw new Error('upload has neither bytes nor a file path')
+  if (typeof path !== 'string') throw new Error('upload has neither bytes, a stored file, nor a file path')
   return { ...action, bytes: new Uint8Array(await readFile(path)) }
+}
+
+function uploadFileId(action: ChatAction): string | undefined {
+  const fileId = (action as { file_id?: unknown }).file_id
+  return typeof fileId === 'string' ? fileId : undefined
+}
+
+/** Once an upload is sent or failed for good its stored bytes have no further use, and they count against the database's size. */
+async function deleteUploadFile(client: PoolClient, action: ChatAction): Promise<void> {
+  const fileId = uploadFileId(action)
+  if (fileId !== undefined) await client.query('DELETE FROM outbox_files WHERE id = $1', [fileId])
 }
 
 /** Which pending rows one drain() call takes: everything, everything but uploads, or uploads only. */
@@ -390,7 +413,7 @@ export class Outbox {
     const workspaceId = this.#workspaceId ?? null
     try {
       // Inside the try, so a file that is gone fails the row like any other send error.
-      const action = await loadUploadFile(stored)
+      const action = await loadUploadFile(client, stored, workspaceId)
       const timeoutMs = action.kind === 'upload' ? Math.max(this.#performTimeoutMs, UPLOAD_TIMEOUT_MS) : this.#performTimeoutMs
       const result = await withTimeout(
         this.#adapter.perform(action),
@@ -403,6 +426,7 @@ export class Outbox {
          WHERE id = $1 AND ($3::uuid IS NULL OR workspace_id = $3)`,
         [row.id, cursor, workspaceId, result?.ref ?? null],
       )
+      await deleteUploadFile(client, stored)
       this.#log?.info({ outboxId: row.id }, 'outbox action sent')
       return 'sent'
     } catch (error) {
@@ -447,6 +471,7 @@ export class Outbox {
            WHERE id = $1 AND ($5::uuid IS NULL OR workspace_id = $5)`,
           [row.id, attempts, message, cursor, workspaceId],
         )
+        await deleteUploadFile(client, stored)
         this.#log?.error(
           { outboxId: row.id, attempts, err: message },
           'outbox action reached maxAttempts and moved to failed; it will not be retried again',

@@ -74,6 +74,10 @@ export type AutonomousTask = {
   leaseExpiresAt: Date | null
   workerPid: number | null
   workerPgid: number | null
+  /** The laptop the recorded worker runs on (0030_failover.sql); null before failover or with it off. */
+  workerHost: string | null
+  /** A reminder's task runs only on this laptop; null runs anywhere. */
+  pinnedHost: string | null
   nextWakeupAt: Date | null
 }
 
@@ -98,6 +102,8 @@ type TaskRow = {
   lease_expires_at: Date | null
   worker_pid: number | null
   worker_pgid: number | null
+  worker_host: string | null
+  pinned_host: string | null
   next_wakeup_at: Date | null
 }
 
@@ -124,6 +130,8 @@ function toTask(row: TaskRow): AutonomousTask {
     leaseExpiresAt: row.lease_expires_at,
     workerPid: row.worker_pid,
     workerPgid: row.worker_pgid,
+    workerHost: row.worker_host,
+    pinnedHost: row.pinned_host,
     nextWakeupAt: row.next_wakeup_at,
   }
 }
@@ -197,7 +205,7 @@ export async function intakeMention(pool: Pool, params: IntakeMentionParams): Pr
       if (!params.adopt || active.mode !== 'governed') return { kind: 'not_autonomous' }
       // The attachment ends with the chat, so later messages go to the task instead of parking again.
       await client.query(
-        `UPDATE sessions SET mode = 'autonomous', live_control_claimed_at = NULL, engine_cwd = NULL, engine_session_id = NULL, courier_target = NULL WHERE id = $1`,
+        `UPDATE sessions SET mode = 'autonomous', live_control_claimed_at = NULL, engine_cwd = NULL, engine_session_id = NULL, engine_host = NULL, courier_target = NULL WHERE id = $1`,
         [active.id],
       )
       const existingTask = await client.query('SELECT 1 FROM autonomous_tasks WHERE session_id = $1', [active.id])
@@ -252,6 +260,47 @@ export async function loadTask(pool: Pool | PoolClient, taskId: string): Promise
 /** What a lease holder names on every write. */
 export type Lease = { taskId: string; owner: string; generation: number }
 
+/**
+ * A daemon's lease owner name. With failover on it ends in `@<host>`, which a
+ * host name cannot contain, so the other laptop can tell whose lease a
+ * cut-off turn left behind (LEASE_HOST_SQL).
+ */
+export function leaseOwnerName(pid: number, host: string | null): string {
+  return host === null ? `relay-${pid}` : `relay-${pid}@${host}`
+}
+
+/** The host part of a lease_owner column; '' for an owner written without one. */
+export const LEASE_HOST_SQL = (column: string): string => `split_part(${column}, '@', 2)`
+
+/** A laptop not seen for this long is gone: its workers are not waited on. */
+export const HOST_GONE_MS = 60_000
+
+/**
+ * True when `host` may signal and wait on a worker recorded with
+ * `workerHost`. With failover off (host null) every worker is this laptop's,
+ * as before failover existed; with it on, only its own named ones are.
+ */
+export function isOwnWorker(workerHost: string | null, host: string | null): boolean {
+  return host === null || workerHost === host
+}
+
+/**
+ * Whether the laptop `other` names has gone quiet: not seen for HOST_GONE_MS
+ * by the database clock. A null `other` (a row from before failover) is gone
+ * only when every laptop other than `host` is.
+ */
+export async function hostGone(pool: Pool | PoolClient, other: string | null, host: string | null): Promise<boolean> {
+  const { rows } = await pool.query<{ fresh: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM failover_hosts
+       WHERE last_seen_at > now() - ($3 * interval '1 millisecond')
+         AND (CASE WHEN $1::text IS NULL THEN name IS DISTINCT FROM $2::text ELSE name = $1::text END)
+     ) AS fresh`,
+    [other, host, HOST_GONE_MS],
+  )
+  return rows[0]?.fresh !== true
+}
+
 /** Takes the lease when it is free or expired and the task is not cancelled. Each grant bumps the generation, fencing out the previous holder. */
 export async function acquireLease(pool: Pool, taskId: string, owner: string, ttlMs: number): Promise<Lease | undefined> {
   const { rows } = await pool.query<{ lease_generation: string }>(
@@ -289,6 +338,8 @@ export async function releaseLease(pool: Pool, lease: Lease): Promise<boolean> {
 export type TaskUpdate = Partial<{
   accountKey: string | null
   engineSessionId: string | null
+  /** Moved only when the stored folder is missing on this laptop (runtime.ts placeTurn). */
+  chatCwd: string | null
   files: TaskFile[]
   /** 'now' is the database's clock, so a wakeup is due at once whatever the host clock says. */
   nextWakeupAt: Date | 'now' | null
@@ -297,6 +348,7 @@ export type TaskUpdate = Partial<{
 const UPDATE_COLUMNS: { [K in keyof Required<TaskUpdate>]: { column: string; json: boolean } } = {
   accountKey: { column: 'account_key', json: false },
   engineSessionId: { column: 'engine_session_id', json: false },
+  chatCwd: { column: 'chat_cwd', json: false },
   files: { column: 'files', json: true },
   nextWakeupAt: { column: 'next_wakeup_at', json: false },
 }
@@ -332,12 +384,12 @@ export async function updateTask(
   return rows[0] ? toTask(rows[0]) : undefined
 }
 
-/** Recorded before the worker's start gate opens, so a dead daemon's survivor can always be found. */
-export async function recordWorker(pool: Pool, lease: Lease, pid: number, pgid: number): Promise<boolean> {
+/** Recorded before the worker's start gate opens, so a dead daemon's survivor can always be found, and only by the laptop it runs on. */
+export async function recordWorker(pool: Pool, lease: Lease, pid: number, pgid: number, host: string | null = null): Promise<boolean> {
   const { rowCount } = await pool.query(
-    `UPDATE autonomous_tasks SET worker_pid = $4, worker_pgid = $5, worker_started_at = now(), updated_at = now()
+    `UPDATE autonomous_tasks SET worker_pid = $4, worker_pgid = $5, worker_host = $6, worker_started_at = now(), updated_at = now()
      WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3`,
-    [lease.taskId, lease.owner, lease.generation, pid, pgid],
+    [lease.taskId, lease.owner, lease.generation, pid, pgid, host],
   )
   return rowCount === 1
 }
@@ -345,9 +397,59 @@ export async function recordWorker(pool: Pool, lease: Lease, pid: number, pgid: 
 /** Clears the recorded worker once its process group has exited. Not fenced: whoever confirmed the exit may clear it. */
 export async function clearWorker(pool: Pool, taskId: string, pgid: number): Promise<void> {
   await pool.query(
-    `UPDATE autonomous_tasks SET worker_pid = NULL, worker_pgid = NULL, worker_started_at = NULL, updated_at = now()
+    `UPDATE autonomous_tasks SET worker_pid = NULL, worker_pgid = NULL, worker_host = NULL, worker_started_at = NULL, updated_at = now()
      WHERE id = $1 AND worker_pgid = $2`,
     [taskId, pgid],
+  )
+}
+
+/**
+ * A step that runs no turn (it asked the thread for a folder): sleeps until
+ * the next message, keeping a wakeup set after `dueAt` like consumeTurnInput.
+ */
+export async function parkTask(pool: Pool | PoolClient, lease: Lease, dueAt: Date | null): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `UPDATE autonomous_tasks
+     SET next_wakeup_at = CASE WHEN next_wakeup_at >= $4::timestamptz + interval '1 millisecond' THEN next_wakeup_at ELSE NULL END, updated_at = now()
+     WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3`,
+    [lease.taskId, lease.owner, lease.generation, dueAt ?? new Date(0)],
+  )
+  return rowCount === 1
+}
+
+/**
+ * Takeover: every task whose lease a gone laptop still holds had a turn cut
+ * off there. Its lease is fenced (a laptop that comes back writes nothing),
+ * its worker record dropped without any signal (the process was on that
+ * laptop), and it sleeps until someone mentions it again; its messages stay
+ * for that turn. Returns the tasks changed, each exactly once, inside
+ * `client`'s transaction so the caller's note commits with it.
+ */
+export async function markInterruptedTasks(client: PoolClient, workspaceId: string, host: string): Promise<AutonomousTask[]> {
+  const leaseHost = LEASE_HOST_SQL('t.lease_owner')
+  const { rows } = await client.query<TaskRow>(
+    `UPDATE autonomous_tasks AS t
+     SET lease_owner = NULL, lease_expires_at = NULL, lease_generation = t.lease_generation + 1, next_wakeup_at = NULL,
+         worker_pid = CASE WHEN t.worker_host IS DISTINCT FROM $2 THEN NULL ELSE t.worker_pid END,
+         worker_pgid = CASE WHEN t.worker_host IS DISTINCT FROM $2 THEN NULL ELSE t.worker_pgid END,
+         worker_started_at = CASE WHEN t.worker_host IS DISTINCT FROM $2 THEN NULL ELSE t.worker_started_at END,
+         worker_host = CASE WHEN t.worker_host IS DISTINCT FROM $2 THEN NULL ELSE t.worker_host END,
+         updated_at = now()
+     WHERE t.workspace_id = $1 AND t.lease_owner IS NOT NULL AND ${leaseHost} <> '' AND ${leaseHost} <> $2
+       AND NOT EXISTS (SELECT 1 FROM failover_hosts h WHERE h.name = ${leaseHost} AND h.last_seen_at > now() - ($3 * interval '1 millisecond'))
+     RETURNING t.*`,
+    [workspaceId, host, HOST_GONE_MS],
+  )
+  return rows.map(toTask)
+}
+
+/** Pins a reminder's read-only task to the laptop that took it: the person it runs as comes from that laptop's config. */
+export async function pinReminderTask(pool: Pool, workspaceId: string, threadRef: string, host: string): Promise<void> {
+  await pool.query(
+    `UPDATE autonomous_tasks AS t SET pinned_host = $3, updated_at = now()
+     FROM sessions s
+     WHERE s.id = t.session_id AND s.workspace_id = $1 AND s.thread_ref = $2 AND t.read_only AND t.pinned_host IS NULL`,
+    [workspaceId, threadRef, host],
   )
 }
 
@@ -479,14 +581,15 @@ export async function requestCancel(pool: Pool | PoolClient, taskId: string): Pr
   return rows[0] ? toTask(rows[0]) : undefined
 }
 
-/** Tasks whose wakeup time has come, not cancelled and not leased. */
-export async function listDueWakeups(pool: Pool, workspaceId: string): Promise<AutonomousTask[]> {
+/** Tasks whose wakeup time has come, not cancelled and not leased; with failover on, not pinned to another laptop. */
+export async function listDueWakeups(pool: Pool, workspaceId: string, host: string | null = null): Promise<AutonomousTask[]> {
   const { rows } = await pool.query<TaskRow>(
     `SELECT * FROM autonomous_tasks
      WHERE workspace_id = $1 AND next_wakeup_at IS NOT NULL AND next_wakeup_at <= now()
        AND cancel_requested_at IS NULL AND (lease_expires_at IS NULL OR lease_expires_at < now())
+       AND ($2::text IS NULL OR pinned_host IS NULL OR pinned_host = $2::text)
      ORDER BY next_wakeup_at`,
-    [workspaceId],
+    [workspaceId, host],
   )
   return rows.map(toTask)
 }

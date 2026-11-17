@@ -27,7 +27,7 @@ import { loadTaskThread } from '../autonomous/operations.js'
 import { loadTask, type AutonomousTask } from '../autonomous/store.js'
 import { notLiveReason } from '../autonomous/team-proposal-route.js'
 import type { BridgeRoute, InvocationContext } from '../engine/hook-bridge.js'
-import { readPersona } from '../projects/persona-files.js'
+import { personaText as readPersonaText } from '../projects/persona-library.js'
 import { getMemberLimit, getPersona, listMembers, projectForChannelWithRepos, type Project } from '../projects/store.js'
 import type { RepoEntry } from '../repos/schema.js'
 import { mergeAssignment } from './merge.js'
@@ -266,7 +266,8 @@ async function snapshotTeam(deps: TeamRouteDeps, project: Project, runId: string
     const personaPath = join(personaDir, fileName)
     let personaText: string | undefined
     try {
-      personaText = persona === undefined ? undefined : readPersona(deps.personasDir, persona.fileName)
+      // The database text first, so a team run on the other failover laptop has its personas.
+      personaText = persona === undefined ? undefined : await readPersonaText(deps.pool, deps.workspaceId, deps.personasDir, persona)
     } catch {
       personaText = undefined
     }

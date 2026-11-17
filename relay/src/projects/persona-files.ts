@@ -1,8 +1,10 @@
 /**
  * The global persona library on disk: one Markdown file per persona under
  * Relay's home `personas/`, git-ignored by a `.gitignore` of its own, so it
- * stays out of git wherever Relay's home is. Agents read these files, not
- * the database (decision 4 in the teams plan).
+ * stays out of git wherever Relay's home is. Agents read these files; the
+ * text is also kept in `personas.body`, which both failover laptops share,
+ * and persona-library.ts writes a file from it when this laptop's copy is
+ * missing or older.
  *
  * A save is ordered so a failure never leaves a half-written file: the new
  * text goes to a temp file first, the caller commits the row (and its audit
@@ -56,6 +58,25 @@ export function personaPath(dir: string, fileName: string): string {
 export function readPersona(dir: string, fileName: string): string | undefined {
   const path = personaPath(dir, fileName)
   return existsSync(path) ? readFileSync(path, 'utf8') : undefined
+}
+
+/** The text as it is stored, in the file and in `personas.body`: always ending in a newline. */
+export function personaFileText(text: string): string {
+  return text.endsWith('\n') ? text : `${text}\n`
+}
+
+/** Puts `text` in place as the persona's file, replacing any older copy whole (temp file, then rename). */
+export function writePersonaFile(dir: string, fileName: string, text: string): void {
+  ensurePersonasDir(dir)
+  const target = personaPath(dir, fileName)
+  const temp = join(resolve(dir), `.${fileName}.${randomBytes(4).toString('hex')}.tmp`)
+  writeFileSync(temp, text, { flag: 'wx' })
+  try {
+    renameSync(temp, target)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
 }
 
 export type FileOps = {
@@ -112,7 +133,7 @@ export async function savePersonaFiles<T>(
     for (const file of files) {
       const target = personaPath(dir, file.fileName)
       const temp = join(resolve(dir), `.${file.fileName}.${randomBytes(4).toString('hex')}.tmp`)
-      ops.write(temp, file.text.endsWith('\n') ? file.text : `${file.text}\n`)
+      ops.write(temp, personaFileText(file.text))
       staged.push({ temp, target, fileName: file.fileName })
     }
     result = await commit()

@@ -20,7 +20,7 @@ import { z } from 'zod'
 import { appendAuditEntryInTransaction } from '../audit/store.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
 import { UI_AUDIT_KIND } from '../ui/audit.js'
-import { newPersonaFileName, readPersona, savePersonaFiles, type FileOps, type PersonaFileFailure } from './persona-files.js'
+import { newPersonaFileName, personaFileText, readPersona, savePersonaFiles, type FileOps, type PersonaFileFailure } from './persona-files.js'
 import { ensureTeam, getProject, listMembers, StoreConflict, type TeamMember } from './store.js'
 
 type Db = Pool | PoolClient
@@ -264,18 +264,21 @@ export async function recordProposalCard(db: Db, workspaceId: string, proposalId
  * The fingerprint of what a proposal is checked against: the project's
  * folder and repos, its members (with the client and model each runs on),
  * and the text of every persona those members use or the proposal names.
- * Persona text lives in files, so it is hashed from disk, not from the row.
+ * Persona text is hashed from the row's body, which both failover laptops
+ * share, or from this laptop's file for a persona not yet backfilled. The
+ * folder is hashed as stored, so a proposal made on one laptop can be
+ * approved on the other.
  */
 export async function teamFingerprint(db: Db, workspaceId: string, projectId: string, personasDir: string, extraPersonaIds: readonly string[] = []): Promise<string> {
   const project = await getProject(db, workspaceId, projectId)
   if (project === undefined) throw new StoreConflict('That project no longer exists.')
   const members = await listMembers(db, workspaceId, projectId)
   const personaIds = [...new Set([...members.map((member) => member.personaId), ...extraPersonaIds])].sort()
-  const { rows } = await db.query<{ id: string; file_name: string }>('SELECT id, file_name FROM personas WHERE workspace_id = $1 AND id = ANY($2::uuid[]) ORDER BY id', [
+  const { rows } = await db.query<{ id: string; file_name: string; body: string | null }>('SELECT id, file_name, body FROM personas WHERE workspace_id = $1 AND id = ANY($2::uuid[]) ORDER BY id', [
     workspaceId,
     personaIds,
   ])
-  const personas = rows.map((row) => ({ id: row.id, text: sha256(readPersona(personasDir, row.file_name) ?? '<missing>') }))
+  const personas = rows.map((row) => ({ id: row.id, text: sha256(row.body ?? readPersona(personasDir, row.file_name) ?? '<missing>') }))
   const shape = {
     folder: project.folder,
     repos: [...project.repos].sort(),
@@ -376,10 +379,11 @@ async function applyInTransaction(input: ApproveInput, rows: readonly ProposedRo
       if (choice.kind === 'existing') return choice.personaId
       const draft = newPersonas.find((persona) => persona.name === choice.name && persona.text === choice.text && !created.some((made) => made.fileName === persona.fileName))
       if (draft === undefined) throw new Error('approveProposal: a new persona has no staged file')
-      const { rows: inserted } = await client.query<{ id: string }>('INSERT INTO personas (workspace_id, name, file_name, written_by_relay) VALUES ($1, $2, $3, true) RETURNING id', [
+      const { rows: inserted } = await client.query<{ id: string }>('INSERT INTO personas (workspace_id, name, file_name, body, written_by_relay) VALUES ($1, $2, $3, $4, true) RETURNING id', [
         input.workspaceId,
         draft.name,
         draft.fileName,
+        personaFileText(draft.text),
       ])
       const personaId = inserted[0]?.id
       if (personaId === undefined) throw new Error('approveProposal: persona INSERT returned no id')

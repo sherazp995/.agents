@@ -201,7 +201,7 @@ describeDb('applyMigrations', () => {
     FROM information_schema.tables t
     WHERE t.table_schema = 'public'
       AND t.table_type = 'BASE TABLE'
-      AND t.table_name NOT IN ('schema_migrations', 'workspaces')
+      AND t.table_name NOT IN ('schema_migrations', 'workspaces', 'failover_hosts', 'failover_lease')
       AND (
         NOT EXISTS (
           SELECT 1 FROM information_schema.columns c
