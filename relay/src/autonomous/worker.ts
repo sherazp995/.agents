@@ -5,7 +5,8 @@
  *
  * Claude reads its input as stream-json on an open stdin, so messages the
  * thread gets while the turn runs reach it at its next tool call, as they do
- * in the terminal; stdin closes when the result arrives. Codex has no input
+ * in the terminal; stdin closes at the first result with no background task
+ * still running (a task's notification starts another result). Codex has no input
  * while a turn runs, so its messages wait for the next turn.
  */
 
@@ -91,7 +92,7 @@ export type TurnRequest = {
   args: readonly string[]
   cwd: string
   env: NodeJS.ProcessEnv
-  /** The CLI's first stdin text; stdin then stays open for `inbox` until the result. */
+  /** The CLI's first stdin text; stdin then stays open for `inbox` until a result with no background task running. */
   input?: string
   inbox?: TurnInbox
   timeoutMs: number
@@ -170,13 +171,18 @@ function parseLine(line: string): Record<string, unknown> | undefined {
  * order, so an answer written before a tool call is not lost behind a later
  * short message. Assistant events with a parent_tool_use_id belong to a
  * subagent and are left out. The result event carries the session id; the
- * first result closes stdin, and a message already in the pipe can start one
- * more result, whose text is collected the same way. A turn with no assistant
+ * first result with no background task still running closes stdin (until
+ * then the chat keeps working on each task's notification, and messages
+ * still reach it), and a message already in the pipe can start one more
+ * result, whose text is collected the same way. A turn with no assistant
  * text falls back to joining the results' text.
  */
 function claudeWatcher(onResult: () => void): Watcher {
   const texts: string[] = []
   const resultTexts: string[] = []
+  // Background tasks the chat still runs, from the CLI's latest `background_tasks_changed` event.
+  // A result while any run is not the end: each one that finishes starts another result.
+  let backgroundTasks = 0
   return {
     onLine(line) {
       const event = parseLine(line)
@@ -184,9 +190,13 @@ function claudeWatcher(onResult: () => void): Watcher {
         texts.push(...assistantTexts(event.message))
         return
       }
+      if (event?.type === 'system' && event.subtype === 'background_tasks_changed') {
+        backgroundTasks = Array.isArray(event.tasks) ? event.tasks.length : 0
+        return
+      }
       if (event?.type !== 'result') return
       if (typeof event.result === 'string' && event.is_error !== true && event.result.trim() !== '') resultTexts.push(event.result)
-      onResult()
+      if (backgroundTasks === 0) onResult()
     },
     finish(result, stderrTail) {
       const final = parseFinalResult(result.stdout)

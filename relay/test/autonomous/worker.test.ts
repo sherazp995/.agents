@@ -180,6 +180,33 @@ describe('runWorkerTurn', () => {
     expect(inbox.send).toBeNull()
   })
 
+  // Shaped like a real capture: a turn that ends while a background task runs gets a `background_tasks_changed` first, and the task's notification starts another result.
+  it('keeps stdin open past a result while a background task runs, so later messages still arrive', async () => {
+    const dir = tempDir()
+    const [firstResult, late, after] = ['first-result', 'late', 'after'].map((name) => join(dir, name)) as [string, string, string]
+    const tasks = (count: number) => `echo '${JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', tasks: Array.from({ length: count }, (_, i) => ({ task_id: `t${i}` })) })}'`
+    const bin = script(dir, 'claude', [
+      'read -r a',
+      tasks(1),
+      claudeResult('started the task'),
+      `touch ${firstResult}`,
+      `read -r b; printf '%s' "$b" > ${late}`,
+      tasks(0),
+      claudeResult('task done'),
+      `if read -r c; then echo open > ${after}; else echo closed > ${after}; fi`,
+    ].join('; '))
+    const inbox: TurnInbox = { send: null }
+
+    const pending = runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hello'), inbox }))
+    await waitFor(() => existsSync(firstResult))
+    expect(inbox.send?.('sent after the first result')).toBe(true)
+
+    expect(await pending).toEqual({ kind: 'reply', text: 'started the task\n\ntask done', sessionId: 's1' })
+    expect(JSON.parse(readFileSync(late, 'utf8')).message.content).toBe('sent after the first result')
+    expect(readFileSync(after, 'utf8').trim()).toBe('closed')
+    expect(inbox.send).toBeNull()
+  })
+
   it('joins the texts when a message in the pipe started a second result', async () => {
     const bin = script(tempDir(), 'claude', `read -r a; ${claudeResult('first answer')}; ${claudeResult('second answer')}`)
     expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi') }))).toEqual({ kind: 'reply', text: 'first answer\n\nsecond answer', sessionId: 's1' })
