@@ -48,15 +48,17 @@ describe('the spawn plan', () => {
 describe("the spawn plan and the channel's extension token", () => {
   it("gives the thread's own worker the token, on Claude and on Codex, in its environment and never its arguments", () => {
     for (const account of [CLAUDE, CODEX]) {
-      const plan = buildSpawnPlan(SETUP, params(account), 'channel-token-456')
+      const plan = buildSpawnPlan(SETUP, params(account), { token: 'channel-token-456', profile: 'Profile 16' })
       expect(plan.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBe('channel-token-456')
+      expect(plan.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME).toBe('Profile 16')
       expect(plan.args.join(' ')).not.toContain('channel-token-456')
     }
   })
 
   it('gives a team member none, since it runs with no MCP servers but could still read its environment', () => {
     const member = { ...taskSubject(task), cwd: '/wt/a1', brief: 'You are Theo.', model: null, noMcp: true }
-    expect(buildSpawnPlan(SETUP, params(CLAUDE, member), 'channel-token-456').env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
+    expect(buildSpawnPlan(SETUP, params(CLAUDE, member), { token: 'channel-token-456', profile: 'Profile 16' }).env).not.toHaveProperty('PLAYWRIGHT_MCP_EXTENSION_TOKEN')
+    expect(buildSpawnPlan(SETUP, params(CLAUDE, member), { profile: 'Profile 16' }).env).not.toHaveProperty('PLAYWRIGHT_MCP_PROFILE_DIR_NAME')
   })
 })
 
@@ -84,7 +86,7 @@ describe("the spawn plan for a reminder's read-only task", () => {
   })
 
   it('gives it no extension token, even when one is passed', () => {
-    expect(buildSpawnPlan(SETUP, readOnlyParams(CLAUDE), 'channel-token-456').env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
+    expect(buildSpawnPlan(SETUP, readOnlyParams(CLAUDE), { token: 'channel-token-456' }).env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
   })
 
   it('refuses a plan on Codex or with MCP servers', () => {

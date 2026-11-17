@@ -1,4 +1,4 @@
-"""The related-tests hooks: snapshot the tree when a turn starts, test the turn's changed files at Stop."""
+"""The related-tests hooks: snapshot the tree when a turn starts, remind the agent to test the turn's changed files at Stop."""
 import contextlib
 from datetime import datetime, timedelta, timezone
 from importlib.machinery import SourceFileLoader
@@ -8,11 +8,9 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 import unittest.mock
 
@@ -22,8 +20,7 @@ SNAPSHOT = HOOKS / 'bin' / 'related-tests-snapshot'
 ADAPTER = HOOKS / 'adapters' / 'run.py'
 hook = SourceFileLoader('related_tests', str(HOOK)).load_module()
 
-PASSING = 'import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n'
-FAILING = PASSING.replace('assertTrue(True)', 'assertTrue(False, "boom")')
+TEST_FILE = 'import unittest\n'  # never run: the hook only names it
 SESSION = 'session-1'
 
 
@@ -62,7 +59,7 @@ def codex_patch(patch):
 
 
 class HookCase(unittest.TestCase):
-    """A repo with lib/{a,b,c,gone}.py and a failing tests/test_<name>.py for each, all committed."""
+    """A repo with lib/{a,b,c,gone}.py and a tests/test_<name>.py for each, all committed."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -79,7 +76,7 @@ class HookCase(unittest.TestCase):
             self.git(*args)
         for name in ('a', 'b', 'c', 'gone'):
             self.write(f'lib/{name}.py', f'{name.upper()} = 1\n')
-            self.write(f'tests/test_{name}.py', FAILING)
+            self.write(f'tests/test_{name}.py', TEST_FILE)
         self.git('add', '.')
         self.git('commit', '-qm', 'init')
 
@@ -121,11 +118,12 @@ class HookCase(unittest.TestCase):
         return json.loads(done.stdout) if done.stdout.strip() else None
 
     def ran_tests(self, **event):
-        """The tests a Stop ran (every test here fails, so the deny names them), or None."""
+        """The tests a Stop reminds the agent to run, or None."""
         verdict = self.run_hook(**event)
         if verdict is None:
             return None
-        return set(re.match(r'Related tests fail \((.*?)\)\.', verdict['reason']).group(1).split(', '))
+        self.assertEqual(verdict['decision'], 'deny')
+        return set(re.match(r'Run the related tests \((.*?)\)', verdict['reason']).group(1).split(', '))
 
 
 class SnapshotTests(HookCase):
@@ -135,7 +133,7 @@ class SnapshotTests(HookCase):
 
         def new_untracked_file():
             self.write('lib/fresh.py', 'F = 1\n')
-            self.write('tests/test_fresh.py', FAILING)
+            self.write('tests/test_fresh.py', TEST_FILE)
 
         def renamed_file():  # both names count; only the old one has tests
             (self.repo / 'lib/gone.py').rename(self.repo / 'lib/moved.py')
@@ -167,19 +165,14 @@ class SnapshotTests(HookCase):
         self.assertEqual(self.ran_tests(session_id=SESSION, transcript_path=transcript),
                          {'tests/test_a.py', 'tests/test_b.py'})
 
-    def test_a_finished_turn_uses_the_snapshot_up_and_a_failure_keeps_it(self):
-        self.write('tests/test_a.py', PASSING)
-        self.git('commit', '-qam', 'passing a')
+    def test_a_reminder_uses_the_snapshot_up_and_the_next_turn_starts_fresh(self):
         self.snapshot()
         self.write('lib/b.py', 'B = 2\n')
         self.assertEqual(self.ran_tests(session_id=SESSION), {'tests/test_b.py'})
-        self.assertEqual(len(self.snapshot_files()), 1)  # failing: the fix is tested at a later Stop
-
-        self.write('tests/test_b.py', PASSING)
-        self.assertIsNone(self.run_hook(session_id=SESSION))
         self.assertEqual(self.snapshot_files(), [])
-        self.write('tests/test_a.py', FAILING)  # changed between turns, not in the next one
-        self.snapshot()
+        self.assertIsNone(self.run_hook(session_id=SESSION, stop_hook_active=True))  # the agent's next Stop
+
+        self.snapshot()  # the next prompt: lib/b.py changed in an earlier turn, not this one
         self.assertIsNone(self.run_hook(session_id=SESSION))
 
     def test_a_pending_background_agent_defers_the_stop_and_keeps_the_snapshot(self):
@@ -210,38 +203,28 @@ class SnapshotTests(HookCase):
         self.assertEqual(self.ran_tests(session_id=SESSION, transcript_path=transcript),
                          {'tests/test_a.py', 'tests/test_b.py'})
 
-    def test_a_failure_blocks_one_turn_and_the_next_prompt_starts_fresh(self):
-        self.snapshot()
-        self.write('lib/a.py', 'A = 2\n')
-        self.assertEqual(self.ran_tests(session_id=SESSION), {'tests/test_a.py'})
-        self.assertTrue(json.loads(self.snapshot_files()[0].read_text())['blocked'])
-        self.assertIsNone(self.run_hook(session_id=SESSION, stop_hook_active=True))
-
-        self.snapshot()  # the next prompt; the agent gave up on the failure and edits nothing more
-        self.assertIsNone(self.run_hook(session_id=SESSION))
-
     def test_untracked_files_are_listed_not_hashed_and_still_tested(self):
         for i in range(2000):
             self.write(f'data/f{i}.txt', f'{i}\n')
         (self.repo / 'data' / 'big.bin').write_bytes(os.urandom(2_000_000))
         self.write('lib/fresh.py', 'F = 1\n')
-        self.write('tests/test_fresh.py', FAILING)
+        self.write('tests/test_fresh.py', TEST_FILE)
         objects = self.repo / '.git' / 'objects'
         before = sorted(objects.rglob('*'))
 
         self.snapshot()
         self.write('lib/fresh.py', 'F = 22\n')  # an edited untracked file
         self.write('lib/newer.py', 'N = 1\n')  # a new untracked file
-        self.write('tests/test_newer.py', FAILING)
+        self.write('tests/test_newer.py', TEST_FILE)
 
         self.assertEqual(self.ran_tests(session_id=SESSION), {'tests/test_fresh.py', 'tests/test_newer.py'})
         self.assertEqual(sorted(objects.rglob('*')), before)
 
     def test_above_the_untracked_cap_untracked_files_come_from_the_transcript(self):
         self.write('lib/x.py', 'X = 1\n')
-        self.write('tests/test_x.py', FAILING)
+        self.write('tests/test_x.py', TEST_FILE)
         self.write('lib/y.py', 'Y = 1\n')
-        self.write('tests/test_y.py', FAILING)
+        self.write('tests/test_y.py', TEST_FILE)
         transcript = self.transcript(prompt())
         event = {'cwd': str(self.repo), 'session_id': SESSION, 'transcript_path': transcript}
         stderr = io.StringIO()
@@ -254,7 +237,7 @@ class SnapshotTests(HookCase):
             self.append(transcript, tool('Write', file_path=str(self.repo / 'lib/y.py')), result(), said())
             verdict = hook.verdict(event)
 
-        self.assertIn('Related tests fail (tests/test_y.py)', verdict['reason'])
+        self.assertIn('Run the related tests (tests/test_y.py)', verdict['reason'])
         self.assertIn('exceeded the snapshot cap', stderr.getvalue())
 
     def test_snapshots_older_than_a_day_are_deleted(self):
@@ -343,7 +326,7 @@ class TranscriptFallbackTests(HookCase):
 
     def test_codex_apply_patch_move_to_names_the_new_path(self):
         (self.repo / 'lib/gone.py').rename(self.repo / 'lib/moved.py')
-        self.write('tests/test_moved.py', FAILING)
+        self.write('tests/test_moved.py', TEST_FILE)
         patch = codex_patch('*** Update File: lib/gone.py\n*** Move to: lib/moved.py\n')
 
         self.assertEqual(self.ran_tests(transcript_path=self.transcript(patch)),
@@ -360,94 +343,24 @@ class TranscriptFallbackTests(HookCase):
         self.git('stash', '-q')
         self.assertIsNone(self.run_hook())
 
-    def test_a_failing_related_test_blocks_the_stop_until_it_passes(self):
+    def test_the_reminder_names_the_runner_command_and_runs_nothing(self):
+        marker = Path(self.tmp.name) / 'ran'
+        self.write('tests/test_a.py', f'open({str(marker)!r}, "w").write("ran")\n')
         verdict = self.run_hook(transcript_path=self.transcript(prompt(), self.edit('lib/a.py')))
 
         self.assertEqual(verdict['decision'], 'deny')
-        self.assertIn('boom', verdict['reason'])
-        self.write('tests/test_a.py', PASSING)
-        self.assertIsNone(self.run_hook(transcript_path=self.transcript(prompt(), self.edit('lib/a.py'))))
+        self.assertIn(f'{sys.executable} -m unittest discover -s tests -p test_a.py', verdict['reason'])
+        self.assertFalse(marker.exists())
 
-    def test_project_toml_command_and_map_win_and_only_an_unchanged_state_is_cached(self):
-        log = Path(self.tmp.name) / 'runs.log'
+    def test_project_toml_command_and_map_win(self):
         self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\n'
                                            '[tests.map]\n"src/**/*.txt" = ["checks/{stem}.sh"]\n')
         self.write('src/deep/note.txt', 'changed\n')
-        self.write('checks/note.sh', f'echo ran >> {log}\necho custom failure\nexit 1\n')
+        self.write('checks/note.sh', 'exit 1\n')
 
-        session = self.transcript(self.edit('src/deep/note.txt'))
+        verdict = self.run_hook(transcript_path=self.transcript(self.edit('src/deep/note.txt')))
 
-        first, second = self.run_hook(transcript_path=session), self.run_hook(transcript_path=session)
-
-        self.assertIn('custom failure', first['reason'])
-        self.assertEqual(first, second)
-        self.assertEqual(log.read_text(), 'ran\n')  # the second stop read the cache
-        self.git('commit', '-q', '--allow-empty', '-m', 'new HEAD')
-        self.run_hook(transcript_path=session)
-        self.write('Gemfile.lock', 'changed dependency\n')
-        self.run_hook(transcript_path=session)
-        self.assertEqual(log.read_text(), 'ran\nran\nran\n')  # a new HEAD and a lockfile change each reran
-
-
-    def test_a_timeout_kills_the_whole_run_and_reports_unverified_without_caching(self):
-        pid_file, log = Path(self.tmp.name) / 'sleeper.pid', Path(self.tmp.name) / 'runs.log'
-        self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\ntimeout = 1\n'
-                                           '[tests.map]\n"src/*.txt" = ["checks/slow.sh"]\n')
-        self.write('src/note.txt', 'changed\n')
-        self.write('checks/slow.sh', f'echo ran >> {log}\nsleep 30 &\necho $! > {pid_file}\nwait\n')
-        session = self.transcript(self.edit('src/note.txt'))
-
-        verdict = self.run_hook(transcript_path=session)
-
-        self.assertEqual(verdict['decision'], 'deny')
-        self.assertTrue(verdict['reason'].startswith('UNVERIFIED: related tests timed out after 1 s'))
-        self.assertIn('sh checks/slow.sh', verdict['reason'])
-        pid = int(pid_file.read_text())
-        for _ in range(50):  # the orphaned sleeper is reaped by init shortly after the kill
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.1)
-        else:
-            self.fail(f'the timed-out run left pid {pid} running')
-        self.assertEqual(list(self.cache.glob('*.json')), [])
-        self.assertIsNone(self.run_hook(transcript_path=session, stop_hook_active=True))
-        self.run_hook(transcript_path=session)
-        self.assertEqual(log.read_text(), 'ran\nran\n')  # the timeout was not cached
-
-    def test_a_timeout_returns_even_when_a_daemon_left_the_group_and_holds_the_output(self):
-        pid_file = Path(self.tmp.name) / 'daemon.pid'
-        daemon = f'import os, time; os.setsid(); open({str(pid_file)!r}, "w").write(str(os.getpid())); time.sleep(20)'
-        self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\ntimeout = 1\n'
-                                           '[tests.map]\n"src/*.txt" = ["checks/server.sh"]\n')
-        self.write('src/note.txt', 'changed\n')
-        self.write('checks/server.sh', f'{shlex.quote(sys.executable)} -c {shlex.quote(daemon)} &\nsleep 30\n')
-        self.addCleanup(lambda: pid_file.exists() and os.kill(int(pid_file.read_text()), 9))
-        started = time.monotonic()
-
-        verdict = self.run_hook(transcript_path=self.transcript(self.edit('src/note.txt')))
-
-        self.assertLess(time.monotonic() - started, 10)
-        self.assertTrue(verdict['reason'].startswith('UNVERIFIED: related tests timed out'))
-
-    def test_a_cached_result_is_rerun_when_other_dirty_work_changes(self):
-        log = Path(self.tmp.name) / 'runs.log'
-        self.write('.agents/project.toml', '[tests]\ncommand = "sh {files}"\n'
-                                           '[tests.map]\n"src/*.txt" = ["checks/note.sh"]\n')
-        self.write('src/note.txt', 'changed\n')
-        self.write('checks/note.sh', f'echo ran >> {log}\nexit 1\n')
-        self.write('helper.txt', 'untracked helper\n')
-        session = self.transcript(self.edit('src/note.txt'))
-
-        self.run_hook(transcript_path=session)
-        self.run_hook(transcript_path=session)
-        self.assertEqual(log.read_text(), 'ran\n')  # the unchanged state was cached
-        self.write('helper.txt', 'untracked helper, edited in an earlier turn\n')
-        self.run_hook(transcript_path=session)
-        self.write('lib/b.py', 'B = 3\n')  # tracked and dirty, not edited this turn
-        self.run_hook(transcript_path=session)
-        self.assertEqual(log.read_text(), 'ran\nran\nran\n')
+        self.assertEqual(verdict['reason'].splitlines()[1:], ['sh checks/note.sh'])
 
 
 class ConventionTests(unittest.TestCase):

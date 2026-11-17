@@ -9,6 +9,7 @@
  */
 
 import { WebClient } from '@slack/web-api'
+import { withoutExtensionLines } from './extension-token.js'
 
 export type ThreadMessage = { ts: string; text: string; user?: string; bot: boolean }
 export type FetchThreadReplies = (channel: string, thread: string) => Promise<ThreadMessage[]>
@@ -34,10 +35,10 @@ export function slackThreadReplies(botToken: string): FetchThreadReplies {
   }
 }
 
-/** The messages before `beforeTs` (the first one the worker gets anyway), newest kept when trimmed; null when there are none. */
+/** The messages before `beforeTs` (the first one the worker gets anyway), newest kept when trimmed, without extension token or profile words; null when there are none. */
 export function renderThreadHistory(messages: readonly ThreadMessage[], beforeTs: string | null): string | null {
   const earlier = messages.filter((message) => beforeTs === null || Number(message.ts) < Number(beforeTs))
-  const lines = earlier.slice(-MAX_MESSAGES).map((message) => `- ${message.bot ? 'relay (you)' : (message.user ?? 'someone')}: ${message.text}`)
+  const lines = earlier.slice(-MAX_MESSAGES).map((message) => `- ${message.bot ? 'relay (you)' : (message.user ?? 'someone')}: ${withoutExtensionLines(message.text)}`)
   while (lines.length > 1 && lines.join('\n').length > MAX_CHARS) lines.shift()
   return lines.length === 0 ? null : lines.join('\n')
 }

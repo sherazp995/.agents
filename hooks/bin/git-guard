@@ -35,6 +35,12 @@ WRAPPER_OPTIONS_WITH_VALUE = {
 }
 
 
+# Put before a `$` the shell would expand (outside single quotes, not escaped) in the masked words, so a
+# commit message read from a variable can be told from a literal `$` that only shlex unquoted.
+EXPANSION = '\ue000'
+PARAMETER = re.compile(r'[A-Za-z_{0-9@*#?!-]')
+
+
 def parse_shell(command):
     """One lexical traversal for substitutions, quotes, comments and heredocs.
 
@@ -141,6 +147,8 @@ def parse_shell(command):
                 elif char == ')' and depth:
                     depth -= 1
                 word_start = quote is None and (char.isspace() or char in ';&|()<>')
+                if char == '$' and quote != "'" and PARAMETER.match(command, i + 1):
+                    masked.append(EXPANSION)
             append(char)
             i += 1
         if closing or heredoc or pending_heredocs or quote:
@@ -484,6 +492,8 @@ def problems_in(parsed, cwd):
     problems, directory = [], cwd
     _, masked, substitutions = parsed
     for words in segments(masked):
+        expanded = words
+        words = [word.replace(EXPANSION, '') for word in words]
         for marker, (body, original) in substitutions.items():
             if any(marker in word for word in words):
                 problems += problems_in(body, directory)
@@ -500,6 +510,10 @@ def problems_in(parsed, cwd):
             continue  # the rerun in the right directory gets the commit checks
         if subcommand == 'commit':
             problems += check_commit(directory, args)
+            raw_args = expanded[len(expanded) - len(args):]  # the same words, with their expansion marks
+            if any(EXPANSION in text for text in commit_messages(expand_long_options(raw_args))):
+                problems.append(Correction('rule 48: the commit message comes from a shell variable, so its length '
+                                           "and lines cannot be checked. Write it literally: `git commit -m '<one line>'`"))
     return problems
 
 

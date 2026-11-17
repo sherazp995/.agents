@@ -13,6 +13,11 @@ describe('renderThreadHistory', () => {
     expect(renderThreadHistory(messages, '100.3')).toBe('- relay (you): Relay test: notify works.\n- U1: Yes it works')
   })
 
+  it('leaves the extension token and profile words out of every line', () => {
+    const withToken = [{ ts: '100.1', text: 'Start PLAYWRIGHT_MCP_EXTENSION_TOKEN=k3y-AbCdEf_0123456789 PLAYWRIGHT_MCP_PROFILE_DIR_NAME="Profile 3" now', user: 'U1', bot: false }, ...messages.slice(1)]
+    expect(renderThreadHistory(withToken, '100.3')).toBe('- U1: Start now\n- U1: Yes it works')
+  })
+
   it('returns null when nothing came before', () => {
     expect(renderThreadHistory(messages, '100.1')).toBeNull()
   })

@@ -70,7 +70,7 @@ separate = ["~/.claude.json", ".claude.json"]
 memory = "native auto-memory; projects/<key>/memory link into memory/scopes, created by the SessionStart hook"
 hooks = [
   { name = "related-tests-snapshot", event = "UserPromptSubmit", kind = "command", matcher = "", timeout = 60 },
-  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 75 },
+  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "no-remote-writes", event = "PreToolUse", kind = "command", matcher = "Bash|Monitor|mcp__.*|Artifact.*" },
@@ -103,7 +103,7 @@ shared_config = [
 ]
 memory = "agents-hub memory show / add (instructions in AGENTS.md)"
 hooks = [
-  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 75 },
+  { name = "related-tests", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "done-check", event = "Stop", kind = "command", matcher = "", timeout = 30 },
   { name = "git-guard", event = "PreToolUse", kind = "command", matcher = "Bash" },
   { name = "no-remote-writes", event = "PreToolUse", kind = "command", matcher = "Bash" },

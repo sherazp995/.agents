@@ -500,9 +500,9 @@ value are dropped.
 - Relay reads the description when a worker starts and again before a new
   message joins a running worker. Remove or change the line, and the next
   message waits for a new worker started with the current description.
-- A channel without the line, a DM, or a description Relay cannot read
-  starts a default session with no token. A token the daemon itself was
-  started with is never passed on.
+- A channel without the line, or a description Relay cannot read, starts a
+  default session with no token. A token the daemon itself was started
+  with is never passed on.
 - Team members and read-only reminder tasks run with no MCP servers and
   never get the token. Attached CLI chats are not covered: they run on your
   own environment.
@@ -510,6 +510,23 @@ value are dropped.
   worker's own transcript (`~/.claude*/projects/`).
 - Anyone who can see the channel can read its description, and so the
   token. Use a private channel for it.
+
+**In a DM**, which has no description, put the lines in a message of the
+thread instead, for example
+`Start at ~/.agents PLAYWRIGHT_MCP_EXTENSION_TOKEN=<token> PLAYWRIGHT_MCP_PROFILE_DIR_NAME="Profile 3"`.
+
+- Only the workspace owner's messages set them. They count for that DM
+  thread only: a new DM thread starts without them.
+- A later message with either line replaces both values (a token alone
+  clears the profile), and the next message waits for a new worker started
+  with them. A message without the lines keeps them.
+- They live in Relay's memory: after a Relay restart, or on the other
+  laptop after a failover, the thread runs without them until you send the
+  lines again. `relay end` drops them; `stop` keeps them.
+- Relay takes the lines out of the message before storing it and out of
+  the thread history a new session reads, in every channel. A message that
+  held only the lines is stored as a short note. They stay visible in the
+  Slack DM itself and in the worker's transcript.
 
 ### Projects, personas and teams (setup page)
 

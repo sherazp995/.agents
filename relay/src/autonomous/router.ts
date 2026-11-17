@@ -15,6 +15,7 @@ import { unwrapForAudit } from '../agent/untrusted.js'
 import { IntakeFailedError, type ChatEvent, type ChatRef } from '../chat/contract.js'
 import type { Logger } from '../obs/logger.js'
 import { parseAgentPreference } from './accounts.js'
+import { takeExtensionLines, type ChannelBrowser } from './extension-token.js'
 import { pendingFiles } from './files.js'
 import { intakeMention, recordAgentPreference, type IntakeOutbox, type IntakeResult } from './store.js'
 
@@ -41,6 +42,11 @@ export type RouterDeps = {
   reminderFolder: (text: string) => string | undefined
   /** Tells the scheduler a task has new work. */
   wake: () => void
+  /** Where a DM's extension values go: only the workspace owner's are kept, for the thread's workers. */
+  extension?: {
+    isOwner(workspaceId: string, principalId: string): Promise<boolean>
+    rememberDm(threadRef: string, browser: ChannelBrowser): void
+  }
   log: Logger
   sleep?: (ms: number) => Promise<void>
 }
@@ -58,9 +64,18 @@ export async function routeAutonomousEvent(
   const message = event.ref.message
   if (message === undefined) return 'not_autonomous'
 
-  // Before anything is stored: the token value never reaches the database.
-  // Stored as the sender's words; the scheduler renders it for the worker as untrusted data.
-  const text = unwrapForAudit(event.text)
+  // Stored as the sender's words, without extension token or profile words, in every channel;
+  // the scheduler renders it for the worker as untrusted data.
+  const extension = takeExtensionLines(unwrapForAudit(event.text))
+  const text = extension.text
+  // Remembered before intake: the scheduler may start the thread's worker as soon as the task is saved.
+  if (extension.found && event.ref.channel.startsWith('D') && deps.extension !== undefined) {
+    const owner = await deps.extension.isOwner(event.workspaceId, principalId).catch((error: unknown) => {
+      deps.log.warn({ err: error }, 'could not check who sent the extension values; they are not used')
+      return false
+    })
+    if (owner) deps.extension.rememberDm(thread.threadRef, extension.browser)
+  }
   const reminder = event.origin === 'reminder'
   const chatCwd = options.chatCwd ?? (reminder ? deps.reminderFolder(text) : deps.chatFolder(text))
   if (chatCwd === undefined) {

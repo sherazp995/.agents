@@ -54,9 +54,10 @@ import { TEAM_PATH, type TeamHooks } from '../teams/types.js'
 import { ensureMemberWorktree, headOf } from '../teams/worktrees.js'
 import { buildClaudeSettings, buildCodexHookOverrides } from './worker-config.js'
 import { buildClaudeArgs, buildCodexArgs, buildWorkerEnv, claudeUserLine } from './worker.js'
-import { createExtensionTokens } from './extension-token.js'
+import { createExtensionTokens, type ChannelBrowser } from './extension-token.js'
 import { slackChannelPurpose } from '../chat/slack/channel-folder.js'
 import type { AutonomousRouting } from '../orchestrator.js'
+import { principalIsOwner } from '../tenancy/access.js'
 
 export type AutonomousConfig = NonNullable<RelayConfig['autonomous']>
 
@@ -99,10 +100,11 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   const installedCodexVersion = codexVersion(config.codex_bin).catch(() => 'unknown')
   const taskDir = (taskId: string): string => join(relayHome, 'tasks', taskId)
   const post = (action: ChatAction, executor?: PoolClient): Promise<string> => dispatcher.enqueue(action, workspaceId, executor)
-  const replyRef = async (task: AutonomousTask): Promise<ChatRef> => {
+  const threadRefOf = async (task: AutonomousTask): Promise<string> => {
     const { rows } = await pool.query<{ thread_ref: string }>('SELECT thread_ref FROM sessions WHERE id = $1', [task.sessionId])
-    return threadChatRef(rows[0]?.thread_ref ?? '')
+    return rows[0]?.thread_ref ?? ''
   }
+  const replyRef = async (task: AutonomousTask): Promise<ChatRef> => threadChatRef(await threadRefOf(task))
 
   // --- the guard ---------------------------------------------------------------
   const operationDeps = {
@@ -143,8 +145,8 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   const botToken = await options.secrets.get(SLACK_BOT_TOKEN_SECRET)
   const extensionTokens = createExtensionTokens({ readPurpose: slackChannelPurpose(botToken), log })
   const spawnPlan = async (params: SpawnPlanParams): Promise<SpawnPlan> => {
-    const extensionToken = params.subject.noMcp ? undefined : await extensionTokens.forWorker(params.context.task.id, (await replyRef(params.context.task)).channel)
-    return buildSpawnPlan({ claudeBin: config.claude_bin, codexBin: config.codex_bin, hookCommand, hookUrl: bridge.url }, params, extensionToken)
+    const browser = params.subject.noMcp ? undefined : await extensionTokens.forWorker(params.context.task.id, await threadRefOf(params.context.task))
+    return buildSpawnPlan({ claudeBin: config.claude_bin, codexBin: config.codex_bin, hookCommand, hookUrl: bridge.url }, params, browser)
   }
 
   const turnDeps: TurnRunnerDeps = {
@@ -234,7 +236,7 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
         log.warn({ taskId: task.id, reason: outcome.reason }, 'could not send into the open chat')
         return false
       },
-      extensionTokenChanged: async (task) => extensionTokens.changedSince(task.id, (await replyRef(task)).channel),
+      extensionTokenChanged: async (task) => extensionTokens.changedSince(task.id, await threadRefOf(task)),
       // Folders only move between laptops with failover on; a single laptop runs where the task says, as before.
       ...(gate.host !== null ? { placeTurn: placeTurnHere } : {}),
       settleApprovals: (_task, lease) => settleTaskOperations(pool, lease),
@@ -248,7 +250,18 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
     async route(event: ChatEvent, thread, routeOptions) {
       const repos = () => loadRepoRegistryIfPresent(options.repoRegistryPath).repos
       const result = await routeAutonomousEvent(
-        { pool, outbox: dispatcher, chatFolder: (text) => chatFolder(text, repos()), reminderFolder: (text) => textFolder(text, repos()), wake: () => scheduler.wake(), log },
+        {
+          pool,
+          outbox: dispatcher,
+          chatFolder: (text) => chatFolder(text, repos()),
+          reminderFolder: (text) => textFolder(text, repos()),
+          wake: () => scheduler.wake(),
+          extension: {
+            isOwner: (workspace, principalId) => principalIsOwner(pool, workspace, principalId),
+            rememberDm: (threadRef, browser) => extensionTokens.rememberDm(threadRef, browser),
+          },
+          log,
+        },
         event,
         thread,
         routeOptions,
@@ -261,6 +274,8 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
       const task = await loadTaskBySession(pool, sessionId)
       if (!task) return false
       await stopAutonomousTask(pool, { cleanupStopped }, task.id, gate.host)
+      // Ended for good: a DM thread's extension values go too. A pause keeps them for the next message.
+      extensionTokens.forget(task.id, await threadRefOf(task))
       return true
     },
     async pauseSession(sessionId, stoppedAt) {
@@ -296,11 +311,11 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
  * member's subject brings its worktree, brief, model and no MCP servers; the
  * task's own subject gives exactly today's single agent.
  */
-export function buildSpawnPlan(setup: { claudeBin: string; codexBin: string; hookCommand: string; hookUrl: string }, params: SpawnPlanParams, extensionToken?: string): SpawnPlan {
+export function buildSpawnPlan(setup: { claudeBin: string; codexBin: string; hookCommand: string; hookUrl: string }, params: SpawnPlanParams, browser?: ChannelBrowser): SpawnPlan {
   const { context, account, subject } = params
-  // A worker with no MCP servers never gets the channel's extension token: it could still read it from its environment.
-  const token = subject.noMcp ? undefined : extensionToken
-  const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken, ...(token !== undefined ? { extensionToken: token } : {}) })
+  // A worker with no MCP servers never gets the channel's extension token or profile: it could still read them from its environment.
+  const { token, profile } = subject.noMcp ? {} : (browser ?? {})
+  const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken, ...(token !== undefined ? { extensionToken: token } : {}), ...(profile !== undefined ? { extensionProfile: profile } : {}) })
   // A member works in its worktree; a task's chat folder is set at intake, the home folder only for one created before that.
   const cwd = turnCwd(context, subject)
   const brief = subject.brief ?? WORKER_BRIEF

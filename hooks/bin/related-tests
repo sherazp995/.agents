@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Stop hook: run only the tests related to this turn's changed files, once the turn is complete.
+"""Stop hook: remind the agent to run the tests related to this turn's changed files, once the turn
+is complete. It runs nothing itself.
 
 Reads the normalized hook event (see ../adapters/run.py), in the git repository of the event's cwd.
 
@@ -8,15 +9,14 @@ records the tracked files as a git tree object built in a throwaway copy of the 
 semantics (the real index is never touched and untracked files never become objects), the untracked,
 not-ignored files as (path, size, mtime_ns) entries (above UNTRACKED_CAP only their count), and the
 transcript's size, per session and repo under the cache root. A snapshot is taken only when none is
-pending, so a prompt queued mid-turn never resets it; a Stop that finishes the turn uses it up, and a
-snapshot a Stop blocked on is replaced by the next prompt (the agent had that turn to fix it). Snapshots
+pending, so a prompt queued mid-turn never resets it; a Stop that finishes the turn uses it up. Snapshots
 older than SNAPSHOT_MAX_AGE are deleted when a new one is taken.
 
 Stop: the turn's changed files are `git diff` between that snapshot tree and the current tree (built
 the same way), plus untracked files that are new, changed size or mtime, or are gone, so edits made
 through shell commands (sed -i, heredocs, scripts, generators) count, and so do new and deleted files
 (a deleted file has no tests of its own; tests related to it still run if they exist). Files another
-writer changes in the same working tree during the turn are tested too. Above the untracked cap,
+writer changes in the same working tree during the turn are included too. Above the untracked cap,
 untracked files count only when the transcript shows the turn edited them. While a background agent
 or workflow this session launched since the snapshot is still running (a launch whose agentId or
 Task ID, or tool use id, has no later <task-notification> with a <status>, and is under
@@ -30,29 +30,24 @@ Codex apply_patch). A prompt queued while the turn runs (after a tool call or it
 task notifications do not start a new turn there; files changed only through shell commands are not
 seen. Without a readable transcript every changed file counts.
 
-Failing tests block the stop with the output tail ({"decision": "deny", "reason": ...}) and mark the
-snapshot blocked. A timeout kills the run's whole process group and blocks the stop once with an
-UNVERIFIED reason naming the commands to run by hand; it is never cached. No changes, no related tests
-or a hook already sending the agent back (stop_hook_active) let the turn end silently. The result cache
-is keyed on the whole dirty tree (tracked files as a tree, untracked file contents), HEAD and the
-commands, so work left dirty in an earlier turn cannot reuse a stale pass.
+With related tests, the Stop is blocked once ({"decision": "deny", "reason": ...}) with the commands to
+run, and the snapshot is used up; the agent runs them and fixes any failure in its own turn. No
+changes, no related tests or a hook already sending the agent back (stop_hook_active) let the turn end
+silently.
 
 Mapping: a repo file `.agents/project.toml` wins when it has a [tests] table:
     [tests]
     command = "bin/rails test {files}"    # {files}: the matched test paths, shell-quoted
-    timeout = 60                          # seconds for the whole run
     [tests.map]
     "app/**/*.rb" = ["test/**/{stem}_test.rb"]   # {stem}: changed file name without extension
 Otherwise conventions apply (a changed test file maps to itself):
     Ruby  app/**/x.rb, lib/**/x.rb -> spec/**/x_spec.rb, test/**/x_test.rb
     JS/TS dir/x.ts -> dir/x.test.*, dir/x.spec.*, dir/__tests__/x.*
     Python a/b.py -> tests/test_b.py, a/test_b.py
-Without `command` each group runs with the repo's runner (rspec, rails test, vitest, jest,
+Without `command` each group is named with the repo's runner (rspec, rails test, vitest, jest,
 node --test, pytest or unittest).
 
-Results are cached by the hash of the commands, HEAD, the lockfiles beside each command and
-the changed and test files' contents (rule 41), in tmp/test-cache/related-tests/ of this hub, so an
-unchanged state never reruns. Snapshots live in its snapshots/ folder.
+Snapshots live in tmp/test-cache/related-tests/snapshots/ of this hub.
 """
 from datetime import datetime
 import hashlib
@@ -62,7 +57,6 @@ from pathlib import Path
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -71,8 +65,6 @@ import tomllib
 
 HUB = Path(__file__).resolve().parents[2]
 CACHE = Path(os.environ.get('RELATED_TESTS_CACHE') or HUB / 'tmp' / 'test-cache' / 'related-tests')  # git-ignored
-DEFAULT_TIMEOUT = 60  # below the registry timeout so the hook answers before the host kills it
-TAIL_LINES = 60
 
 TEST_NAME = re.compile(r'(_spec|_test)\.rb$|^test_.*\.py$|_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$')
 JS_EXT = re.compile(r'\.[cm]?[jt]sx?$')
@@ -84,14 +76,12 @@ LAUNCH_ID = re.compile(r'(?:agentId|Task ID): *([\w-]+)')  # the task id a launc
 NOTIFICATION_ID = re.compile(r'<(task-id|tool-use-id)>([^<]+)</\1>')
 PENDING_LIMIT = 45 * 60  # seconds after which a launch that never reported back stops holding the turn
 UNTRACKED_CAP = 20_000  # above this many untracked files the snapshot records only their count
-UNTRACKED_LIMIT = 1_000_000  # bytes; a larger untracked file is keyed on its size and mtime
+UNTRACKED_LIMIT = 1_000_000  # bytes; done-check keys a larger untracked file on its size and mtime
 SNAPSHOT_MAX_AGE = 24 * 3600  # seconds
 # Records that can neither edit, start or end a turn, launch or finish a background task are skipped unparsed.
 TRANSCRIPT_WORDS = ('tool_use', 'File: ', 'Move to: ', '"user', '"assistant', '_call', 'agent_message',
                     'task_complete', 'turn_aborted', 'task-notification', ' launched')
 CODEX_INJECTED = ('# AGENTS.md instructions', '<environment_context>', '<user_instructions>', '<hook_prompt')
-LOCKFILES = ('Gemfile.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock',
-             'poetry.lock', 'uv.lock', 'Pipfile.lock', 'requirements.txt', 'Cargo.lock', 'go.sum')
 
 
 def git(root, *args):
@@ -142,26 +132,13 @@ def file_stat(root, name):
 
 
 def untracked_content(root, name):
-    """An untracked file's bytes, or its size and mtime when it is large or unreadable."""
+    """An untracked file's bytes, or its size and mtime when it is large or unreadable (used by done-check)."""
     try:
         if (root / name).is_file() and (root / name).stat().st_size <= UNTRACKED_LIMIT:
             return (root / name).read_bytes()
     except OSError:
         pass
     return repr(file_stat(root, name)).encode()
-
-
-def dirty_tree_digest(root):
-    """A digest of the working tree (tracked files as a tree id, untracked file contents), or None
-    when git fails."""
-    tree, names = worktree_tree(root), untracked_names(root)
-    if tree is None or names is None:
-        return None
-    digest = hashlib.sha256(tree.encode())
-    for name in names:
-        digest.update(f'\0{name}\0'.encode(errors='replace'))
-        digest.update(untracked_content(root, name))
-    return digest.hexdigest()
 
 
 def snapshot_file(session_id, root):
@@ -197,14 +174,13 @@ def transcript_size(transcript_path):
 def snapshot(event):
     """UserPromptSubmit: record the turn-start tree, untracked files and transcript size, unless a
     snapshot for this session and repo is still pending (a prompt queued mid-turn must not move the
-    turn's start). A snapshot a Stop blocked on is replaced: the agent had its turn to fix it."""
+    turn's start)."""
     root = repo_root(event.get('cwd'))
     if not root or not event.get('session_id'):
         return
     prune_snapshots()
     file = snapshot_file(event['session_id'], root)
-    pending = load_snapshot(file)
-    if pending and not pending.get('blocked'):
+    if load_snapshot(file):
         return
     tree, names = worktree_tree(root), untracked_names(root)
     if not tree or names is None:
@@ -549,65 +525,6 @@ def runner_commands(root, tests):
     return [(Path(cwd), list(argv) + [p for p in paths if p]) for (cwd, argv), paths in groups.items()]
 
 
-def lockfiles(root, commands):
-    """Repo-relative lockfiles in the repo root and in each command's folder."""
-    folders = dict.fromkeys([root, *(Path(cwd) for cwd, _ in commands)])
-    return [str((folder / name).relative_to(root)) for folder in folders for name in LOCKFILES
-            if (folder / name).is_file()]
-
-
-def file_digest(root, paths):
-    digest = hashlib.sha256()
-    for path in sorted(set(paths)):
-        digest.update(path.encode() + b'\0')
-        try:
-            digest.update((root / path).read_bytes())
-        except OSError:
-            pass
-    return digest
-
-
-def run_all(commands, timeout):
-    """(exit code, combined output). Exit None means the run timed out."""
-    deadline, output = time.monotonic() + timeout, []
-    for cwd, argv in commands:
-        shown = argv if isinstance(argv, str) else shlex.join(argv)
-        try:
-            process = subprocess.Popen(argv, cwd=cwd, shell=isinstance(argv, str), stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True,
-                                       env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}, start_new_session=True)
-        except OSError as error:
-            output.append(f'$ {shown}\n{error}')
-            return 127, '\n'.join(output)
-        try:
-            stdout, stderr = process.communicate(timeout=max(1, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            kill_group(process)
-            return None, '\n'.join(output)
-        output.append(f'$ {shown}\n{stdout}{stderr}')
-        if process.returncode != 0:
-            return process.returncode, '\n'.join(output)
-    return 0, '\n'.join(output)
-
-
-def kill_group(process):
-    """Stop a timed-out run and everything left in its process group (spring, servers): TERM, a short
-    grace, then KILL. Waits only for the leader: a daemon that left the group may keep the pipes open."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(process.pid, sig)
-        except OSError:
-            break  # the group is gone, or only an unreaped leader is left (macOS refuses with EPERM)
-        if sig == signal.SIGTERM:
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-    process.wait()
-    process.stdout.close()
-    process.stderr.close()
-
-
 def load_config(root):
     file = root / '.agents' / 'project.toml'
     if not file.exists():
@@ -633,61 +550,33 @@ def verdict(event):
     snap = data if data and data.get('offset', 0) <= transcript_size(transcript) else None
     edits, pending = read_turn(transcript, cwd, snap.get('offset', 0) if snap else None)
     if pending:
-        return None  # a background agent or workflow is still part of this turn; a later Stop tests it
+        return None  # a background agent or workflow is still part of this turn; a later Stop covers it
     changed = snapshot_changes(root, snap, edits) if snap else None
     if changed is None:
         changed = changed_files(root)
         if edits is not None:
             changed = [path for path in changed if (root / path).resolve() in edits]
-    result, finished = test_changes(root, changed)
-    if finished and file:
-        file.unlink(missing_ok=True)  # the turn is tested; the next prompt takes a new snapshot
-    elif result and data:
-        write_snapshot(file, {**data, 'blocked': True})  # the next prompt replaces it
-    return result
+    if file:
+        file.unlink(missing_ok=True)  # the turn is done; the next prompt takes a new snapshot
+    return reminder(root, changed)
 
 
-def test_changes(root, changed):
-    """(verdict, finished): the deny verdict when related tests fail, and whether the turn's testing is
-    done (False on a failure or a timeout, so the snapshot stays and the next Stop tests again). A timeout
-    is a deny that says the tests are UNVERIFIED, and is never cached."""
+def reminder(root, changed):
+    """The deny verdict naming the commands that run the changed files' related tests, or None."""
     if not changed:
-        return None, True
+        return None
     config = load_config(root)
     tests = related_tests(root, changed, config)
     if not tests:
-        return None, True
+        return None
     if config.get('command'):
-        commands = [(root, config['command'].replace('{files}', shlex.join(tests)))]
+        commands = [config['command'].replace('{files}', shlex.join(tests))]
     else:
-        commands = runner_commands(root, tests)
-    tree = dirty_tree_digest(root)
-    digest = file_digest(root, changed + tests + lockfiles(root, commands))
-    head = (git(root, 'rev-parse', 'HEAD') or '').strip()
-    digest.update(json.dumps([str(root), head, tree, [[str(c), a] for c, a in commands]]).encode())
-    cache = CACHE / f'{digest.hexdigest()}.json'
-    try:
-        if tree is None:
-            raise OSError('no tree digest: run without the cache')
-        cached = json.loads(cache.read_text())
-        code, output = cached['exit'], cached['output']
-    except (OSError, ValueError, KeyError):
-        timeout = int(config.get('timeout', DEFAULT_TIMEOUT))
-        code, output = run_all(commands, timeout)
-        if code is None:
-            shown = '\n'.join(a if isinstance(a, str) else shlex.join(a) for _, a in commands)
-            return {'decision': 'deny',
-                    'reason': f'UNVERIFIED: related tests timed out after {timeout} s ({", ".join(tests)}). '
-                              f'Run them by hand and report their result:\n{shown}'}, False
-        if tree is not None:
-            CACHE.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({'exit': code, 'output': output, 'tests': tests}))
-    if code == 0:
-        return None, True
-    tail = '\n'.join(output.splitlines()[-TAIL_LINES:])
+        commands = [shlex.join(argv) if cwd == root else f'cd {shlex.quote(str(cwd))} && {shlex.join(argv)}'
+                    for cwd, argv in runner_commands(root, tests)]
     return {'decision': 'deny',
-            'reason': f'Related tests fail ({", ".join(tests)}). Fix them before finishing. '
-                      f'Full log: {cache}\n\n{tail}'}, False
+            'reason': f'Run the related tests ({", ".join(tests)}) before finishing, and fix any failure:\n'
+                      + '\n'.join(commands)}
 
 
 if __name__ == '__main__':

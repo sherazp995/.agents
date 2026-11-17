@@ -242,7 +242,7 @@ Use one `<form>` with two `type="submit"` buttons differentiated by `name=...`. 
 ## Tooling & Workflow
 
 ### 41. Cache test/build output instead of re-running unchanged commands
-Long-running commands (cargo test, rspec, jest, etc.) run once per code state; output goes to `tmp/test-cache/`. Future questions read the cache, not re-run. Re-run with a new cache filename if code changes. (The `related-tests` hook keeps its own cache under `~/.agents/tmp/test-cache/related-tests/`; manual logs like these stay repo-local.)
+Long-running commands (cargo test, rspec, jest, etc.) run once per code state; output goes to `tmp/test-cache/`. Future questions read the cache, not re-run. Re-run with a new cache filename if code changes.
 
 **Why:** Inspecting a cached log is instant; re-running burns minutes and context.
 
@@ -293,7 +293,7 @@ Lead with the answer (yes/no, "nothing to do"). Long replies read as unresolved 
 **Don't:** Bury "no action needed" under two paragraphs of conditionals. | **Do:** "No, nothing to do. The fix is verified."
 
 ### 48. Commit messages are one line, and nothing in the repo mentions Claude
-One subject line, no body, unless the user asks. The subject is at most 120 characters, a `[feature]` tag included. Never add AI or assistant attribution anywhere: commit messages, PR titles or descriptions, code comments or docs (no `Claude-Session:`, no `Co-Authored-By: Claude`, no "Generated with Claude Code"). Attribute to the user. (The `git-guard` hook enforces the commit-message part in Claude Code and Codex.)
+One subject line, no body, unless the user asks. The subject is at most 120 characters, a `[feature]` tag included, written literally in `-m '...'`: a message from a shell variable (`-m "$S"`) is refused, since its length cannot be checked. Never add AI or assistant attribution anywhere: commit messages, PR titles or descriptions, code comments or docs (no `Claude-Session:`, no `Co-Authored-By: Claude`, no "Generated with Claude Code"). Attribute to the user. (The `git-guard` hook enforces the commit-message part in Claude Code and Codex.)
 
 ### 57. Sound like a colleague talking, not a report
 Answer a chat question in plain sentences, the way a sharp coworker would in Slack. Match the user's length and tone. Headers, bold and bullet lists are for content that has real structure (a plan, a list of findings), never for a quick answer. No stock openers or closers ("Great question", "Let me know if"), no recap of what they asked. Never claim to be human. The `human-conversation` skill has the details and examples.

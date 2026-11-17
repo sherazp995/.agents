@@ -147,6 +147,12 @@ describe('worker arguments and env', () => {
     expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base }).PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
     expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base, extensionToken: 'channel-token-456' }).PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBe('channel-token-456')
   })
+
+  it("never passes on the daemon's own extension profile, and sets only the channel's", () => {
+    const base = { PATH: '/bin', PLAYWRIGHT_MCP_PROFILE_DIR_NAME: 'Profile 10' }
+    expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base })).not.toHaveProperty('PLAYWRIGHT_MCP_PROFILE_DIR_NAME')
+    expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base, extensionProfile: 'Profile 16' }).PLAYWRIGHT_MCP_PROFILE_DIR_NAME).toBe('Profile 16')
+  })
 })
 
 describe('runWorkerTurn', () => {

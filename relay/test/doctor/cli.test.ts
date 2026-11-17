@@ -7,7 +7,8 @@ import { RELAY_VERSION } from '../../src/version.js'
 const execFileAsync = promisify(execFile)
 
 const BUILD_TIMEOUT_MS = 120000
-const CLI_TIMEOUT_MS = 30000
+// Doctor probes each codex login live (about 15 to 25 seconds, side by side), so this leaves room for a slow one.
+const CLI_TIMEOUT_MS = 60000
 
 /**
  * Spawns the compiled CLI as a real subprocess and collects its exit code

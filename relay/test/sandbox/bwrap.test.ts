@@ -55,7 +55,8 @@ describe('buildLinuxLaunch', () => {
   })
 
   it('covers /run, /tmp and /var/tmp, and skips a hidden folder this machine does not have', () => {
-    const all = bwrapArgs(launchFor({ worktree }))
+    // As on Linux, where all three exist; macOS has no /run.
+    const all = bwrapArgs(launchFor({ worktree }, { home, pathExists: () => true }))
     expect(all.join(' ')).toContain('--tmpfs /run --tmpfs /tmp --tmpfs /var/tmp')
 
     const noVarTmp = bwrapArgs(launchFor({ worktree }, { home, pathExists: (path) => path !== '/var/tmp' }))
@@ -94,8 +95,12 @@ describe('buildLinuxLaunch', () => {
     const link = join(root, 'to-run')
     symlinkSync('/run', link)
 
-    for (const bad of ['/run', '/tmp', link]) expect(() => launchFor({ worktree: bad })).toThrow(SandboxProfileError)
-    expect(() => launchFor({ worktree, readOnlyPaths: ['/var'] })).toThrow(/contains \/var\/tmp/)
+    // On macOS, where bwrap never runs, /tmp and /var resolve under /private, so they are checked unresolved there.
+    const resolvesToItself = (path: string) => realpathSync(path) === path
+    for (const bad of ['/run', ...(resolvesToItself('/tmp') ? ['/tmp'] : []), link]) expect(() => launchFor({ worktree: bad })).toThrow(SandboxProfileError)
+    expect(unsafeBindReason('/tmp')).toMatch(/hidden from confined runs/)
+    if (resolvesToItself('/var')) expect(() => launchFor({ worktree, readOnlyPaths: ['/var'] })).toThrow(/contains \/var\/tmp/)
+    expect(unsafeBindReason('/var')).toMatch(/contains \/var\/tmp/)
   })
 
   it('refuses a path that does not exist rather than passing it through', () => {

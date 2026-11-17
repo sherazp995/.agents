@@ -10,6 +10,7 @@ import { findOrCreateSession } from '../../src/sessions/store.js'
 import { IntakeFailedError, type ChatAction, type ChatEvent } from '../../src/chat/contract.js'
 import { loadTask, loadTaskBySession, markTaskStopped, requestCancel, type IntakeOutbox } from '../../src/autonomous/store.js'
 import { findActiveSession } from '../../src/sessions/store.js'
+import { EXTENSION_ONLY_NOTE } from '../../src/autonomous/extension-token.js'
 import { REMINDER_NO_FOLDER_TEXT, routeAutonomousEvent, STILL_STOPPING_TEXT, STOPPED_TEXT, type RouterDeps } from '../../src/autonomous/router.js'
 import { attachSessionToEngineChat, ReadOnlySessionError } from '../../src/sessions/store.js'
 import { createLogger } from '../../src/obs/logger.js'
@@ -104,6 +105,85 @@ describe('autonomous router', () => {
   }
 
   const thread = (ts: string) => ({ threadRef: `slack:C1:${ts}:${randomUUID()}`, replyRef: { channel: 'C1', thread: ts } })
+
+  describe('extension token and profile words', () => {
+    const TOKEN = 'k3y-AbCdEf_0123456789'
+    const dm = (workspaceId: string, principalId: string, text: string, ts: string) => {
+      const base = event(workspaceId, principalId, text, ts)
+      return { ...base, ref: { channel: 'D1', message: ts }, platformEventId: `D1:${ts}` } as ChatEvent
+    }
+    const dmThread = (ts: string) => ({ threadRef: `D1:${ts}${randomUUID()}`, replyRef: { channel: 'D1', thread: ts } })
+    async function storedText(workspaceId: string, threadRef: string): Promise<string | undefined> {
+      const session = await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef })
+      return (await loadTaskBySession(pool, session?.id ?? ''))?.pendingEvents[0]?.text
+    }
+    function extension(owner: boolean) {
+      const remembered: { threadRef: string; browser: unknown }[] = []
+      return {
+        remembered,
+        isOwner: async () => owner,
+        rememberDm: (threadRef: string, browser: unknown) => void remembered.push({ threadRef, browser }),
+      }
+    }
+
+    it("remembers the owner's DM values before intake opens its transaction and stores the message without them", async () => {
+      const { workspaceId, requester } = await setup()
+      const where = dmThread('30.1')
+      const ext = extension(true)
+      let intakeStarted = false
+      let intakeStartedAtRemember: boolean | undefined
+      const watchedPool = Object.assign(Object.create(pool) as Pool, {
+        connect: () => {
+          intakeStarted = true
+          return pool.connect()
+        },
+      })
+      const rememberDm = (threadRef: string, browser: unknown) => {
+        intakeStartedAtRemember = intakeStarted
+        ext.rememberDm(threadRef, browser)
+      }
+
+      await routeAutonomousEvent(deps({ pool: watchedPool, extension: { isOwner: ext.isOwner, rememberDm } }), dm(workspaceId, requester, `fix it PLAYWRIGHT_MCP_EXTENSION_TOKEN=${TOKEN} PLAYWRIGHT_MCP_PROFILE_DIR_NAME="Profile 3"`, '30.1'), where)
+
+      expect(ext.remembered).toEqual([{ threadRef: where.threadRef, browser: { token: TOKEN, profile: 'Profile 3' } }])
+      expect(intakeStarted).toBe(true)
+      expect(intakeStartedAtRemember).toBe(false)
+      expect(await storedText(workspaceId, where.threadRef)).toBe('fix it')
+    })
+
+    it("strips a member's DM values and does not use them", async () => {
+      const { workspaceId, member } = await setup()
+      const where = dmThread('30.2')
+      const ext = extension(false)
+
+      await routeAutonomousEvent(deps({ extension: ext }), dm(workspaceId, member, `fix it PLAYWRIGHT_MCP_EXTENSION_TOKEN=${TOKEN}`, '30.2'), where)
+
+      expect(ext.remembered).toEqual([])
+      expect(await storedText(workspaceId, where.threadRef)).toBe('fix it')
+    })
+
+    it('strips the words from a channel message without using them, and stores a note for a message that held nothing else', async () => {
+      const { workspaceId, requester } = await setup()
+      const where = thread('30.3')
+      const ext = extension(true)
+
+      await routeAutonomousEvent(deps({ extension: ext }), event(workspaceId, requester, `PLAYWRIGHT_MCP_EXTENSION_TOKEN=${TOKEN}`, '30.3'), where)
+
+      expect(ext.remembered).toEqual([])
+      expect(await storedText(workspaceId, where.threadRef)).toBe(EXTENSION_ONLY_NOTE)
+    })
+
+    it('leaves remembered values alone for a DM message without the words', async () => {
+      const { workspaceId, requester } = await setup()
+      const where = dmThread('30.4')
+      const ext = extension(true)
+
+      await routeAutonomousEvent(deps({ extension: ext }), dm(workspaceId, requester, 'just fix it', '30.4'), where)
+
+      expect(ext.remembered).toEqual([])
+      expect(await storedText(workspaceId, where.threadRef)).toBe('just fix it')
+    })
+  })
 
   it('creates the task in the folder its first message names, queues no reaction, records the agent preference and wakes the scheduler', async () => {
     const { workspaceId, requester } = await setup()

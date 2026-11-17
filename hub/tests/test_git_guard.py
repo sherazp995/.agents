@@ -118,6 +118,15 @@ class GitGuardTests(unittest.TestCase):
             self.assertIn('rule 48: the commit subject is 121 characters, over the 120 limit',
                           self.guard(command) or '', command)
 
+    def test_a_message_from_a_shell_variable_is_denied_and_a_literal_dollar_is_not(self):
+        for command in ('git commit -m "$msg"', 'git commit -m $msg', 'git commit --message="$S"',
+                        'git commit -m"${S}"', 'git commit --amend -m "Fix: $1"', 'S=x; git commit -m "$S"'):
+            self.assertIn('the commit message comes from a shell variable', self.guard(command) or '', command)
+        for command in ("git commit -m 'Fix $PATH handling'", 'git commit -m "Costs \\$5 now"',
+                        'git commit -m "$(printf one)"', 'git commit -m "price $ and more"'):
+            self.assertIsNone(self.guard(command), command)
+        self.assertIsNone(self.guard('cd "$HOME" && git status'))
+
     def test_a_feature_tag_counts_toward_the_subject_limit(self):
         self.per_feature()
         tagged = '[billing] ' + 'a' * 110

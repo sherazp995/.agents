@@ -142,7 +142,7 @@ agent stops or is blocked unexpectedly, one of these is usually why.
 | `no-remote-writes` | before a tool call | in an autonomous run only, blocks remote writes (`git push`, `gh` writes and the like); other sessions pass untouched |
 | `spec-guard` | after a test edit | delivers the `writing-specs` skill once and reports breaks a script can find |
 | `plan-guard` | after a plan file edit, or a shell command that changed one | delivers `writing-plans` once per session and the planning steps per plan file; lists missing sections, and for a plan waiting for the user, missing steps (follow-ups, Log with the context-free review, archify diagram, rethink sections) |
-| `related-tests` | at stop | runs only the tests for files changed this turn; a failure blocks the stop once |
+| `related-tests` | at stop | reminds the agent once to run the tests for files changed this turn; runs nothing itself |
 | `done-check` | at stop, when a task says it is done | makes the agent run a fresh checker for completion, correctness, rules 59 and 60, and saved memories, ending with `DONE-CHECK: PASS` or `OPEN` |
 | `workstream-context`, `workstream-check` | start and stop | show and update shared workstreams |
 | `worktree-cleanup` | at stop, when the session created a worktree | asks once to remove each worktree it created that is clean, holds no ignored file a build cannot recreate, and whose commit is on the remote after `git fetch --prune`; the branch stays |

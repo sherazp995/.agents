@@ -80,10 +80,11 @@ registerCheck({
     }
 
     const hookCommand = `'${process.execPath}' '${hookScript}'`
-    const eligibility: CodexEligibility = {}
-    for (const account of codexAccounts) {
-      eligibility[account.key] = await probeCodexAccount({ account, codexBin: autonomous.codex_bin, version, hookCommand, codexHome: account.configDir ?? DEFAULT_CODEX_HOME })
-    }
+    // Each probe runs in its own codex home and temp folder, so they run side by side: one after another took about 15 seconds per login.
+    const probed = await Promise.all(
+      codexAccounts.map(async (account) => [account.key, await probeCodexAccount({ account, codexBin: autonomous.codex_bin, version, hookCommand, codexHome: account.configDir ?? DEFAULT_CODEX_HOME })] as const),
+    )
+    const eligibility: CodexEligibility = Object.fromEntries(probed)
     await writeCodexEligibility(resolveRelayHome().path, eligibility)
 
     const lines = Object.entries(eligibility).map(([key, entry]) => `${key}: ${entry.eligible ? 'eligible' : 'not eligible'} (${entry.detail})`)
