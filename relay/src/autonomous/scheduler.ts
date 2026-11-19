@@ -60,7 +60,7 @@ import {
   type PauseResult,
   type TaskUpdate,
 } from './store.js'
-import type { TurnInbox, TurnOutcome } from './worker.js'
+import type { HandedReply, TurnInbox, TurnOutcome } from './worker.js'
 import type { TurnSubject } from './turn-runner.js'
 import type { TeamHooks } from '../teams/types.js'
 import { splitForSlack } from '../chat/slack/split.js'
@@ -89,6 +89,8 @@ export type TurnRequestContext = {
   inbox?: TurnInbox
   /** The messages already sent into this turn, rendered, for an account fallback to repeat in its prompt; '' when none. */
   sentSoFar?: () => string
+  /** Set by a scheduler that posts each reply as soon as the worker hands it out (worker.ts `onReply`). */
+  onReply?: (reply: HandedReply & { accountKey: string }) => void
 }
 
 export type TurnResult =
@@ -381,6 +383,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // Messages sent into the running turn: read with its reply, kept pending when it fails.
     const sent: { events: AutonomousTask['pendingEvents']; files: AutonomousTask['files'] } = { events: [], files: [] }
     const feeder = feedRunningTurn(task.id, lease, inbox, consumed, sent)
+    const replies = postRepliesAsTheyCome(task, lease, { eventIds: consumed, notesRead, dueAt })
     let result: TurnResult
     try {
       result = await deps.effects.runTurn({
@@ -392,11 +395,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         recordWorker: (pid, pgid) => recordWorker(deps.pool, lease, pid, pgid, gate.host),
         inbox,
         sentSoFar: () => renderNewMessages(sent.events, sent.files),
+        onReply: replies.add,
       })
     } finally {
       await feeder.stop()
+      await replies.settled()
     }
     if (isLost()) return
+    // The turn's own messages and notes were consumed with the first reply posted; only messages sent in later are left.
+    const handed = replies.consumedInput()
 
     if (result.kind === 'no_account') {
       await post(task, result.reason)
@@ -409,7 +416,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     const outcome = result.outcome
     switch (outcome.kind) {
       case 'reply':
-        await finishTurn(task, lease, { eventIds: [...consumed, ...sent.events.map((event) => event.id)], notesRead, dueAt }, { engineSessionId: outcome.sessionId, accountKey: result.accountKey }, outcome.text)
+        await finishTurn(task, lease, { eventIds: [...consumed, ...sent.events.map((event) => event.id)], notesRead: handed ? 0 : notesRead, dueAt }, { engineSessionId: outcome.sessionId, accountKey: result.accountKey }, [...replies.unposted(), outcome.text].filter((part) => part.trim() !== '').join('\n\n'), replies.lastPostId())
         return
       case 'resume_rejected':
         // The next turn starts a fresh session with the same pending events.
@@ -420,6 +427,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         await updateTask(deps.pool, lease, { nextWakeupAt: new Date(Date.now() + RETRY_LATER_MS) })
         return
       case 'stopped':
+        // A reply the chat wrote before it was stopped, whose post failed, still reaches the thread.
+        await post(task, replies.unposted().join('\n\n'))
         return
       case 'failed':
         // The turn's own messages are dropped with the failure, so the next message starts clean instead of looping.
@@ -488,18 +497,62 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * transaction, all fenced by the lease: a crash loses none of them, and a
    * holder whose lease was taken over posts nothing.
    */
-  async function finishTurn(task: AutonomousTask, lease: Lease, input: Parameters<typeof consumeTurnInput>[2], update: TaskUpdate, text: string): Promise<void> {
+  /**
+   * Records the turn, consumes its input and posts its text in one
+   * transaction; nothing is posted without the lease. `after` chains the post
+   * behind an earlier reply of the same turn. Returns the last post's id.
+   */
+  async function finishTurn(task: AutonomousTask, lease: Lease, input: Parameters<typeof consumeTurnInput>[2], update: TaskUpdate, text: string, after?: string): Promise<string | undefined> {
     const ref = await deps.replyRef(task)
-    await inTransaction(deps.pool, async (client) => {
-      if (Object.keys(update).length > 0 && !(await updateTask(client, lease, update))) return
-      if (!(await consumeTurnInput(client, lease, input))) return
-      if (text.trim() === '') return
+    return inTransaction(deps.pool, async (client) => {
+      if (Object.keys(update).length > 0 && !(await updateTask(client, lease, update))) return undefined
+      if (!(await consumeTurnInput(client, lease, input))) return undefined
+      if (text.trim() === '') return undefined
       // A whole turn's text can pass one Slack message's limit: post it in parts, each sent only after the one before it.
-      let after: string | undefined
+      let last = after
       for (const part of splitForSlack(scrubSecrets(text))) {
-        after = await deps.post({ kind: 'post', ref, text: part, markdown: true, ...(after !== undefined ? { after } : {}) }, client)
+        last = await deps.post({ kind: 'post', ref, text: part, markdown: true, ...(last !== undefined ? { after: last } : {}) }, client)
       }
+      return last
     })
+  }
+
+  /**
+   * Posts each reply a Claude turn hands out while its process still runs
+   * (a background subagent or command keeps it alive), one after another and
+   * in order. The first one also records the session and consumes the turn's
+   * own messages and notes, so a kill or restart later neither loses the
+   * session nor answers them twice. Messages sent in mid-turn stay pending
+   * until the turn ends: the chat may not have read them yet. A reply whose
+   * post failed is kept (`unposted`) and posted with the turn's last text.
+   */
+  function postRepliesAsTheyCome(task: AutonomousTask, lease: Lease, input: Parameters<typeof consumeTurnInput>[2]): { add(reply: HandedReply & { accountKey: string }): void; settled(): Promise<void>; lastPostId(): string | undefined; consumedInput(): boolean; unposted(): string[] } {
+    let queue: Promise<void> = Promise.resolve()
+    let last: string | undefined
+    let consumedOnce = false
+    const failed: string[] = []
+    return {
+      add(reply) {
+        queue = queue
+          .then(async () => {
+            // Replies that failed earlier go first, so the thread keeps their order.
+            const text = [...failed, reply.text].join('\n\n')
+            try {
+              const posted = await finishTurn(task, lease, consumedOnce ? { eventIds: [], notesRead: 0, dueAt: input.dueAt } : input, { engineSessionId: reply.sessionId, accountKey: reply.accountKey }, text, last)
+              consumedOnce = true
+              failed.length = 0
+              if (posted !== undefined) last = posted
+            } catch (error) {
+              failed.splice(0, failed.length, text)
+              deps.log.error({ err: error, taskId: task.id }, 'could not post a reply from the running turn; it goes out with the next one')
+            }
+          })
+      },
+      settled: () => queue,
+      lastPostId: () => last,
+      consumedInput: () => consumedOnce,
+      unposted: () => [...failed],
+    }
   }
 
   return {

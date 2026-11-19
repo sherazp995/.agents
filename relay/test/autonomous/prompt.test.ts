@@ -3,6 +3,14 @@ import { buildTurnPrompt, renderNewMessages, WORKER_BRIEF } from '../../src/auto
 import type { TaskEvent, TaskFile } from '../../src/autonomous/store.js'
 
 describe('WORKER_BRIEF', () => {
+  it('has Claude hand long work to a background subagent and stay free for the thread, and tells Codex the limit', () => {
+    expect(WORKER_BRIEF).toContain('On Claude, hand work that takes more than about a minute to a background subagent')
+    expect(WORKER_BRIEF).toContain('Answer new messages yourself, straight away, without waiting for the subagent.')
+    expect(WORKER_BRIEF).toContain("When a subagent's notification arrives, check its result and write the answer as your reply.")
+    expect(WORKER_BRIEF).toContain('A background command must end by itself')
+    expect(WORKER_BRIEF).toContain('On Codex, messages reach you only after your turn ends')
+  })
+
   it('tells the worker to write short standard Markdown with no report labels', () => {
     expect(WORKER_BRIEF).toContain('the way the human-conversation skill says')
     expect(WORKER_BRIEF).toContain('Write standard Markdown; Relay posts it as a Slack markdown block: **bold**')
@@ -44,7 +52,8 @@ describe('WORKER_BRIEF', () => {
   })
 
   it('says every text of the turn is the report and Slack sees nothing else, and to ack long work in its own words but answer a quick question directly', () => {
-    expect(WORKER_BRIEF).toContain('Every text you write this turn is posted in the thread as the report')
+    expect(WORKER_BRIEF).toContain('Every text you write is posted in the thread, all of it in order: on Claude each reply as soon as you finish it, on Codex when the turn ends.')
+    expect(WORKER_BRIEF).not.toContain('posted in the thread as the report when the turn ends')
     expect(WORKER_BRIEF).toContain('Slack sees nothing else')
     expect(WORKER_BRIEF).toContain('Never point to a message the thread may not show')
     expect(WORKER_BRIEF).toContain('If a say or edit command exits non-zero, that text was not posted')

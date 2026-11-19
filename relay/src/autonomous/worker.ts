@@ -8,6 +8,13 @@
  * in the terminal; stdin closes at the first result with no background task
  * still running (a task's notification starts another result). Codex has no input
  * while a turn runs, so its messages wait for the next turn.
+ *
+ * With `onReply`, a Claude turn hands each result's text out as soon as it
+ * arrives, so a chat that leaves background work running (a subagent, a
+ * long command) is heard at once instead of when the process exits. The time
+ * limit then counts from the last result, and once anything was handed out
+ * the turn always ends as a reply: what is left to post, plus a short note
+ * when it ended by the limit or an error.
  */
 
 import { engineChildEnv, parseFinalResult, readsAsResumeRejection } from '../live/direct-session.js'
@@ -83,6 +90,9 @@ export type TurnOutcome =
   | { kind: 'stopped' }
   | { kind: 'failed'; reason: string; stderrTail: string }
 
+/** One finished reply, handed out while the turn's process may still run. */
+export type HandedReply = { text: string; sessionId: string }
+
 /** How the scheduler reaches a running turn: `send` is set while the turn takes input, and null otherwise. */
 export type TurnInbox = { send: ((text: string) => boolean) | null }
 
@@ -95,6 +105,8 @@ export type TurnRequest = {
   /** The CLI's first stdin text; stdin then stays open for `inbox` until a result with no background task running. */
   input?: string
   inbox?: TurnInbox
+  /** Claude only: each result's text as it arrives; the limit then counts from the last result. Never throws into the worker. */
+  onReply?: (reply: HandedReply) => void
   timeoutMs: number
   signal?: AbortSignal
   /** Fenced write of the pid before the gate opens; false refuses the start. */
@@ -106,7 +118,20 @@ const STDERR_TAIL = 800
 /** Spawns one turn and reads its outcome. Never throws for an ordinary CLI failure. */
 export async function runWorkerTurn(request: TurnRequest): Promise<TurnOutcome> {
   let closeInput = (): void => undefined
-  const watch = request.account.client === 'claude' ? claudeWatcher(() => closeInput()) : codexWatcher()
+  let restartTimer = (): void => undefined
+  const onReply = request.onReply
+  const handOut = onReply
+    ? (reply: HandedReply): void => {
+        restartTimer()
+        if (reply.text.trim() === '') return
+        try {
+          onReply(reply)
+        } catch {
+          // The caller logs its own failures; a throw must not end the turn.
+        }
+      }
+    : undefined
+  const watch = request.account.client === 'claude' ? claudeWatcher(() => closeInput(), handOut) : codexWatcher()
   let result: GatedSpawnResult
   try {
     const child = spawnGated({
@@ -120,6 +145,7 @@ export async function runWorkerTurn(request: TurnRequest): Promise<TurnOutcome> 
       beforeStart: request.recordWorker,
       onStdoutLine: (line) => watch.onLine(line),
     })
+    restartTimer = () => child.restartTimer()
     const inbox = request.inbox
     if (request.input !== undefined) {
       closeInput = () => {
@@ -139,6 +165,14 @@ export async function runWorkerTurn(request: TurnRequest): Promise<TurnOutcome> 
 
   const stderrTail = result.stderr.trim().slice(-STDERR_TAIL)
   if (!result.started) return { kind: 'not_started' }
+  // Replies are already in the thread: the turn ends as a reply whatever followed, never as a blocked account or a rejected resume.
+  if (watch.handedOut()) {
+    if (result.killed && !result.timedOut) return { kind: 'stopped' }
+    const finished = watch.finish(result, stderrTail)
+    if (!result.timedOut || finished.kind !== 'reply') return finished
+    const note = `Stopped this chat's leftover background tasks after ${describeLimit(request.timeoutMs)} with no reply.`
+    return { ...finished, text: finished.text === '' ? note : `${finished.text}\n\n${note}` }
+  }
   if (result.timedOut) return { kind: 'failed', reason: 'the turn ran past its time limit and was stopped', stderrTail }
   if (result.killed) return { kind: 'stopped' }
   const finished = watch.finish(result, stderrTail)
@@ -152,8 +186,19 @@ export async function runWorkerTurn(request: TurnRequest): Promise<TurnOutcome> 
   return finished
 }
 
+/** "3 hours", "30 minutes": the time limit in words. */
+function describeLimit(ms: number): string {
+  if (ms < 60_000) return Math.round(ms / 1000) === 1 ? '1 second' : `${Math.round(ms / 1000)} seconds`
+  const hours = ms / 3_600_000
+  if (Number.isInteger(hours)) return hours === 1 ? '1 hour' : `${hours} hours`
+  const minutes = Math.round(ms / 60_000)
+  return minutes === 1 ? '1 minute' : `${minutes} minutes`
+}
+
 type Watcher = {
   onLine(line: string): void
+  /** True once any reply was handed out mid-turn. */
+  handedOut(): boolean
   finish(result: GatedSpawnResult, stderrTail: string): TurnOutcome
 }
 
@@ -176,14 +221,22 @@ function parseLine(line: string): Record<string, unknown> | undefined {
  * still reach it), and a message already in the pipe can start one more
  * result, whose text is collected the same way. A turn with no assistant
  * text falls back to joining the results' text.
+ *
+ * With `onReply`, each successful result hands out the texts written since
+ * the last one (or that result's own text when there were none), and
+ * `finish` returns only what was not handed out yet.
  */
-function claudeWatcher(onResult: () => void): Watcher {
+function claudeWatcher(onResult: () => void, onReply?: (reply: HandedReply) => void): Watcher {
   const texts: string[] = []
   const resultTexts: string[] = []
   // Background tasks the chat still runs, from the CLI's latest `background_tasks_changed` event.
   // A result while any run is not the end: each one that finishes starts another result.
   let backgroundTasks = 0
+  // texts[0..handed) are already out; the session of the last result handed out.
+  let handed = 0
+  let handedSession: string | undefined
   return {
+    handedOut: () => handedSession !== undefined,
     onLine(line) {
       const event = parseLine(line)
       if (event?.type === 'assistant' && (event.parent_tool_use_id === null || event.parent_tool_use_id === undefined)) {
@@ -196,10 +249,28 @@ function claudeWatcher(onResult: () => void): Watcher {
       }
       if (event?.type !== 'result') return
       if (typeof event.result === 'string' && event.is_error !== true && event.result.trim() !== '') resultTexts.push(event.result)
+      if (onReply && event.is_error !== true && typeof event.session_id === 'string') {
+        const fresh = texts.slice(handed)
+        handed = texts.length
+        const text = fresh.length > 0 ? fresh.join('\n\n') : typeof event.result === 'string' ? event.result.trim() : ''
+        // Only a result with text counts as handed out; an empty one only restarts the time limit.
+        if (text !== '') handedSession = event.session_id
+        onReply({ text, sessionId: event.session_id })
+      }
       if (backgroundTasks === 0) onResult()
     },
     finish(result, stderrTail) {
       const final = parseFinalResult(result.stdout)
+      if (handedSession !== undefined) {
+        const rest = texts.slice(handed).join('\n\n')
+        const error =
+          final?.isError === true
+            ? `The chat then stopped with an error: ${final.text || (final.errors ?? []).join('; ') || 'claude reported an error'}`
+            : final?.sessionId === undefined || (result.code !== 0 && !result.timedOut)
+              ? `The chat's process then ended unexpectedly (exit ${result.code ?? 'by signal'}); any background work it ran is gone.`
+              : ''
+        return { kind: 'reply', text: [rest, error].filter((part) => part !== '').join('\n\n'), sessionId: final?.sessionId ?? handedSession }
+      }
       if (final?.sessionId === undefined || final.text === undefined) {
         return { kind: 'failed', reason: `claude exited ${result.code ?? 'abnormally'} with no result`, stderrTail }
       }
@@ -228,6 +299,7 @@ function codexWatcher(): Watcher {
   let completed = false
   let error: string | undefined
   return {
+    handedOut: () => false,
     onLine(line) {
       const event = parseLine(line)
       if (!event) return

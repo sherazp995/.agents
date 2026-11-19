@@ -21,7 +21,7 @@ import type { ChatSync, RestoreResult } from '../failover/chats.js'
 import { createRun, finishRun, startRun } from '../runs/store.js'
 import { chooseAccount, COOLDOWN_MS, orderForSubject, type Account, type AccountClient, type CooldownStore } from './accounts.js'
 import type { TurnRequestContext, TurnResult } from './scheduler.js'
-import { runWorkerTurn, type TurnOutcome, type TurnRequest } from './worker.js'
+import { runWorkerTurn, type HandedReply, type TurnOutcome, type TurnRequest } from './worker.js'
 
 /** codex's own default home, used when the chosen codex account is the default login. */
 export const DEFAULT_CODEX_HOME = join(homedir(), '.codex')
@@ -202,6 +202,8 @@ async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, sub
   })
   let outcome: TurnOutcome
   let plan: SpawnPlan | undefined
+  // Chat saves for the other laptop, one after another: one per reply handed out mid-turn, then the end-of-turn one.
+  let saves: Promise<void> = Promise.resolve()
   try {
     await startRun(deps.pool, run.id)
     const restored = await restoreChat(deps, context, subject, account)
@@ -210,6 +212,12 @@ async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, sub
     // A turn that cannot resume its own session needs the thread so far: a fresh session, or the taken-over chat after another session's turns.
     const fresh = resume !== subject.engineSessionId && context.freshPrompt ? { ...context, prompt: await context.freshPrompt() } : context
     plan = await deps.spawnPlan({ context: fresh, subject, account, hookToken: token, resume })
+    const cwd = plan.cwd
+    // A reply already in the thread is saved for the other laptop too, so a long-running chat is not hours stale there.
+    const handOutReply = (post: NonNullable<TurnRequestContext['onReply']>) => (reply: HandedReply): void => {
+      post({ ...reply, accountKey: account.key })
+      saves = saves.then(() => saveChat(deps, context, subject, account, reply.sessionId, cwd))
+    }
     outcome = await (deps.runTurn ?? runWorkerTurn)({
       account,
       bin: plan.bin,
@@ -218,6 +226,7 @@ async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, sub
       env: plan.env,
       ...(plan.input !== undefined ? { input: plan.input } : {}),
       ...(context.inbox ? { inbox: context.inbox } : {}),
+      ...(context.onReply ? { onReply: handOutReply(context.onReply) } : {}),
       timeoutMs: deps.turnTimeoutMs,
       signal: context.signal,
       recordWorker: context.recordWorker,
@@ -229,6 +238,7 @@ async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, sub
     deps.revokeToken(token)
     await plan?.dispose?.()
   }
+  await saves
   if (outcome.kind === 'reply' && plan !== undefined) await saveChat(deps, context, subject, account, outcome.sessionId, plan.cwd)
   const runOutcome = outcome.kind === 'reply' ? 'succeed' : outcome.kind === 'stopped' || outcome.kind === 'not_started' ? 'cancel' : 'fail'
   await finishRun(deps.pool, run.id, runOutcome).catch(() => undefined)

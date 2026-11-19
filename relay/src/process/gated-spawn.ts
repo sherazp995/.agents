@@ -73,6 +73,8 @@ export type GatedProcess = {
   write(text: string): boolean
   /** Closes the CLI's stdin. Safe to call more than once. */
   endInput(): void
+  /** Starts `timeoutMs` over from now, so the limit counts from the caller's last sign of progress. A no-op once the CLI exited. */
+  restartTimer(): void
   done: Promise<GatedSpawnResult>
 }
 
@@ -123,6 +125,7 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
   let started = false
   let inputOpen = false
   let rekill: NodeJS.Timeout | undefined
+  let restartTimer = (): void => undefined
   // A process forked while the group is being signalled can miss that
   // signal, so kill() keeps re-signalling until the group is empty.
   const kill = (): void => {
@@ -156,10 +159,18 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
       kill()
       return false
     }
-    const timer = setTimeout(() => {
-      timedOut = true
-      kill()
-    }, options.timeoutMs)
+    const startTimer = (): NodeJS.Timeout =>
+      setTimeout(() => {
+        timedOut = true
+        kill()
+      }, options.timeoutMs)
+    let timer = startTimer()
+    let exited = false
+    restartTimer = () => {
+      if (exited || timedOut) return
+      clearTimeout(timer)
+      timer = startTimer()
+    }
     const onAbort = (): void => kill()
     options.signal?.addEventListener('abort', onAbort, { once: true })
 
@@ -198,6 +209,7 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
       reject(error)
     })
     child.on('close', (code) => {
+      exited = true
       clearTimeout(timer)
       inputOpen = false
       if (!processGroupAlive(pgid)) {
@@ -241,5 +253,5 @@ export function spawnGated(options: GatedSpawnOptions): GatedProcess {
     child.stdin.end()
   }
 
-  return { pid, pgid, kill, write, endInput, done }
+  return { pid, pgid, kill, write, endInput, restartTimer: () => restartTimer(), done }
 }

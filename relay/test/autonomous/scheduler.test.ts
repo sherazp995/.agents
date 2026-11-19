@@ -172,6 +172,96 @@ describe('autonomous scheduler', () => {
     expect(h.markdown.every(Boolean)).toBe(true)
   })
 
+  it('posts each reply the running turn hands out before the turn ends, in order, and records the session with the first', async () => {
+    const { workspaceId, task } = await newTask('ping the subagent')
+    const midTurn: (AutonomousTask | null | undefined)[] = []
+    const h = harness([
+      async (context) => {
+        context.onReply?.({ text: 'Started a subagent.', sessionId: 'sess-1', accountKey: 'claude' })
+        const deadline = Date.now() + 3000
+        while (h.posts.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+        midTurn.push(await loadTask(pool, task.id))
+        context.onReply?.({ text: 'Subagent says PONG.', sessionId: 'sess-1', accountKey: 'claude' })
+        return reply('')
+      },
+    ])
+
+    await scheduler(workspaceId, h).tick()
+
+    expect(midTurn[0]).toMatchObject({ pendingEvents: [], engineSessionId: 'sess-1', accountKey: 'claude' })
+    expect(h.posts).toEqual(['Started a subagent.', 'Subagent says PONG.'])
+    expect(h.after).toEqual([undefined, 'dispatch-1'])
+    expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [], nextWakeupAt: null, engineSessionId: 'sess-1' })
+  })
+
+  it("consumes the turn's notes once, so a note added after a mid-turn reply stays for the next turn", async () => {
+    const { workspaceId, task } = await newTask()
+    const h = harness([
+      async (context) => {
+        context.onReply?.({ text: 'On it.', sessionId: 'sess-1', accountKey: 'claude' })
+        const deadline = Date.now() + 3000
+        while (h.posts.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+        await addNote(pool, context.lease, 'Approved. Run it again now: git push')
+        return reply('Done.')
+      },
+    ], {
+      settleApprovals: async (_task, lease) => {
+        if (h.turns.length === 0) await addNote(pool, lease, 'Denied: git push --force')
+      },
+    })
+
+    await scheduler(workspaceId, h).tick()
+
+    expect(h.turns[0]?.prompt).toContain('Denied: git push --force')
+    expect(h.posts).toEqual(['On it.', 'Done.'])
+    expect((await loadTask(pool, task.id))?.pendingNotes).toEqual(['Approved. Run it again now: git push'])
+  })
+
+  it('keeps a mid-turn reply whose post failed and posts it, in order, with the next one', async () => {
+    const { workspaceId } = await newTask()
+    const h = harness([
+      async (context) => {
+        context.onReply?.({ text: 'First.', sessionId: 'sess-1', accountKey: 'claude' })
+        context.onReply?.({ text: 'Second.', sessionId: 'sess-1', accountKey: 'claude' })
+        return reply('')
+      },
+    ])
+    const deps = schedulerDeps(workspaceId, h)
+    const post = deps.post
+    let calls = 0
+    deps.post = async (action, executor) => {
+      calls += 1
+      if (calls === 1) throw new Error('outbox down')
+      return post(action, executor)
+    }
+
+    await createScheduler(deps).tick()
+
+    expect(h.posts).toEqual(['First.\n\nSecond.'])
+  })
+
+  it('still posts a kept mid-turn reply when the turn is then stopped', async () => {
+    const { workspaceId } = await newTask()
+    const h = harness([
+      async (context) => {
+        context.onReply?.({ text: 'Half done.', sessionId: 'sess-1', accountKey: 'claude' })
+        return outcome({ kind: 'stopped' })
+      },
+    ])
+    const deps = schedulerDeps(workspaceId, h)
+    const post = deps.post
+    let calls = 0
+    deps.post = async (action, executor) => {
+      calls += 1
+      if (calls === 1) throw new Error('outbox down')
+      return post(action, executor)
+    }
+
+    await createScheduler(deps).tick()
+
+    expect(h.posts).toEqual(['Half done.'])
+  })
+
   it('sends the new message into an open terminal chat and starts no headless turn', async () => {
     const { workspaceId, task } = await newTask('check the deploy')
     const h = harness([async () => reply('should not run')])

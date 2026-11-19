@@ -240,6 +240,82 @@ describe('runWorkerTurn', () => {
     expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi') }))).toEqual({ kind: 'reply', text: 'Starting.\n\nfirst answer\n\nsecond answer', sessionId: 's1' })
   })
 
+  describe('with onReply', () => {
+    const tasks = (count: number) => `echo '${JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', tasks: Array.from({ length: count }, (_, i) => ({ task_id: `t${i}` })) })}'`
+
+    it('hands each reply out as its result arrives while a background task runs, and repeats none at the end', async () => {
+      const dir = tempDir()
+      const firstResult = join(dir, 'first-result')
+      const bin = script(dir, 'claude', [
+        'read -r a',
+        assistant([text('Started the subagent.')]),
+        tasks(1),
+        claudeResult('Started the subagent.'),
+        `touch ${firstResult}`,
+        'read -r b',
+        assistant([text('4')]),
+        claudeResult('4'),
+        tasks(0),
+        assistant([text('Subagent says PONG.')]),
+        claudeResult('Subagent says PONG.'),
+      ].join('; '))
+      const inbox: TurnInbox = { send: null }
+      const replies: string[] = []
+
+      const pending = runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('go'), inbox, onReply: (reply) => replies.push(reply.text) }))
+      await waitFor(() => existsSync(firstResult) && replies.length === 1)
+      expect(replies).toEqual(['Started the subagent.'])
+      expect(inbox.send?.('what is 2+2?')).toBe(true)
+
+      expect(await pending).toEqual({ kind: 'reply', text: '', sessionId: 's1' })
+      expect(replies).toEqual(['Started the subagent.', '4', 'Subagent says PONG.'])
+    })
+
+    it("hands out a result's own text when no assistant text came before it", async () => {
+      const bin = script(tempDir(), 'claude', `read -r a; ${claudeResult('first')}; ${claudeResult('second')}`)
+      const replies: string[] = []
+      expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi'), onReply: (reply) => replies.push(reply.text) }))).toEqual({ kind: 'reply', text: '', sessionId: 's1' })
+      expect(replies).toEqual(['first', 'second'])
+    })
+
+    it('counts the time limit from the last reply and keeps the replies when it stops the leftovers', async () => {
+      const bin = script(tempDir(), 'claude', [claudeResult('one'), 'sleep 0.7', claudeResult('two'), 'sleep 0.7', claudeResult('three'), 'sleep 30'].join('; '))
+      const replies: string[] = []
+      const start = Date.now()
+      const outcome = await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi'), timeoutMs: 1000, onReply: (reply) => replies.push(reply.text) }))
+      // Without the restart the limit would kill it at 1s, before "three" at 1.4s; with it, it dies 1s after "three".
+      expect(Date.now() - start).toBeGreaterThanOrEqual(2300)
+      expect(replies).toEqual(['one', 'two', 'three'])
+      expect(outcome).toEqual({ kind: 'reply', text: "Stopped this chat's leftover background tasks after 1 second with no reply.", sessionId: 's1' })
+    })
+
+    it('ends as a reply with a note, not a failure, when an error result follows a reply', async () => {
+      const error = `echo '${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'API Error: overloaded' })}'`
+      const bin = script(tempDir(), 'claude', `read -r a; ${claudeResult('done part one')}; ${error}`)
+      const replies: string[] = []
+      expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi'), onReply: (reply) => replies.push(reply.text) }))).toEqual({ kind: 'reply', text: 'The chat then stopped with an error: API Error: overloaded', sessionId: 's1' })
+      expect(replies).toEqual(['done part one'])
+    })
+  })
+
+  it('reports a chat that died after a reply as a reply with a note, and an empty result as no reply at all', async () => {
+    const died = script(tempDir(), 'claude', `read -r a; ${claudeResult('half done')}; exit 3`)
+    const replies: string[] = []
+    expect(await runWorkerTurn(turn({ bin: died, account: CLAUDE, input: claudeUserLine('hi'), onReply: (reply) => replies.push(reply.text) }))).toEqual({
+      kind: 'reply',
+      text: "The chat's process then ended unexpectedly (exit 3); any background work it ran is gone.",
+      sessionId: 's1',
+    })
+    expect(replies).toEqual(['half done'])
+
+    // An empty result hands nothing out, so a later error still fails the turn as it does today.
+    const error = `echo '${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'API Error: overloaded' })}'`
+    const emptyThenError = script(tempDir(), 'claude', `read -r a; ${claudeResult('')}; ${error}`)
+    const none: string[] = []
+    expect((await runWorkerTurn(turn({ bin: emptyThenError, account: CLAUDE, input: claudeUserLine('hi'), onReply: (reply) => none.push(reply.text) }))).kind).toBe('failed')
+    expect(none).toEqual([])
+  })
+
   it('classifies a usage-limit exit as a blocked account', async () => {
     const bin = script(tempDir(), 'claude', 'echo "Claude usage limit reached" >&2; exit 1')
     expect(await runWorkerTurn(turn({ bin, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'usage_limit' })

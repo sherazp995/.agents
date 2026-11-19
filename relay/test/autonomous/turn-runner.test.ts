@@ -165,6 +165,30 @@ describe('turn runner', () => {
     expect(plans.map((plan) => [plan.resume, plan.context.prompt])).toEqual([['chat-1', 'thread + new'], [undefined, 'thread + new']])
   })
 
+  it("passes each mid-turn reply up with its login, and saves the chat for the other laptop after each one and at the end, in order", async () => {
+    const ctx = await context()
+    const posted: unknown[] = []
+    const saved: string[] = []
+    const { d } = deps(
+      [
+        (request) => {
+          request.onReply?.({ text: 'Started a subagent.', sessionId: 's-mid' })
+          return REPLY
+        },
+      ],
+      {
+        readAccounts: async () => [CLAUDE],
+        projectsDir: async () => '/projects',
+        chats: { restore: async () => 'none', save: async (place) => void saved.push(place.sessionId) },
+      },
+    )
+
+    await runTurnOnPool(d, { ...ctx, onReply: (reply) => posted.push(reply) })
+
+    expect(posted).toEqual([{ text: 'Started a subagent.', sessionId: 's-mid', accountKey: 'claude' }])
+    expect(saved).toEqual(['s-mid', REPLY.kind === 'reply' ? REPLY.sessionId : ''])
+  })
+
   it('closes the run when the spawn throws', async () => {
     const ctx = await context()
     const { d } = deps([], { spawnPlan: async () => { throw new Error('no settings file') } })
