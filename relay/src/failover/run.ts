@@ -37,6 +37,16 @@ export type FailoverTimings = {
 
 export const DEFAULT_FAILOVER_TIMINGS: FailoverTimings = { pollMs: 15_000, renewMs: 15_000, trustMs: 40_000, ttlSeconds: LEASE_TTL_SECONDS }
 
+/**
+ * The default wait between polls. The timer stays referenced on purpose: a
+ * standby laptop holds no Slack socket and its idle database clients close,
+ * so an unreferenced timer would let Node exit cleanly and launchd would not
+ * restart it. Shutdown is not held up, since every wait races the stop signal.
+ */
+export function standbySleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 /** What stepping down needs from the running daemon, attached once it has started. */
 export type StepDownHooks = {
   /** Closes the Slack connection so Slack sends events to the laptop that answers. */
@@ -85,7 +95,7 @@ export class FailoverRunner implements FailoverGate {
     this.#log = options.log
     this.#timings = { ...DEFAULT_FAILOVER_TIMINGS, ...options.timings }
     this.#now = options.now ?? Date.now
-    this.#sleepFor = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()))
+    this.#sleepFor = options.sleep ?? standbySleep
     this.#stopSignal = new Promise((resolve) => (this.#signalStop = resolve))
     this.#hooksReady = new Promise((resolve) => (this.#hooksAttached = resolve))
   }

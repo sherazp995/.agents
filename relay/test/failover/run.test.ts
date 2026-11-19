@@ -3,7 +3,7 @@ import type { Pool } from 'pg'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { applyMigrations, newestMigrationName } from '../../src/db/migrate.js'
 import { claimLease, registerHost } from '../../src/failover/lease.js'
-import { FailoverRunner, type StepDownHooks } from '../../src/failover/run.js'
+import { FailoverRunner, standbySleep, type StepDownHooks } from '../../src/failover/run.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { startWithFailover } from '../../scripts/relay-orchestrator.js'
 import { getTestDatabaseUrl } from '../support/database.js'
@@ -176,5 +176,24 @@ describe('failover runner', () => {
     })
     expect(started).toBe('handle')
     expect(order).toEqual(['migrateAll', 'migrateAsHolder', 'start'])
+  })
+})
+
+describe('standby sleep', () => {
+  it('keeps its timer referenced, so a standby daemon with nothing else open does not exit', async () => {
+    const timers: NodeJS.Timeout[] = []
+    const real = globalThis.setTimeout
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      const timer = real(fn, ms)
+      timers.push(timer)
+      return timer
+    }) as typeof setTimeout)
+    try {
+      await standbySleep(1)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(timers).toHaveLength(1)
+    expect(timers[0]!.hasRef()).toBe(true)
   })
 })
