@@ -34,7 +34,7 @@
  * secrets are unaffected; it exists only as a floor against a pathological
  * short value swallowing unrelated output.
  */
-const MINIMUM_SECRET_LENGTH = 8
+export const MINIMUM_SECRET_LENGTH = 8
 
 /**
  * Fixed replacement text. Deliberately carries no length or prefix hint of

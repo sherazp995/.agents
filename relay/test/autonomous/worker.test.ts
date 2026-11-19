@@ -142,16 +142,15 @@ describe('worker arguments and env', () => {
     expect(env).toMatchObject({ PATH: '/bin', SSH_AUTH_SOCK: '/tmp/agent', CODEX_HOME: '/x/.codex1', RELAY_HOOK_URL: 'http://127.0.0.1:1/hook', RELAY_HOOK_TOKEN: 'tok' })
   })
 
-  it("never passes on the daemon's own extension token, and sets only the channel's", () => {
-    const base = { PATH: '/bin', PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'daemon-token-123' }
-    expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base }).PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
-    expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base, extensionToken: 'channel-token-456' }).PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBe('channel-token-456')
+  it("puts the session's envs over the daemon's own, and the account env and hook over them", () => {
+    const base = { PATH: '/bin', PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'daemon-token-123', KEEP: 'daemon' }
+    const env = buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base, env: { PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'stored-token-456', CODEX_HOME: '/stored', RELAY_HOOK_URL: 'http://stored' } })
+    expect(env).toMatchObject({ KEEP: 'daemon', PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'stored-token-456', CODEX_HOME: '/x/.codex1', RELAY_HOOK_URL: 'http://h' })
   })
 
-  it("never passes on the daemon's own extension profile, and sets only the channel's", () => {
+  it("keeps the daemon's own value for a name no session env sets", () => {
     const base = { PATH: '/bin', PLAYWRIGHT_MCP_PROFILE_DIR_NAME: 'Profile 10' }
-    expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base })).not.toHaveProperty('PLAYWRIGHT_MCP_PROFILE_DIR_NAME')
-    expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base, extensionProfile: 'Profile 16' }).PLAYWRIGHT_MCP_PROFILE_DIR_NAME).toBe('Profile 16')
+    expect(buildWorkerEnv({ account: CODEX, hookUrl: 'http://h', hookToken: 'tok', base }).PLAYWRIGHT_MCP_PROFILE_DIR_NAME).toBe('Profile 10')
   })
 })
 

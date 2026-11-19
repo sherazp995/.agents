@@ -196,6 +196,15 @@ describe('turn runner', () => {
     expect(await runStates(ctx.task.id)).toEqual(['failed'])
   })
 
+  it('starts nothing and cancels the run when a stored env cannot be read, naming the env', async () => {
+    const ctx = await context()
+    const { d, requests } = deps([], { spawnPlan: async () => ({ kind: 'env_unreadable', reason: 'This laptop cannot read the env TOKEN (default).' }) })
+    const result = await runTurnOnPool(d, ctx)
+    expect(result).toMatchObject({ kind: 'outcome', outcome: { kind: 'not_started', envUnreadable: 'This laptop cannot read the env TOKEN (default).' } })
+    expect(requests).toEqual([])
+    expect(await runStates(ctx.task.id)).toEqual(['cancelled'])
+  })
+
   it('a subject bound to one client never picks the other client, waits when its logins are out, and carries its assignment in the token', async () => {
     const ctx = await context()
     const contexts: unknown[] = []

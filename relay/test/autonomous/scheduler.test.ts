@@ -324,7 +324,12 @@ describe('autonomous scheduler', () => {
     expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [], nextWakeupAt: null })
   })
 
-  it('holds a message for the next worker when the channel token changed since the running one started', async () => {
+  it.each([
+    ['changed since the running one started', async () => true],
+    ['cannot be checked', async (): Promise<boolean> => {
+      throw new Error('database is down')
+    }],
+  ])('holds a message for the next worker when its env %s', async (_case, envChanged) => {
     const { workspaceId, task, say } = await newTask('build the report')
     const sent: string[] = []
     const h = harness([
@@ -337,7 +342,10 @@ describe('autonomous scheduler', () => {
       async () => reply('Chart added.'),
     ])
     const checked: string[] = []
-    h.effects.extensionTokenChanged = async (changed) => checked.push(changed.id) > 0
+    h.effects.envChanged = async (changed) => {
+      checked.push(changed.id)
+      return envChanged()
+    }
     const s = scheduler(workspaceId, h, { tickMs: 20 })
 
     await s.tick()
@@ -351,7 +359,7 @@ describe('autonomous scheduler', () => {
     expect(h.posts).toEqual(['Report without the chart.', 'Chart added.'])
   })
 
-  it('still sends a message into the running worker while its channel token is unchanged', async () => {
+  it('still sends a message into the running worker while its env is unchanged', async () => {
     const { workspaceId, say } = await newTask('build the report')
     const sent: string[] = []
     const h = harness([
@@ -363,11 +371,31 @@ describe('autonomous scheduler', () => {
         return reply('Report with a chart.')
       },
     ])
-    h.effects.extensionTokenChanged = async () => false
+    h.effects.envChanged = async () => false
 
     await scheduler(workspaceId, h, { tickMs: 20 }).tick()
 
     expect(sent).toHaveLength(1)
+  })
+
+  it('tells the thread once when a stored env cannot be read, keeps its messages and retries in 30 seconds', async () => {
+    const { workspaceId, task } = await newTask('build the report')
+    const unreadable = async (): Promise<TurnResult> => outcome({ kind: 'not_started', envUnreadable: 'This laptop cannot read the env TOKEN (on zubair).' })
+    const h = harness([unreadable, unreadable, async () => reply('Report built.')])
+    const s = scheduler(workspaceId, h)
+
+    await s.tick()
+    const waiting = await loadTask(pool, task.id)
+    expect(waiting?.pendingEvents.map((event) => event.text)).toEqual(['build the report'])
+    expect(waiting?.nextWakeupAt?.getTime()).toBeGreaterThan(Date.now() + 25_000)
+    await pool.query('UPDATE autonomous_tasks SET next_wakeup_at = now() WHERE id = $1', [task.id])
+    await s.tick()
+    expect(h.posts).toEqual(['I have not started: This laptop cannot read the env TOKEN (on zubair). Your messages wait, and I try again every 30 seconds.'])
+
+    await pool.query('UPDATE autonomous_tasks SET next_wakeup_at = now() WHERE id = $1', [task.id])
+    await s.tick()
+    expect(h.turns).toHaveLength(3)
+    expect(h.posts.at(-1)).toBe('Report built.')
   })
 
   it("keeps a message sent into a turn that then failed pending, while the turn's own message is dropped", async () => {

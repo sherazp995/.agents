@@ -43,11 +43,14 @@ import { RELAY_VERSION } from './version.js'
 import { defaultConfigPath, defaultPolicyPath, defaultReposPath, resolveRelayHome } from './config/paths.js'
 import { runSecretsMigrate, runSecretsSet } from './cli/secrets.js'
 import { relaySecretsHelperPath } from './secrets/keychain.js'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runReposAdd } from './cli/repos.js'
 import { runDbCreate, runDbMove } from './cli/db.js'
 import { buildSetupSteps, promptHidden, promptLine, runSetup } from './cli/setup.js'
+import { readStdin } from './cli/stdin.js'
+import { runEnvAdd, runEnvList, runEnvRemove, type EnvCommandResult, type EnvScopeOptions } from './cli/env.js'
+import { runChannelFolder } from './cli/channel.js'
 
 /** The relay checkout or package this CLI runs from: dist/src/cli.js sits two folders below it. */
 const RELAY_ROOT = fileURLToPath(new URL('../..', import.meta.url))
@@ -352,13 +355,6 @@ const secretsCommand = program
   .command('secrets')
   .description("Manage relay's own keystore items: the macOS Keychain behind the relay-secrets helper, or the Linux Secret Service")
 
-/** Reads all of stdin, dropping the one trailing newline `echo` or a heredoc adds. */
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
-  return Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '')
-}
-
 secretsCommand
   .command('set')
   .description('Store a value read from stdin (never from an argument), e.g. an MCP env var or a GitHub token')
@@ -523,6 +519,96 @@ reposCommand
     const result = await runReposAdd({ path, reposPath: defaultReposPath(), ...(options.name !== undefined ? { name: options.name } : {}) })
     process.stdout.write(`${result.report}\n`)
     process.exitCode = result.exitCode
+  })
+
+const envCommand = program
+  .command('env')
+  .description("Envs for the sessions Relay starts, kept in the shared database: defaults, per laptop (--host), per folder (--folder), or both")
+
+type EnvOptions = EnvScopeOptions & { config: string }
+
+function envScopeOptions(cmd: Command): Command {
+  return cmd
+    .option('--host <name>', "only for this laptop: its failover host name")
+    .option('--folder <path>', 'only for sessions in this folder, its subfolders and worktrees of a registered repo there')
+    .option('--workspace-id <uuid>', 'the workspace, when more than one exists')
+    .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
+}
+
+/** Connects for one `relay env` command and prints its result. */
+async function withEnvPool(configPath: string, run: (pool: Pool, config: ReturnType<typeof loadRelayConfig>) => Promise<EnvCommandResult>): Promise<void> {
+  const config = loadRelayConfig(configPath)
+  const pool = createPool(await resolveOperatorDatabaseUrl(config, createSecretProvider(config)))
+  try {
+    const result = await run(pool, config)
+    for (const line of result.err) process.stderr.write(`${line}\n`)
+    for (const line of result.out) process.stdout.write(`${line}\n`)
+    process.exitCode = result.exitCode
+  } finally {
+    await closePool(pool)
+  }
+}
+
+function scopeFlags(options: EnvOptions): EnvScopeOptions {
+  return {
+    ...(options.host !== undefined ? { host: options.host } : {}),
+    ...(options.folder !== undefined ? { folder: options.folder } : {}),
+    ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
+  }
+}
+
+envScopeOptions(envCommand.command('add'))
+  .description('Store an env, replacing one at the same scope. The value is asked for with hidden typing, or read from stdin; never give it as an argument')
+  .argument('<name>', 'the env name, e.g. PLAYWRIGHT_MCP_EXTENSION_TOKEN')
+  .action(async (name: string, options: EnvOptions) => {
+    await withEnvPool(options.config, (pool, config) =>
+      runEnvAdd(name, scopeFlags(options), {
+        pool,
+        failoverOn: config.failover !== undefined,
+        readValue: () => (process.stdin.isTTY ? promptHidden(`Value for ${name} (hidden): `) : readStdin()),
+      }),
+    )
+  })
+
+envScopeOptions(envCommand.command('list'))
+  .description('List stored envs with their scope; values are never shown')
+  .action(async (options: EnvOptions) => {
+    await withEnvPool(options.config, (pool) => runEnvList(scopeFlags(options), { pool }))
+  })
+
+envScopeOptions(envCommand.command('remove'))
+  .description('Remove the env stored at exactly this scope; sessions fall back to the next layer down')
+  .argument('<name>', 'the env name')
+  .action(async (name: string, options: EnvOptions) => {
+    await withEnvPool(options.config, (pool) => runEnvRemove(name, scopeFlags(options), { pool }))
+  })
+
+const channelCommand = program.command('channel').description('Slack channel settings kept in the shared database')
+
+channelCommand
+  .command('folder')
+  .description("Show, set or clear the folder new threads in a channel start in. It is the channel's project folder, so it wins over the channel description")
+  .argument('<channel-id>', 'the Slack channel id, e.g. C0123ABC')
+  .argument('[folder]', 'the folder to set; leave out to show the stored one')
+  .option('--clear', 'remove the stored folder', false)
+  .option('--workspace-id <uuid>', 'the workspace, when more than one exists')
+  .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
+  .action(async (channel: string, folder: string | undefined, options: { clear: boolean; workspaceId?: string; config: string }) => {
+    const config = loadRelayConfig(options.config)
+    const pool = createPool(await resolveOperatorDatabaseUrl(config, createSecretProvider(config)))
+    try {
+      const result = await runChannelFolder(
+        { channel, clear: options.clear, ...(folder !== undefined ? { folder } : {}), ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}) },
+        { pool, isFolder: (path) => statSync(path, { throwIfNoEntry: false })?.isDirectory() === true },
+      )
+      ;(result.exitCode === 0 ? process.stdout : process.stderr).write(`${result.message}\n`)
+      process.exitCode = result.exitCode
+    } catch (error) {
+      process.stderr.write(`relay channel folder failed: ${error instanceof Error ? error.message : String(error)}\n`)
+      process.exitCode = 1
+    } finally {
+      await closePool(pool)
+    }
   })
 
 const dbCommand = program.command('db').description("Relay's Postgres database")

@@ -77,10 +77,11 @@ describe('scrubSecrets / registerSecretValue', () => {
     expect(scrubSecrets(text)).toBe(text)
   })
 
-  it('exposes no way to read back a registered value: the module has no getter or iterator, only these three functions', () => {
+  it('exposes no way to read back a registered value: the module has no getter or iterator, only these three functions and its length floor', () => {
     registerSecretValue(SENTINEL)
     expect(Object.keys(scrubber).sort()).toEqual(
-      ['registerSecretValue', 'resetSecretScrubberForTests', 'scrubSecrets'].sort()
+      ['MINIMUM_SECRET_LENGTH', 'registerSecretValue', 'resetSecretScrubberForTests', 'scrubSecrets'].sort()
     )
+    expect(scrubber.MINIMUM_SECRET_LENGTH).toBe(8)
   })
 })

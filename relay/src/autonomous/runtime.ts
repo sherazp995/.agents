@@ -12,7 +12,7 @@
 
 import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, sep } from 'node:path'
+import { join, sep } from 'node:path'
 import type { Pool, PoolClient } from 'pg'
 import type { ResolveApprovalResult } from '../approvals/store.js'
 import type { ChatAction, ChatEvent, ChatRef } from '../chat/contract.js'
@@ -44,7 +44,7 @@ import { TEAM_PROPOSAL_PATH, teamProposalRoute } from './team-proposal-route.js'
 import { createScheduler, killWorkerGroup, pauseAutonomousTask, stopAutonomousTask, type Scheduler } from './scheduler.js'
 import { leaseOwnerName, loadTask, loadTaskBySession, pinReminderTask, updateTask, wakeTask, type AutonomousTask, type Lease } from './store.js'
 import { renderThreadHistory, slackThreadReplies } from './thread-history.js'
-import { runTurnOnPool, turnCwd, type SpawnPlan, type SpawnPlanParams, type TurnRunnerDeps } from './turn-runner.js'
+import { runTurnOnPool, turnCwd, type SpawnPlan, type SpawnPlanParams, type SpawnRefusal, type TurnRunnerDeps } from './turn-runner.js'
 import { defaultPersonasDir } from '../projects/persona-files.js'
 import { leadTurnSubject } from '../teams/lead-brief.js'
 import { teamRoute } from '../teams/route.js'
@@ -54,7 +54,10 @@ import { TEAM_PATH, type TeamHooks } from '../teams/types.js'
 import { ensureMemberWorktree, headOf } from '../teams/worktrees.js'
 import { buildClaudeSettings, buildCodexHookOverrides } from './worker-config.js'
 import { buildClaudeArgs, buildCodexArgs, buildWorkerEnv, claudeUserLine } from './worker.js'
-import { createExtensionTokens, type ChannelBrowser } from './extension-token.js'
+import { browserEnv, createExtensionTokens } from './extension-token.js'
+import { isSiblingWorktree } from '../worker-env/resolve.js'
+import type { ReaderKey } from '../worker-env/seal.js'
+import { createSessionEnvs, type SessionEnvs } from '../worker-env/sessions.js'
 import { slackChannelPurpose } from '../chat/slack/channel-folder.js'
 import type { AutonomousRouting } from '../orchestrator.js'
 import { principalIsOwner } from '../tenancy/access.js'
@@ -83,6 +86,8 @@ export type AutonomousRuntimeOptions = {
   personasDir?: string
   /** Whether this laptop may start work, and its name; ALWAYS_ACTIVE (failover off) unless set. */
   failover?: FailoverGate
+  /** This laptop's env key (src/worker-env/keys.ts); without it, a session that needs a stored env waits. */
+  workerEnvKey?: ReaderKey | null
 }
 
 export type AutonomousRuntime = {
@@ -144,10 +149,18 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   const hookCommand = `'${process.execPath}' '${join(options.distRoot, 'scripts', 'hook-pretooluse.js')}'`
   const botToken = await options.secrets.get(SLACK_BOT_TOKEN_SECRET)
   const extensionTokens = createExtensionTokens({ readPurpose: slackChannelPurpose(botToken), log })
-  const spawnPlan = async (params: SpawnPlanParams): Promise<SpawnPlan> => {
-    const browser = params.subject.noMcp ? undefined : await extensionTokens.forWorker(params.context.task.id, await threadRefOf(params.context.task))
-    return buildSpawnPlan({ claudeBin: config.claude_bin, codexBin: config.codex_bin, hookCommand, hookUrl: bridge.url }, params, browser)
-  }
+  const repoPaths = (): string[] => loadRepoRegistryIfPresent(options.repoRegistryPath).repos.map((entry) => entry.path)
+  const sessionEnvs = createSessionEnvs({
+    source: { pool, workspaceId, key: options.workerEnvKey ?? null },
+    host: gate.host,
+    home: homedir(),
+    homes: () => knownHomes(pool),
+    repos: repoPaths,
+    fallback: async (threadRef) => browserEnv(await extensionTokens.current(threadRef)),
+    log,
+  })
+  const spawnSetup = { claudeBin: config.claude_bin, codexBin: config.codex_bin, hookCommand, hookUrl: bridge.url }
+  const spawnPlan = async (params: SpawnPlanParams): Promise<SpawnPlan | SpawnRefusal> => planTurnWithEnv(spawnSetup, sessionEnvs, await threadRefOf(params.context.task), params)
 
   const turnDeps: TurnRunnerDeps = {
     pool,
@@ -161,7 +174,6 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
     spawnPlan,
     ...(gate.host !== null ? { chats: createChatSync(pool, gate.host, log) } : {}),
   }
-  const repoPaths = (): string[] => loadRepoRegistryIfPresent(options.repoRegistryPath).repos.map((entry) => entry.path)
   const localPath = async (path: string): Promise<string> => mapPath(path, await knownHomes(pool), homedir())
 
   // --- the scheduler -------------------------------------------------------------
@@ -236,7 +248,7 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
         log.warn({ taskId: task.id, reason: outcome.reason }, 'could not send into the open chat')
         return false
       },
-      extensionTokenChanged: async (task) => extensionTokens.changedSince(task.id, await threadRefOf(task)),
+      envChanged: (task) => sessionEnvs.changedSince(task.id),
       // Folders only move between laptops with failover on; a single laptop runs where the task says, as before.
       ...(gate.host !== null ? { placeTurn: placeTurnHere } : {}),
       settleApprovals: (_task, lease) => settleTaskOperations(pool, lease),
@@ -275,7 +287,8 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
       if (!task) return false
       await stopAutonomousTask(pool, { cleanupStopped }, task.id, gate.host)
       // Ended for good: a DM thread's extension values go too. A pause keeps them for the next message.
-      extensionTokens.forget(task.id, await threadRefOf(task))
+      sessionEnvs.forget(task.id)
+      extensionTokens.forget(await threadRefOf(task))
       return true
     },
     async pauseSession(sessionId, stoppedAt) {
@@ -306,16 +319,35 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
   }
 }
 
+export type SpawnSetup = { claudeBin: string; codexBin: string; hookCommand: string; hookUrl: string }
+
+/**
+ * A turn's spawn plan with the envs resolved for its folder on this laptop.
+ * A read-only reminder task gets none. Team members get theirs (decision 4),
+ * but only the thread's own session is kept for the change check. A stored
+ * env that cannot be read here refuses the turn instead of starting it
+ * without the value.
+ */
+export async function planTurnWithEnv(setup: SpawnSetup, envs: Pick<SessionEnvs, 'forSession' | 'forget'>, threadRef: string, params: SpawnPlanParams): Promise<SpawnPlan | SpawnRefusal> {
+  const { task } = params.context
+  if (task.readOnly) {
+    envs.forget(task.id)
+    return buildSpawnPlan(setup, params)
+  }
+  const resolved = await envs.forSession({ taskId: task.id, threadRef, cwd: turnCwd(params.context, params.subject), track: params.subject.assignment === undefined })
+  if (resolved.kind === 'unreadable') return { kind: 'env_unreadable', reason: resolved.reason }
+  return buildSpawnPlan(setup, params, resolved.env)
+}
+
 /**
  * The CLI, arguments, folder and environment for one turn on one login. A
  * member's subject brings its worktree, brief, model and no MCP servers; the
- * task's own subject gives exactly today's single agent.
+ * task's own subject gives exactly today's single agent. `env` is the
+ * session's resolved envs; a read-only task never gets them.
  */
-export function buildSpawnPlan(setup: { claudeBin: string; codexBin: string; hookCommand: string; hookUrl: string }, params: SpawnPlanParams, browser?: ChannelBrowser): SpawnPlan {
+export function buildSpawnPlan(setup: SpawnSetup, params: SpawnPlanParams, resolvedEnv?: Readonly<Record<string, string>>): SpawnPlan {
   const { context, account, subject } = params
-  // A worker with no MCP servers never gets the channel's extension token or profile: it could still read them from its environment.
-  const { token, profile } = subject.noMcp ? {} : (browser ?? {})
-  const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken, ...(token !== undefined ? { extensionToken: token } : {}), ...(profile !== undefined ? { extensionProfile: profile } : {}) })
+  const env = buildWorkerEnv({ account, hookUrl: setup.hookUrl, hookToken: params.hookToken, ...(resolvedEnv !== undefined && !context.task.readOnly ? { env: resolvedEnv } : {}) })
   // A member works in its worktree; a task's chat folder is set at intake, the home folder only for one created before that.
   const cwd = turnCwd(context, subject)
   const brief = subject.brief ?? WORKER_BRIEF
@@ -366,7 +398,7 @@ export function resolveTaskFolder(stored: string, place: { homes: readonly strin
   if (isFolder(cwd)) return { kind: 'here', cwd }
   const repos = place.repos.map((repo) => mapPath(repo, place.homes, place.home))
   const inside = repos.filter((repo) => cwd.startsWith(repo + sep))
-  const sibling = repos.filter((repo) => dirname(repo) === dirname(cwd) && basename(cwd).startsWith(`${basename(repo)}-`))
+  const sibling = repos.filter((repo) => isSiblingWorktree(cwd, repo))
   const repo = [...inside, ...sibling].filter(isFolder).sort((a, b) => b.length - a.length)[0]
   return repo === undefined ? { kind: 'missing', missing: cwd } : { kind: 'repository', cwd: repo, missing: cwd }
 }

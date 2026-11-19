@@ -18,25 +18,20 @@
  */
 
 import { engineChildEnv, parseFinalResult, readsAsResumeRejection } from '../live/direct-session.js'
-import { EXTENSION_PROFILE_ENV, EXTENSION_TOKEN_ENV } from './extension-token.js'
 import { spawnGated, type GatedSpawnResult } from '../process/gated-spawn.js'
 import { classifyBlocked, type Account, type BlockedReason } from './accounts.js'
 
 /**
- * The operator's own environment, on the chosen account, plus the guard hook's
- * address. The Playwright extension token and profile are never inherited:
- * only the channel's own (`extensionToken`, `extensionProfile`) are set
- * (src/autonomous/extension-token.ts).
+ * The operator's own environment, then the session's resolved envs (`env`:
+ * stored envs over the channel description's, src/worker-env/resolve.ts),
+ * then the chosen account's env and the guard hook's address, which nothing
+ * stored can override.
  */
-export function buildWorkerEnv(params: { account: Account; hookUrl: string; hookToken: string; extensionToken?: string; extensionProfile?: string; base?: NodeJS.ProcessEnv }): NodeJS.ProcessEnv {
+export function buildWorkerEnv(params: { account: Account; hookUrl: string; hookToken: string; env?: Readonly<Record<string, string>>; base?: NodeJS.ProcessEnv }): NodeJS.ProcessEnv {
   const env = engineChildEnv(params.base ?? process.env)
   delete env.CLAUDE_CONFIG_DIR
   delete env.CODEX_HOME
-  delete env[EXTENSION_TOKEN_ENV]
-  delete env[EXTENSION_PROFILE_ENV]
-  const token = params.extensionToken !== undefined ? { [EXTENSION_TOKEN_ENV]: params.extensionToken } : {}
-  const profile = params.extensionProfile !== undefined ? { [EXTENSION_PROFILE_ENV]: params.extensionProfile } : {}
-  return { ...env, ...params.account.env, ...token, ...profile, RELAY_HOOK_URL: params.hookUrl, RELAY_HOOK_TOKEN: params.hookToken }
+  return { ...env, ...params.env, ...params.account.env, RELAY_HOOK_URL: params.hookUrl, RELAY_HOOK_TOKEN: params.hookToken }
 }
 
 /** One user message on claude's stream-json stdin. */
@@ -85,7 +80,8 @@ export type TurnOutcome =
   | { kind: 'reply'; text: string; sessionId: string }
   | { kind: 'account_blocked'; reason: BlockedReason; stderrTail: string }
   | { kind: 'resume_rejected' }
-  | { kind: 'not_started' }
+  /** `envUnreadable`: the session did not start because a stored env it needs cannot be read here; it names the scope, never a value. */
+  | { kind: 'not_started'; envUnreadable?: string }
   /** Killed after the gate opened (Stop, kill switch): the CLI may have changed files. */
   | { kind: 'stopped' }
   | { kind: 'failed'; reason: string; stderrTail: string }

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { Account } from '../../src/autonomous/accounts.js'
 import { WORKER_BRIEF } from '../../src/autonomous/prompt.js'
-import { buildSpawnPlan, withTeamStop } from '../../src/autonomous/runtime.js'
+import { buildSpawnPlan, planTurnWithEnv, withTeamStop } from '../../src/autonomous/runtime.js'
+import type { SessionEnvOutcome } from '../../src/worker-env/sessions.js'
 import type { AutonomousTask } from '../../src/autonomous/store.js'
 import { taskSubject, type SpawnPlanParams, type TurnSubject } from '../../src/autonomous/turn-runner.js'
 import { buildClaudeSettings, buildCodexHookOverrides } from '../../src/autonomous/worker-config.js'
@@ -45,20 +46,43 @@ describe('the spawn plan', () => {
   })
 })
 
-describe("the spawn plan and the channel's extension token", () => {
-  it("gives the thread's own worker the token, on Claude and on Codex, in its environment and never its arguments", () => {
+describe("the spawn plan and the session's envs", () => {
+  const ENV = { PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'stored-token-456', DATABASE_URL: 'postgres://app' }
+
+  function fakeEnvs(outcome: SessionEnvOutcome = { kind: 'ready', env: ENV }) {
+    const calls: { taskId: string; cwd: string; track: boolean }[] = []
+    const forgotten: string[] = []
+    return {
+      calls,
+      forgotten,
+      forSession: async (call: { taskId: string; threadRef: string; cwd: string; track: boolean }) => (calls.push({ taskId: call.taskId, cwd: call.cwd, track: call.track }), outcome),
+      forget: (taskId: string) => void forgotten.push(taskId),
+    }
+  }
+
+  it("gives the thread's own worker its resolved envs, on Claude and on Codex, in its environment and never its arguments, and keeps it for the change check", async () => {
     for (const account of [CLAUDE, CODEX]) {
-      const plan = buildSpawnPlan(SETUP, params(account), { token: 'channel-token-456', profile: 'Profile 16' })
-      expect(plan.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBe('channel-token-456')
-      expect(plan.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME).toBe('Profile 16')
-      expect(plan.args.join(' ')).not.toContain('channel-token-456')
+      const envs = fakeEnvs()
+      const plan = await planTurnWithEnv(SETUP, envs, 'C1:1.1', params(account))
+      if ('kind' in plan) throw new Error('expected a plan')
+      expect(plan.env).toMatchObject(ENV)
+      expect(plan.args.join(' ')).not.toContain('stored-token-456')
+      expect(envs.calls).toEqual([{ taskId: 't', cwd: '/work/web', track: true }])
     }
   })
 
-  it('gives a team member none, since it runs with no MCP servers but could still read its environment', () => {
-    const member = { ...taskSubject(task), cwd: '/wt/a1', brief: 'You are Theo.', model: null, noMcp: true }
-    expect(buildSpawnPlan(SETUP, params(CLAUDE, member), { token: 'channel-token-456', profile: 'Profile 16' }).env).not.toHaveProperty('PLAYWRIGHT_MCP_EXTENSION_TOKEN')
-    expect(buildSpawnPlan(SETUP, params(CLAUDE, member), { profile: 'Profile 16' }).env).not.toHaveProperty('PLAYWRIGHT_MCP_PROFILE_DIR_NAME')
+  it("gives a team member the envs of its worktree without keeping it for the thread's change check", async () => {
+    const member = { ...taskSubject(task), cwd: '/wt/a1', brief: 'You are Theo.', model: null, noMcp: true, assignment: { id: 'a1', leaseGeneration: 1 } }
+    const envs = fakeEnvs()
+    const plan = await planTurnWithEnv(SETUP, envs, 'C1:1.1', params(CLAUDE, member))
+    if ('kind' in plan) throw new Error('expected a plan')
+    expect(plan.env.DATABASE_URL).toBe('postgres://app')
+    expect(envs.calls).toEqual([{ taskId: 't', cwd: '/wt/a1', track: false }])
+  })
+
+  it('refuses the turn when a stored env cannot be read', async () => {
+    const plan = await planTurnWithEnv(SETUP, fakeEnvs({ kind: 'unreadable', reason: 'cannot read TOKEN' }), 'C1:1.1', params(CLAUDE))
+    expect(plan).toEqual({ kind: 'env_unreadable', reason: 'cannot read TOKEN' })
   })
 })
 
@@ -85,8 +109,14 @@ describe("the spawn plan for a reminder's read-only task", () => {
     expect(JSON.parse(buildClaudeSettings({ hookCommand: 'hook' })).hooks.PreToolUse[0].matcher).toBe('Bash')
   })
 
-  it('gives it no extension token, even when one is passed', () => {
-    expect(buildSpawnPlan(SETUP, readOnlyParams(CLAUDE), { token: 'channel-token-456' }).env.PLAYWRIGHT_MCP_EXTENSION_TOKEN).toBeUndefined()
+  it('gives it no stored or description envs, without resolving any', async () => {
+    const resolved: string[] = []
+    const envs = { forSession: async () => (resolved.push('x'), { kind: 'ready' as const, env: { TOKEN: 'stored-token-456' } }), forget: () => undefined }
+    const plan = await planTurnWithEnv(SETUP, envs, 'C1:1.1', readOnlyParams(CLAUDE))
+    if ('kind' in plan) throw new Error('expected a plan')
+    expect(plan.env.TOKEN).toBeUndefined()
+    expect(resolved).toEqual([])
+    expect(buildSpawnPlan(SETUP, readOnlyParams(CLAUDE), { TOKEN: 'stored-token-456' }).env.TOKEN).toBeUndefined()
   })
 
   it('refuses a plan on Codex or with MCP servers', () => {

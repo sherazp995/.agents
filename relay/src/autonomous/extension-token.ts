@@ -1,13 +1,14 @@
 /**
- * Each thread's Playwright extension token and Chrome profile. A channel's
- * come from its Slack description: a line
- * `PLAYWRIGHT_MCP_EXTENSION_TOKEN=<token>` gives that channel's workers the
- * token, and a line `PLAYWRIGHT_MCP_PROFILE_DIR_NAME="Profile 16"` names the
- * Chrome profile the extension connects to (Default or Profile N, quoted
- * because of its space); without it Playwright picks the last used profile
- * that has the extension, which can be another project's. A description is
- * read when a worker starts and again before a new message joins a running
- * one, so removing the line stops the token from the next message on.
+ * The channel description's Playwright extension token and Chrome profile:
+ * the lowest layer of a session's envs, used only for a name no stored env
+ * sets (src/worker-env/resolve.ts, README "Envs for Relay's sessions"). A
+ * line `PLAYWRIGHT_MCP_EXTENSION_TOKEN=<token>` gives the token, and a line
+ * `PLAYWRIGHT_MCP_PROFILE_DIR_NAME="Profile 16"` names the Chrome profile
+ * the extension connects to (Default or Profile N, quoted because of its
+ * space). A description is read when a worker starts and again before a new
+ * message joins a running one, so removing the line stops the value from the
+ * next message on. Every laptop reads the same description: a value per
+ * laptop belongs in `relay env add --host`.
  *
  * A DM has no description: the owner sends the same lines in a message of the
  * thread, and the router remembers them here for that thread, in memory only,
@@ -46,6 +47,11 @@ export function extensionProfileIn(description: string): string | undefined {
 
 /** What a channel's description sets for the extension; either may be absent. */
 export type ChannelBrowser = { token?: string; profile?: string }
+
+/** The description's values as envs. */
+export function browserEnv(browser: ChannelBrowser): Record<string, string> {
+  return { ...(browser.token !== undefined ? { [EXTENSION_TOKEN_ENV]: browser.token } : {}), ...(browser.profile !== undefined ? { [EXTENSION_PROFILE_ENV]: browser.profile } : {}) }
+}
 
 /** Stored in place of a message that held nothing but the extension lines, so the turn it starts is not empty. */
 export const EXTENSION_ONLY_NOTE = '(set the Playwright extension variables)'
@@ -89,18 +95,15 @@ export type ExtensionTokenDeps = {
 }
 
 export type ExtensionTokens = {
-  /** The token and profile for a worker starting in `threadRef` (`<channel>:<thread>`); remembered for `taskId` so a later message can be checked against them. */
-  forWorker(taskId: string, threadRef: string): Promise<ChannelBrowser>
-  /** True when the thread's token or profile is no longer the one `taskId`'s worker started with. */
-  changedSince(taskId: string, threadRef: string): Promise<boolean>
+  /** The description's (or DM thread's) token and profile for `threadRef` (`<channel>:<thread>`); none when it cannot be read. */
+  current(threadRef: string): Promise<ChannelBrowser>
   /** Sets or replaces the values a DM thread's workers start with. */
   rememberDm(threadRef: string, browser: ChannelBrowser): void
-  /** Drops what is kept for a task and its thread, once the task has stopped. */
-  forget(taskId: string, threadRef: string): void
+  /** Drops a DM thread's values, once its task has stopped. */
+  forget(threadRef: string): void
 }
 
 export function createExtensionTokens(deps: ExtensionTokenDeps): ExtensionTokens {
-  const startedWith = new Map<string, ChannelBrowser>()
   const dmValues = new Map<string, ChannelBrowser>()
   const fromDescription = async (channel: string): Promise<ChannelBrowser> => {
     let timer: NodeJS.Timeout | undefined
@@ -115,7 +118,7 @@ export function createExtensionTokens(deps: ExtensionTokenDeps): ExtensionTokens
       if (token !== undefined) registerSecretValue(token)
       return { ...(token !== undefined ? { token } : {}), ...(profile !== undefined ? { profile } : {}) }
     } catch (error) {
-      deps.log.warn({ err: error, channel }, 'could not read the channel description; the worker starts without an extension token')
+      deps.log.warn({ err: error, channel }, 'could not read the channel description; the worker starts without its fallback extension values')
       return {}
     } finally {
       clearTimeout(timer)
@@ -129,22 +132,11 @@ export function createExtensionTokens(deps: ExtensionTokenDeps): ExtensionTokens
     return fromDescription(channel)
   }
   return {
-    async forWorker(taskId, threadRef) {
-      const browser = await current(threadRef)
-      startedWith.set(taskId, browser)
-      return browser
-    },
-    async changedSince(taskId, threadRef) {
-      const before = startedWith.get(taskId)
-      if (before === undefined) return false
-      const now = await current(threadRef)
-      return now.token !== before.token || now.profile !== before.profile
-    },
+    current,
     rememberDm(threadRef, browser) {
       dmValues.set(threadRef, browser)
     },
-    forget(taskId, threadRef) {
-      startedWith.delete(taskId)
+    forget(threadRef) {
       dmValues.delete(threadRef)
     },
   }

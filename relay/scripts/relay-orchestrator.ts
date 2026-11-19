@@ -44,7 +44,10 @@ import { failoverTablesExist, otherHostsHaveRunningWorkers } from '../src/failov
 import { FailoverRunner } from '../src/failover/run.js'
 import { startOrchestrator, type OrchestratorHandle, type StartOrchestratorOptions } from '../src/orchestrator.js'
 import { createRedis } from '../src/redis/client.js'
-import { APPROVAL_RECEIPT_KEY_SECRET } from '../src/secrets/keychain.js'
+import { APPROVAL_RECEIPT_KEY_SECRET, relaySecretsHelperPath } from '../src/secrets/keychain.js'
+import { runSecretsSet } from '../src/cli/secrets.js'
+import { loadReaderKey, startReaderKeySync } from '../src/worker-env/keys.js'
+import type { ReaderKey } from '../src/worker-env/seal.js'
 import type { SecretProvider } from '../src/secrets/provider.js'
 
 const CONFIG_PATH = process.env.RELAY_CONFIG_PATH ?? 'config/relay.config.yaml'
@@ -223,7 +226,7 @@ export async function createDaemonLogger(config: RelayConfig): Promise<Logger> {
 }
 
 /** What autonomous mode needs beyond the config, read only when it is enabled. */
-async function autonomousRuntimeOptions(config: RelayConfig, secrets: SecretProvider): Promise<StartOrchestratorOptions['autonomousRuntime']> {
+async function autonomousRuntimeOptions(config: RelayConfig, secrets: SecretProvider, workerEnvKey: ReaderKey | null): Promise<StartOrchestratorOptions['autonomousRuntime']> {
   if (config.autonomous?.enabled !== true) return undefined
   const receiptKeyHex = await secrets.get(APPROVAL_RECEIPT_KEY_SECRET)
   if (!/^(?:[0-9a-f]{2}){32,}$/i.test(receiptKeyHex)) throw new Error(`${APPROVAL_RECEIPT_KEY_SECRET} must be at least 32 bytes of hex; run \`relay secrets migrate\``)
@@ -235,6 +238,7 @@ async function autonomousRuntimeOptions(config: RelayConfig, secrets: SecretProv
     repoRegistryPath: process.env.RELAY_REPOS_PATH ?? defaultReposPath(),
     // This file runs as dist/scripts/relay-orchestrator.js; the hook entry sits beside it.
     distRoot: join(dirname(fileURLToPath(import.meta.url)), '..'),
+    workerEnvKey,
   }
 }
 
@@ -290,6 +294,13 @@ async function main(): Promise<void> {
   const log = await createDaemonLogger(config)
   const secrets = createDaemonSecretProvider(config, resolveRelayHome().path)
   const pool = createPool(await resolveDatabaseUrl(config, secrets))
+  // This laptop's env key: published now and on a timer, also while standing by, so the answering laptop seals envs for it (README, "Envs for Relay's sessions").
+  const workerEnvKey = await loadReaderKey({
+    secrets,
+    storeSecret: (name, value) => runSecretsSet({ name, value, replace: false }, { helperPath: relaySecretsHelperPath(resolveRelayHome().path) }),
+    log,
+  })
+  const keySync = workerEnvKey === null ? undefined : startReaderKeySync({ pool, key: workerEnvKey, host: config.failover?.host ?? '', log })
   const failover = config.failover
     ? new FailoverRunner({
         pool,
@@ -302,6 +313,7 @@ async function main(): Promise<void> {
     : undefined
   // A standby laptop may wait for hours, so a stop must work before startup finishes.
   const stopWaiting = (): void => {
+    keySync?.stop()
     void failover?.stop().finally(() => {
       closePool(pool)
         .catch(() => {})
@@ -325,7 +337,9 @@ async function main(): Promise<void> {
     // which is the same posture as the health check itself, and a loud exit
     // beats an alive process that will never answer a message.
     const start = async (): Promise<OrchestratorHandle> => {
-      const autonomousRuntime = await autonomousRuntimeOptions(config, secrets)
+      // After migrations: the env tables exist, and this laptop's key and copies are in place before the first session.
+      await keySync?.sync()
+      const autonomousRuntime = await autonomousRuntimeOptions(config, secrets, workerEnvKey)
       log.info('starting the orchestrator against the configured Slack workspace')
       return withStartupDeadline(
         startOrchestrator(pool, secrets, log, {
@@ -415,6 +429,7 @@ async function main(): Promise<void> {
     let shuttingDown = false
     const shutdown = (signal: string, code = 0): void => {
       clearInterval(healthTimer)
+      keySync?.stop()
       if (shuttingDown) return
       shuttingDown = true
       log.info({ signal }, 'shutting down')

@@ -155,6 +155,43 @@ export async function projectFolderForChannel(pool: Pool, workspaceId: string, c
   return folder === undefined ? undefined : localProjectFolder(pool, folder)
 }
 
+/** The stored project folder for a channel (as the setup page shows it), with the project's name. */
+export async function storedChannelFolder(db: Db, workspaceId: string, channel: string): Promise<{ name: string; folder: string } | undefined> {
+  const { rows } = await db.query<{ name: string; folder: string }>('SELECT name, folder FROM projects WHERE workspace_id = $1 AND slack_channel = $2', [workspaceId, channel])
+  return rows[0]
+}
+
+/**
+ * Sets the folder of the channel's project, making a project named after the
+ * channel id when it has none. `folder` is absolute, as the column holds it.
+ */
+export async function setChannelFolder(db: Db, workspaceId: string, channel: string, folder: string): Promise<'created' | 'updated'> {
+  const { rows } = await db.query<{ created: boolean }>(
+    `INSERT INTO projects (workspace_id, name, slack_channel, folder) VALUES ($1, $2, $2, $3)
+     ON CONFLICT (workspace_id, slack_channel) DO UPDATE SET folder = EXCLUDED.folder, updated_at = now()
+     RETURNING (xmax = 0) AS created`,
+    [workspaceId, channel, folder],
+  )
+  return rows[0]?.created === true ? 'created' : 'updated'
+}
+
+/**
+ * A project's folder cannot be empty, so clearing it deletes the project,
+ * but only one that holds nothing else: still named after the channel id,
+ * with no repos and no team. Any other project is kept and reported.
+ */
+export async function clearChannelFolder(db: Db, workspaceId: string, channel: string): Promise<{ kind: 'none' } | { kind: 'deleted' } | { kind: 'kept'; name: string }> {
+  const { rowCount } = await db.query(
+    `DELETE FROM projects p WHERE p.workspace_id = $1 AND p.slack_channel = $2 AND p.name = $2
+       AND NOT EXISTS (SELECT 1 FROM project_repos r WHERE r.workspace_id = p.workspace_id AND r.project_id = p.id)
+       AND NOT EXISTS (SELECT 1 FROM teams t WHERE t.workspace_id = p.workspace_id AND t.project_id = p.id)`,
+    [workspaceId, channel],
+  )
+  if ((rowCount ?? 0) > 0) return { kind: 'deleted' }
+  const kept = await storedChannelFolder(db, workspaceId, channel)
+  return kept === undefined ? { kind: 'none' } : { kind: 'kept', name: kept.name }
+}
+
 export async function createProject(client: PoolClient, workspaceId: string, input: ProjectInput): Promise<string> {
   try {
     const { rows } = await client.query<{ id: string }>(

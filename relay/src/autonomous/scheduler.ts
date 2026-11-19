@@ -113,8 +113,12 @@ export interface SchedulerEffects {
   threadHistory?(task: AutonomousTask, beforeTs: string | null): Promise<string | null>
   /** Sends `text` into a terminal chat open on the task's session; false when none is open or it was not delivered. */
   deliverToOpenChat?(task: AutonomousTask, text: string): Promise<boolean>
-  /** True when the channel's extension token is no longer the one the running worker started with; its new messages then wait for the next worker. */
-  extensionTokenChanged?(task: AutonomousTask): Promise<boolean>
+  /**
+   * True when the env the running worker started with is no longer current
+   * (src/worker-env/sessions.ts); its new messages then wait for the next
+   * worker. A check that throws holds them too.
+   */
+  envChanged?(task: AutonomousTask): Promise<boolean>
   /**
    * The task as its turn runs on this laptop: its stored folder mapped to
    * this laptop's home, or moved when missing here. Null when no turn can run
@@ -253,6 +257,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   let stopping = false
   let draining = false
   let ticking: Promise<void> | undefined
+  // The env problem each thread was last told about, so a retry every 30 seconds does not repeat the note.
+  const envNoted = new Map<string, string>()
+
+  /** True when the running worker's env changed, or when that cannot be told: either way its new messages wait. */
+  const envChanged = async (task: AutonomousTask): Promise<boolean> => {
+    if (!deps.effects.envChanged) return false
+    try {
+      return await deps.effects.envChanged(task)
+    } catch (error) {
+      deps.log.warn({ err: error, taskId: task.id }, 'could not check the running worker\'s env; new messages wait for the next worker')
+      return true
+    }
+  }
 
   const post = async (task: AutonomousTask, text: string): Promise<void> => {
     if (text.trim() === '') return
@@ -414,6 +431,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     for (const note of result.notes) deps.log.info({ taskId: task.id }, note)
 
     const outcome = result.outcome
+    if (outcome.kind !== 'not_started' || outcome.envUnreadable === undefined) envNoted.delete(task.id)
     switch (outcome.kind) {
       case 'reply':
         await finishTurn(task, lease, { eventIds: [...consumed, ...sent.events.map((event) => event.id)], notesRead: handed ? 0 : notesRead, dueAt }, { engineSessionId: outcome.sessionId, accountKey: result.accountKey }, [...replies.unposted(), outcome.text].filter((part) => part.trim() !== '').join('\n\n'), replies.lastPostId())
@@ -424,6 +442,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         return
       case 'not_started':
       case 'account_blocked':
+        // A stored env that cannot be read: the thread hears it once, the messages stay pending, and the turn is retried.
+        if (outcome.kind === 'not_started' && outcome.envUnreadable !== undefined && envNoted.get(task.id) !== outcome.envUnreadable) {
+          envNoted.set(task.id, outcome.envUnreadable)
+          await post(task, envUnreadableNote(outcome.envUnreadable))
+        }
         await updateTask(deps.pool, lease, { nextWakeupAt: new Date(Date.now() + RETRY_LATER_MS) })
         return
       case 'stopped':
@@ -457,8 +480,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const isNew = (event: AutonomousTask['pendingEvents'][number]): boolean => !consumed.includes(event.id) && !sent.events.some((done) => done.id === event.id)
       const current = await loadTask(deps.pool, taskId)
       if (!current?.pendingEvents.some(isNew)) return
-      // A changed or removed token must not reach these messages: they stay pending for a worker started with the current one.
-      if (await deps.effects.extensionTokenChanged?.(current)) {
+      // A changed or removed env must not reach these messages: they stay pending for a worker started with the current one.
+      if (await envChanged(current)) {
         inbox.send = null
         return
       }
@@ -594,6 +617,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       await Promise.all([...running.values()].map((entry) => entry.done))
     },
   }
+}
+
+/** The one note a thread gets while a stored env its session needs cannot be read. */
+export function envUnreadableNote(reason: string): string {
+  return `I have not started: ${reason} Your messages wait, and I try again every 30 seconds.`
 }
 
 /** The earliest new message the worker gets anyway, so the history stops before it. */

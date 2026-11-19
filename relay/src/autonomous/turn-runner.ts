@@ -32,6 +32,9 @@ export type SpawnPlan = Pick<TurnRequest, 'bin' | 'args' | 'cwd' | 'env' | 'inpu
   dispose?: () => Promise<void>
 }
 
+/** A turn that must not start yet: a stored env it needs cannot be read here (src/worker-env/sessions.ts). */
+export type SpawnRefusal = { kind: 'env_unreadable'; reason: string }
+
 /**
  * Whose turn this is: the session, login and client binding it uses, and
  * what its CLI is started with. A task is one subject (taskSubject); a team
@@ -97,7 +100,7 @@ export type TurnRunnerDeps = {
   turnTimeoutMs: number
   issueToken: (context: InvocationContext) => string
   revokeToken: (token: string) => void
-  spawnPlan: (params: SpawnPlanParams) => Promise<SpawnPlan>
+  spawnPlan: (params: SpawnPlanParams) => Promise<SpawnPlan | SpawnRefusal>
   /** Injected for tests; production runs the real CLI. */
   runTurn?: (request: TurnRequest) => Promise<TurnOutcome>
   /** Injected for tests; production reads the account's real projects folder. */
@@ -211,7 +214,13 @@ async function invokeOnce(deps: TurnRunnerDeps, context: TurnRequestContext, sub
     const resume = restored === 'failed' ? undefined : await resumeFor(deps, subject, account, restored === 'current')
     // A turn that cannot resume its own session needs the thread so far: a fresh session, or the taken-over chat after another session's turns.
     const fresh = resume !== subject.engineSessionId && context.freshPrompt ? { ...context, prompt: await context.freshPrompt() } : context
-    plan = await deps.spawnPlan({ context: fresh, subject, account, hookToken: token, resume })
+    const planned = await deps.spawnPlan({ context: fresh, subject, account, hookToken: token, resume })
+    if ('kind' in planned) {
+      // Nothing ran; the messages stay pending and the scheduler retries (README, "Envs for Relay's sessions").
+      await finishRun(deps.pool, run.id, 'cancel').catch(() => undefined)
+      return { outcome: { kind: 'not_started', envUnreadable: planned.reason }, runId: run.id }
+    }
+    plan = planned
     const cwd = plan.cwd
     // A reply already in the thread is saved for the other laptop too, so a long-running chat is not hours stale there.
     const handOutReply = (post: NonNullable<TurnRequestContext['onReply']>) => (reply: HandedReply): void => {

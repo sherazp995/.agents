@@ -431,9 +431,10 @@ relay doctor          # failover: hassan-mbp answers, renewed 3s ago ...
 
 Good to know:
 
-- A Playwright extension token in a channel description
-  ([below](#a-playwright-extension-token-per-channel)) belongs to one
-  laptop's Chrome, so browser work in that channel only works while that
+- Give each laptop its own Playwright extension token with
+  `relay env add PLAYWRIGHT_MCP_EXTENSION_TOKEN --host <name>`
+  ([below](#envs-for-relays-sessions)). A token in a channel description
+  belongs to one laptop's Chrome, so used alone it only works while that
   laptop answers.
 - Without `database.operator_url`, commands you run yourself (`relay live`,
   `relay notify`, `relay doctor`) read the database login from the
@@ -472,7 +473,22 @@ do the same job as plain messages, in a DM or after a mention:
 
 ### A folder per channel
 
-Put a folder path in a channel's description, for example
+Store it in the database, so both laptops use it:
+
+```sh
+relay channel folder C0123ABC ~/Documents/project   # set (the folder must exist here)
+relay channel folder C0123ABC                       # show
+relay channel folder C0123ABC --clear               # remove
+```
+
+The channel id is in Slack's channel details, at the bottom. This writes
+the folder on the channel's project (the same one the setup page edits),
+or makes a project named after the id. `--clear` deletes only a project
+it made itself (no repos, no team, still named after the id); any other
+project keeps its folder and the command points you to `relay ui`.
+
+A channel without a project folder falls back to its description: put a
+folder path in it, for example
 `this should start sessions only from ~/Documents/project`, and every new
 thread in that channel starts its session there, mentions (with autonomous
 mode on) and `direct` alike, even when the message names another folder.
@@ -489,23 +505,78 @@ The waiting request lives in memory, so after a Relay restart send it
 again. A channel whose description names no folder, and a DM, work as
 before.
 
-### A Playwright extension token per channel
+### Envs for Relay's sessions
 
-Add a line `PLAYWRIGHT_MCP_EXTENSION_TOKEN=<token>` to a channel's
-description, and the workers Relay starts for that channel's threads get
-that token, so the `playwright-extension` server drives the Chrome it
-belongs to. The first such line counts; quotes or backticks around the
-value are dropped.
+`relay env` keeps envs for the sessions Relay starts in the shared
+database, so each laptop gets its own:
+
+```sh
+relay env add NAME                                  # every laptop, every folder
+relay env add NAME --host zubair                    # only on that laptop
+relay env add NAME --folder ~/Documents/project     # only in that folder
+relay env add NAME --host zubair --folder ~/Documents/project
+relay env list [--host <name>] [--folder <path>]    # values are never shown
+relay env remove NAME [--host <name>] [--folder <path>]
+```
+
+`add` asks for the value with hidden typing, or reads it from a pipe
+(`printf %s "$TOKEN" | relay env add NAME`). It never takes the value as
+an argument, so it stays out of shell history. Adding at the same place
+replaces the value. Pass `--workspace-id` when the database holds more
+than one workspace.
+
+Which value a session gets, per name, lowest first: the daemon's own env,
+the channel description (below), every laptop, this laptop, the folder,
+the folder on this laptop. Inside the folder layers the deepest folder
+wins. A folder entry covers its subfolders, and for a repository
+registered with `relay repos add` also its `<repo>-<name>` worktrees next
+to it. Removing an entry falls back to the next layer down.
+
+- `--host` takes a laptop's failover name (`failover.host`). Without
+  failover, machine entries are ignored and only the others apply.
+- Names Relay or the login pool set are refused: `HOME`,
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `RELAY_HOOK_URL`, `RELAY_HOOK_TOKEN`,
+  any `RELAY_SECRET_*`, and the login tokens (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`).
+- Values are locked per laptop. Each laptop makes a key pair the first
+  time it starts with this build: the private half stays in its own
+  keystore (`relay-worker-env-key`), the public half goes in the database.
+  `add` locks the value for every laptop allowed to read it, so Zubair's
+  values only open on Zubair's laptop and no key is ever copied. A laptop
+  that joins later gets the shared values within a minute. Start Relay
+  once on each laptop before adding envs for it. The locks protect against
+  reading the database or a backup, not against someone who can write to
+  it.
+- If a value a session needs cannot be opened, the session does not
+  start: the thread gets one note naming the env, the messages wait, and
+  Relay tries again every 30 seconds. Entries that do not match the
+  session are never opened.
+- When the envs a running session started with change, new messages wait
+  for a new session; the running turn finishes.
+- Team members get the envs for their worktree. Read-only reminder tasks
+  get none. Attached CLI chats are not covered: they run on your own
+  environment.
+- Values are scrubbed from what Relay posts and logs, but not from the
+  session's own transcript. A value shorter than 8 characters cannot be
+  scrubbed, and `add` warns about it.
+- Update both laptops together: the other laptop's older build refuses to
+  answer once this one has added the env tables, and `relay env` says so
+  until the database is updated.
+
+### A Playwright extension token in a channel description
+
+As a fallback, a line `PLAYWRIGHT_MCP_EXTENSION_TOKEN=<token>` (and
+`PLAYWRIGHT_MCP_PROFILE_DIR_NAME="Profile N"`) in a channel's description
+still gives that channel's sessions the token, on every laptop, unless a
+stored env sets the same name. The first such line counts; quotes or
+backticks around the value are dropped.
 
 - Relay reads the description when a worker starts and again before a new
   message joins a running worker. Remove or change the line, and the next
   message waits for a new worker started with the current description.
-- A channel without the line, or a description Relay cannot read, starts a
-  default session with no token. A token the daemon itself was started
-  with is never passed on.
-- Team members and read-only reminder tasks run with no MCP servers and
-  never get the token. Attached CLI chats are not covered: they run on your
-  own environment.
+- A channel without the line, or a description Relay cannot read, starts
+  without it.
+- Read-only reminder tasks never get it.
 - The token is scrubbed from what Relay posts and logs, but not from the
   worker's own transcript (`~/.claude*/projects/`).
 - Anyone who can see the channel can read its description, and so the
