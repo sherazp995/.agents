@@ -44,7 +44,7 @@ Create the run folder `<repo root>/tmp/video-qa/<YYYYMMDD-HHMMSS>/` (add a numer
 
 A `selector` is any Playwright locator string: CSS (`#email`, `[data-testid=save]`), `text=Subscribe`, or `role=button[name="Subscribe"]`. The first match is used.
 
-Actions: `goto` (`url`, relative to `baseUrl`), `click`, `fill` (clears the field, then types `value`), `type` (types `value` after what is there), `select`, `check`, `hover`, `scroll` (each with `selector`, and `value` where it applies), `press` (`key`), `wait` (`ms`), `wait_for` (`selector`). Both `fill` and `type` type one character at a time at human pace. Actions take `timeoutMs` (default 10 s, 30 s for `goto`); an action that cannot run stops that version and the rest of its steps are skipped.
+Actions: `goto` (`url`, relative to `baseUrl`), `click` (optional `button`: `right` opens a context menu), `fill` (clears the field, then types `value`), `type` (types `value` after what is there), `select`, `check`, `hover`, `scroll` (each with `selector`, and `value` where it applies), `press` (`key`), `wait` (`ms`), `wait_for` (`selector`). Both `fill` and `type` type one character at a time at human pace. Actions take `timeoutMs` (default 10 s, 30 s for `goto`); an action that cannot run stops that version and the rest of its steps are skipped.
 
 Checks, which end with PASS or FAIL in the caption: `expect_visible`, `expect_hidden` (`selector`), `expect_text` (`text`, optional `selector`), `expect_url` (`contains`), `expect_count` (`selector`, `count`). Each takes `timeoutMs`, plus optional `pass` and `fail` captions written in plain words ("error message shown", "nothing happened, no error shown").
 

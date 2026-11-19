@@ -140,7 +140,8 @@ const ACTIONS = {
     await page.goto(new URL(s.url, base).href, { waitUntil: 'load' });
     await page.waitForLoadState('networkidle', { timeout: TRAFFIC_WAIT_MS }).catch(() => {});
   },
-  click: async (page, s, base, acted) => (await moveTo(page, s.selector, acted)).click(),
+  // `button: "right"` opens a context menu; the cursor glides there first, so hover-driven menus see it.
+  click: async (page, s, base, acted) => (await moveTo(page, s.selector, acted)).click(s.button ? { button: s.button } : undefined),
   fill: (page, s, base, acted) => humanType(page, s.selector, String(s.value ?? ''), true, acted),
   type: (page, s, base, acted) => humanType(page, s.selector, String(s.value ?? ''), false, acted),
   press: (page, s) => page.keyboard.press(s.key),
@@ -207,6 +208,7 @@ function scenarioErrors() {
   const steps = Array.isArray(scenario.steps) ? scenario.steps : [];
   steps.forEach((step, i) => {
     if (!ACTIONS[step.action] && !EXPECTATIONS[step.action]) errors.push(`unknown action "${step.action}" in step ${i + 1}`);
+    if (step.button !== undefined && !['left', 'right', 'middle'].includes(step.button)) errors.push(`button must be left, right or middle in step ${i + 1}`);
   });
   if (!steps.some((step) => EXPECTATIONS[step.action])) errors.push('steps need at least one expect_* check');
   for (const key of ['captions', 'trimWaits', 'full']) {

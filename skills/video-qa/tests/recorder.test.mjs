@@ -424,3 +424,32 @@ test('human pacing records a working flow through check, hover, type, fill, pres
     rmSync(run.dir, { recursive: true, force: true });
   }
 });
+
+test('a click with button "right" opens a context menu, and an unknown button is refused', { skip }, async () => {
+  const menu = (fixed) => `<!doctype html><title>t</title><button id="card">Card</button><p id="msg"></p>
+    <script>document.getElementById('card').addEventListener('contextmenu', (e) => {
+      e.preventDefault(); ${fixed ? "document.getElementById('msg').textContent = 'Menu open';" : ''}
+    });</script>`;
+  const spec = (before, after, button) => ({
+    ...scenario('Right click', before, after),
+    steps: [
+      { caption: 'Open', action: 'goto', url: '/', holdMs: 100 },
+      { caption: 'Right-click the card', action: 'click', selector: '#card', button, holdMs: 100 },
+      { caption: 'Menu opens', action: 'expect_text', text: 'Menu open', timeoutMs: 1000, holdMs: 100 },
+    ],
+  });
+  const run = await withServers([menu(false), menu(true)], ([before, after]) => record(spec(before, after, 'right')));
+  try {
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(run.results.verdict, 'FIXED');
+  } finally {
+    rmSync(run.dir, { recursive: true, force: true });
+  }
+  const bad = await record(spec('http://127.0.0.1:1', 'http://127.0.0.1:2', 'side'));
+  try {
+    assert.equal(bad.code, 2);
+    assert.match(bad.stderr, /button must be left, right or middle/);
+  } finally {
+    rmSync(bad.dir, { recursive: true, force: true });
+  }
+});

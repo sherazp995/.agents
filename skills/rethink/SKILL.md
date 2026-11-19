@@ -46,7 +46,7 @@ The finished work may be reviewed by general-review, so the plan applies its rul
 
 ## Calling the advisor
 
-`run-planner.sh <claude|codex> <repo dir> <prompt file> <out file> <idle seconds> "<sections>" [effort]`, with absolute paths, the advisor's side (`codex` on a Claude host, `claude` on a Codex host), idle 300 for Claude and 600 for Codex (it prints nothing while it reasons), Codex effort `high` for both opinions.
+`run-planner.sh <claude|codex> <repo dir> <prompt file> <out file> <idle seconds> "<sections>" [effort]`, with absolute paths, the advisor's side (`codex` on a Claude host, `claude` on a Codex host), idle 300 for Claude and 600 for Codex (it prints nothing while it reasons), Codex effort `high` for both opinions. `<sections>` is whole heading lines, each with its `## ` prefix, copied from steps 3 and 5 (`"## Direction=agree,agree with changes,disagree|## Risks|## Missing|## Change"`); bare names make a valid answer fail with exit 3 "missing heading line".
 
 - **Claude Code host:** run it with Bash in the background (`run_in_background`); a foreground call is killed at 10 minutes. Wait inside the turn as [host-lifecycle.md](../workflow-runner/references/host-lifecycle.md) says.
 - **Codex host:** a sub-agent's sandbox hides the Claude login, so the runner must run outside it. One-time setup in `~/.codex/rules/default.rules` (real absolute home path, no `~`):

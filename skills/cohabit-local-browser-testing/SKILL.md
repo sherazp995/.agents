@@ -12,6 +12,12 @@ came from a correction or preference the user gave in a past session.
 
 ## Rules
 
+### Manual QA from Relay must survive the end of the turn
+
+For a server the user will test after a headless Relay reply, launch it under a uniquely named macOS `launchd` job. `nohup` and a kept-open exec session can both be terminated when that turn ends. Verify the launchd job and HTTP health after the launching command exits, and record its label and cleanup command. Stop only that task's job after the user finishes. This does not apply to short browser checks completed within one turn.
+
+Learned from CI-339 manual QA on 2026-11-13: startup first died after its command exited, then a keep-alive exec session died after the turn ended and the user received Cloudflare error 1033.
+
 ### Staff/admin IdP sign-in and impersonation locally: start cohabit-web with the server-tunnel skill, don't mark it blocked
 
 When a cohabit-web check needs a staff sign-in through Cohabit Authentication (admin, super admin, impersonation, backend Confirm), run the app with the server-tunnel skill (~/Documents/cohabitplatforms/cohabit-web/.claude/skills/server-tunnel/scripts/tunnels.sh up, from the worktree under test). It starts the developer-portal and oidc-server and registers this session's redirect URI, so the IdP login works without touching the localhost:3000 server. Why: without it the IdP callback only works on :3000, so a staff sign-in looks blocked when it is not. How to apply: for any QA, video or manual check behind staff sign-in, plan a server-tunnel session (use --no-sidekiq when another session runs Sidekiq on the shared DB) instead of reporting the path blocked; tear it down with tunnels.sh down afterwards.

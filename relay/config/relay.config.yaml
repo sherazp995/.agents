@@ -3,8 +3,6 @@ model_provider:
   zero_data_retention: true
 database:
   url: keystore:relay-database-url
-  # Operator commands connect here; this Postgres trusts local connections, so no password is involved.
-  operator_url: postgres://relay_app@localhost:5432/relay
 redis:
   url: redis://localhost:6379/13
 logging:
@@ -13,6 +11,9 @@ autonomous:
   # Every Slack conversation runs as an autonomous task: one thread is one
   # Claude Code chat, run without the sandbox.
   enabled: true
+  # Each Slack turn may run this long before relay stops it (default 1 hour).
+  # Long ticket work (builds, specs, video QA) was being cut off at the hour.
+  turn_wall_clock_ms: 10800000 # 3 hours
 ui:
   # The local setup page for projects, personas and teams. Log in with `relay ui`.
   enabled: true
@@ -30,9 +31,14 @@ slack:
       act_as: U0BP0RW8FCH
     - channel: C0CGAM76QBS # insitu-hassan
       act_as: U0BP0RW8FCH
+
 # failover:
 #   # Two laptops sharing one cloud database; only one answers Slack at a
 #   # time (README, "Failover"). Each laptop names itself; the preferred one
 #   # takes the record back when it returns.
 #   host: hassan-mbp
 #   preferred: true
+
+failover:
+  host: hassan-mbp
+  preferred: true
