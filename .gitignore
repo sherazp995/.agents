@@ -19,6 +19,8 @@ local/
 skills/brag/
 skills/brag-slim/
 skills/archify/
+.playwright-mcp/
+relay/worktrees/
 
 # Machine-local links to project commands (point into client repos; never commit).
 commands/dev-pin-typescript.md
