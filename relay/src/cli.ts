@@ -631,23 +631,37 @@ program
   .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
   .action(async (options: { config: string }) => {
     const result = await runStatus({ checkDatabase: () => checkStatusDatabase(options.config) })
-    process.stdout.write(`${result.report}\n`)
-    process.exitCode = result.exitCode
+    // Exits once written: a stalled database connection must not keep the command open.
+    process.stdout.write(`${result.report}\n`, () => process.exit(result.exitCode))
   })
+
+/** The whole database line's limit: doctor's 10 s connect limit plus room for the keystore and the query. */
+const STATUS_DATABASE_LIMIT_MS = 15_000
 
 /** One connection to the database the daemon uses (its URL, not the operator one), within doctor's time limit. */
 async function checkStatusDatabase(configPath: string): Promise<DatabaseCheck> {
   const started = Date.now()
   let pool: ReturnType<typeof createPool> | undefined
+  let timer: NodeJS.Timeout | undefined
+  // The connect limit covers only the connection; this bounds the keystore lookup and a server that accepts and then stalls.
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer within ${STATUS_DATABASE_LIMIT_MS / 1000} seconds`)), STATUS_DATABASE_LIMIT_MS)
+  })
   try {
-    const config = loadRelayConfig(configPath)
-    pool = createPool(await resolveDatabaseUrl(config, createSecretProvider(config)), { max: 1, connectTimeoutMs: DOCTOR_CONNECT_TIMEOUT_MS })
-    await pool.query('SELECT 1')
+    const attempt = (async () => {
+      const config = loadRelayConfig(configPath)
+      pool = createPool(await resolveDatabaseUrl(config, createSecretProvider(config)), { max: 1, connectTimeoutMs: DOCTOR_CONNECT_TIMEOUT_MS })
+      await pool.query('SELECT 1')
+    })()
+    attempt.catch(() => undefined)
+    await Promise.race([attempt, deadline])
     return { ok: true, ms: Date.now() - started }
   } catch (error) {
     return { ok: false, ms: Date.now() - started, error: (error as Error).message }
   } finally {
-    if (pool !== undefined) await closePool(pool).catch(() => undefined)
+    clearTimeout(timer)
+    // A stalled pool is not waited on: the command exits once the report is written.
+    if (pool !== undefined) void closePool(pool).catch(() => undefined)
   }
 }
 

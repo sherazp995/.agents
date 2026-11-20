@@ -163,7 +163,6 @@ export async function runStatus(deps: StatusDeps = {}): Promise<StatusResult> {
   const platform = deps.platform ?? process.platform
   const run = deps.run ?? runCommand
   const readTail = deps.readTail ?? readTailOf
-  const database = deps.checkDatabase === undefined ? undefined : deps.checkDatabase()
   let proc: Process
   const lines: string[] = []
   if (platform === 'linux') {
@@ -205,8 +204,9 @@ export async function runStatus(deps: StatusDeps = {}): Promise<StatusResult> {
     const lastError = [...own].reverse().find((line) => line.error)
     if (lastError !== undefined && lastError !== last) lines.push(`Last error${proc.running ? ' since it started' : ''}: ${lastError.text}`)
   }
-  if (database !== undefined) {
-    const result = await database
+  // Started after the synchronous launchctl and ps calls, so its time is the database's alone.
+  if (deps.checkDatabase !== undefined) {
+    const result = await deps.checkDatabase()
     lines.push(result.ok ? `Database: reachable (connected in ${seconds(result.ms)})` : `Database: not reachable after ${seconds(result.ms)} (${result.error.split('\n')[0]})`)
   }
   if (proc.logPath !== undefined) lines.push(`Log: ${proc.logPath}`)

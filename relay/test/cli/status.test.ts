@@ -120,6 +120,24 @@ describe('relay status', async () => {
     expect(result).toEqual({ exitCode: 1, report: 'Relay daemon: unknown (launchctl print failed: spawnSync /bin/launchctl ETIMEDOUT)' })
   })
 
+  it('checks the database only after launchctl and ps, so its time is its own', async () => {
+    const order: string[] = []
+    await runStatus({
+      platform: 'darwin',
+      uid: 501,
+      run: () => (order.push('launchctl'), LAUNCHD_RUNNING),
+      processStartMs: () => (order.push('ps'), T),
+      readTail: () => null,
+      checkDatabase: async () => (order.push('database'), { ok: true, ms: 1 }),
+    })
+    expect(order).toEqual(['launchctl', 'ps', 'database'])
+  })
+
+  it('gives a running daemon no role or log line when its start time cannot be read', async () => {
+    const result = await runStatus({ platform: 'darwin', uid: 501, run: () => LAUNCHD_RUNNING, processStartMs: () => null, readTail: () => json(T, 'orchestrator is running') })
+    expect(result.report).toBe('Relay daemon: running (pid 32870, started 1 time)\nLog: /relay/tmp/relay.log')
+  })
+
   it('takes an error line message when a JSON log line has no msg, and the last non-empty line only', () => {
     expect(lastLogLine(`${JSON.stringify({ level: 50, time: T, err: { message: 'boom' } })}\n\n`)).toBe('18:22:59 UTC: boom')
     expect(lastLogLine('\n \n')).toBeUndefined()
