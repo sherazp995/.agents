@@ -78,6 +78,53 @@ export async function runNotify(pool: Pool, params: NotifyParams): Promise<Notif
   return results
 }
 
+export type LinkedThreadParams = {
+  workspaceId: string
+  /** The laptop owner: the thread's session is theirs, and with no `channel` the post goes to their DM. */
+  owner: string
+  /** A channel id to post in instead of the owner's DM. */
+  channel?: string
+  text: string
+  /** The Claude Code chat to attach the thread to; without it the thread only gets its session. */
+  attach?: NonNullable<NotifyParams['attach']>
+  sendWaitMs: number
+}
+
+/**
+ * Posts one message that opens a thread for a terminal chat (src/cli/launch.ts)
+ * and gives the thread its session, attached to the chat when `attach` names
+ * one. Null when the daemon did not send it within `sendWaitMs`.
+ */
+export async function openLinkedThread(pool: Pool, params: LinkedThreadParams): Promise<{ channel: string; thread: string } | null> {
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, $2, $3, now()) RETURNING id`,
+    [params.workspaceId, PLATFORM, { kind: 'post', ref: { channel: params.channel ?? params.owner }, text: scrubSecrets(params.text.trim()), markdown: true }],
+  )
+  const sent = await waitForSent(pool, rows[0]?.id ?? '', params.sendWaitMs)
+  if (sent === null) {
+    // Never sent late into a thread no chat is linked to.
+    await pool.query(`UPDATE outbox SET status = 'failed', last_error = 'not sent before the launcher gave up' WHERE id = $1 AND status = 'pending'`, [rows[0]?.id ?? ''])
+    return null
+  }
+  const linked = params.attach !== undefined ? await attachThread(pool, params.workspaceId, params.owner, sent, params.attach) : await giveThreadSession(pool, params.workspaceId, params.owner, sent)
+  return linked ? { channel: sent.channel, thread: sent.message } : null
+}
+
+/**
+ * The laptop owner: `configured` (launcher.dm_to) when it is a mapped user,
+ * otherwise the workspace's only owner. Throws when it cannot tell.
+ */
+export async function laptopOwner(pool: Pool, workspaceId: string, configured: string | undefined): Promise<string> {
+  if (configured !== undefined) return (await mappedUser(pool, workspaceId, configured))[0] ?? configured
+  const all = await owners(pool, workspaceId)
+  if (all.length === 1 && all[0] !== undefined) return all[0]
+  throw new NotifyError(
+    all.length === 0
+      ? 'No owner is mapped in this workspace; add one with `relay principals add --role owner`.'
+      : 'This workspace has several owners, so Relay cannot tell whose laptop this is; set launcher.dm_to to your Slack user id in relay.config.yaml.',
+  )
+}
+
 /** Null when the daemon did not send the DM in time; a reply then starts an autonomous task instead. */
 async function waitForSent(pool: Pool, outboxId: string, waitMs: number): Promise<{ channel: string; message: string } | null> {
   const deadline = Date.now() + waitMs
@@ -90,14 +137,24 @@ async function waitForSent(pool: Pool, outboxId: string, waitMs: number): Promis
   }
 }
 
-async function attachThread(pool: Pool, workspaceId: string, userId: string, sent: { channel: string; message: string }, attach: NonNullable<NotifyParams['attach']>): Promise<boolean> {
+async function threadSession(pool: Pool, workspaceId: string, userId: string, sent: { channel: string; message: string }): Promise<{ id: string } | undefined> {
   const { rows: principals } = await pool.query<{ id: string }>(
     'SELECT id FROM principals WHERE workspace_id = $1 AND platform = $2 AND platform_user_id = $3',
     [workspaceId, PLATFORM, userId],
   )
   const principalId = principals[0]?.id
-  if (!principalId) return false
-  const session = await findOrCreateSession(pool, { workspaceId, principalId, adapter: PLATFORM, threadRef: composeThreadRef(sent.channel, sent.message) })
+  if (!principalId) return undefined
+  return findOrCreateSession(pool, { workspaceId, principalId, adapter: PLATFORM, threadRef: composeThreadRef(sent.channel, sent.message) })
+}
+
+/** A thread with a session and no chat: `relay live say` can post in it, and replies go to Relay's own loop. */
+async function giveThreadSession(pool: Pool, workspaceId: string, userId: string, sent: { channel: string; message: string }): Promise<boolean> {
+  return (await threadSession(pool, workspaceId, userId, sent)) !== undefined
+}
+
+async function attachThread(pool: Pool, workspaceId: string, userId: string, sent: { channel: string; message: string }, attach: NonNullable<NotifyParams['attach']>): Promise<boolean> {
+  const session = await threadSession(pool, workspaceId, userId, sent)
+  if (session === undefined) return false
   await attachSessionToEngineChat(pool, session.id, attach.engineSessionId, attach.cwd, attach.host ?? null)
   if (attach.peer !== undefined) {
     // The exact chat is known, so the thread is claimed for it: replies park
@@ -108,7 +165,7 @@ async function attachThread(pool: Pool, workspaceId: string, userId: string, sen
   return true
 }
 
-async function slackWorkspaceId(pool: Pool): Promise<string> {
+export async function slackWorkspaceId(pool: Pool): Promise<string> {
   const workspaces = await listWorkspacesForPlatform(pool, PLATFORM)
   const only = workspaces[0]
   if (!only) throw new NotifyError('No Slack workspace yet: start the relay daemon once so it connects.')

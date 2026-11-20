@@ -81,4 +81,31 @@ describe('pool error handling', () => {
     },
     15000,
   )
+
+  // The daemon crashes of 2026-11-20 (11:51Z read EADDRNOTAVAIL, 12:23Z read ETIMEDOUT; 24 like them in relay/tmp/relay.log since 2026-11-19):
+  // "Emitted 'error' event on Client instance" with no listener, while a client was checked out, killed every running chat.
+  it(
+    'survives a checked-out client whose backend drops between queries; its next query fails instead',
+    async () => {
+      if (!pool) throw new Error('pool was not created; beforeAll must have failed')
+      const client = await pool.connect()
+      const killer = await pool.connect()
+      const {
+        rows: [row],
+      } = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+
+      // The daemon's 12:23Z crash on 2026-11-20: a socket timeout on a client a
+      // caller still held. pg raises it as an 'error' event on that client, which
+      // the pool's own listener does not cover while the client is checked out.
+      const ended = new Promise((resolve) => client.once('end', resolve))
+      await killer.query('SELECT pg_terminate_backend($1)', [row?.pid])
+      killer.release()
+      await ended
+
+      await expect(client.query('SELECT 1')).rejects.toThrow()
+      client.release()
+      expect((await pool.query('SELECT 1 AS one')).rows[0]).toEqual({ one: 1 })
+    },
+    15000,
+  )
 })

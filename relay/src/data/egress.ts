@@ -242,6 +242,11 @@ export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
     "A generic execFile wrapper's own `file` parameter (defaultExecFile), not a fixed destination by itself; the " +
     'actual binary it is invoked with (secret-tool) is resolved and matched separately, above. Same shape as ' +
     'src/secrets/keychain.ts, and for the same reason.',
+  'src/cli/launch.ts':
+    "Spawns the operator's own claude or codex CLI for `relay claude` / `relay codex` (runInTerminal): the binary " +
+    'is autonomous.claude_bin or autonomous.codex_bin from relay.config.yaml (src/cli.ts launchChat), the same ' +
+    'two vendor CLIs Relay already runs for its Slack sessions, so its destinations are the Anthropic and OpenAI ' +
+    'entries above.',
   'src/cli/db.ts':
     'Spawns `sudo -u postgres psql` on Linux or `psql` on macOS, chosen by psqlCommand() in the same file, for ' +
     '`relay db create`. Both connect only to the Postgres named by database.url, and the command refuses any host ' +

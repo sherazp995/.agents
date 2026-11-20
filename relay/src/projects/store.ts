@@ -5,7 +5,9 @@
  * with its audit entry; reads take a Pool or a client.
  */
 
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Pool, PoolClient } from 'pg'
 import type { AccountClient } from '../autonomous/accounts.js'
 import { knownHomes, mapPath } from '../failover/paths.js'
@@ -384,6 +386,44 @@ export async function setMemberLimit(client: PoolClient, workspaceId: string, pr
   if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new StoreConflict('A team runs 1 to 6 members at once.')
   await ensureTeam(client, workspaceId, projectId)
   await client.query('UPDATE teams SET member_limit = $3 WHERE workspace_id = $1 AND project_id = $2', [workspaceId, projectId, limit])
+}
+
+/**
+ * The project whose folder holds `cwd`, with its folder mapped to this
+ * laptop's home: the folder itself, a folder inside it, or a `<folder>-<name>`
+ * worktree next to it when the folder is a git repository or a registered
+ * one, unless that sibling is itself a project folder or a registered
+ * repository. The deepest folder wins.
+ */
+export async function projectForFolder(pool: Pool, workspaceId: string, cwd: string, repos: readonly string[]): Promise<Project | undefined> {
+  const homes = await knownHomes(pool)
+  const local = (path: string): string => trimSlash(mapPath(path, homes, homedir()))
+  const registered = repos.map(local)
+  const here = trimSlash(cwd)
+  const projects = (await listProjects(pool, workspaceId)).map((project) => ({ ...project, folder: local(project.folder) }))
+  const owned = [...registered, ...projects.map((project) => project.folder)]
+  const ownedHere = owned.some((folder) => here === folder || here.startsWith(`${folder}/`))
+  let best: Project | undefined
+  for (const project of projects) {
+    const folder = project.folder
+    const inside = here === folder || here.startsWith(`${folder}/`)
+    const repo = registered.includes(folder) || existsSync(join(folder, '.git'))
+    const worktree = !inside && repo && !ownedHere && siblingWorktreeOf(here, folder)
+    if ((inside || worktree) && (best === undefined || folder.length > best.folder.length)) best = project
+  }
+  return best
+}
+
+function trimSlash(path: string): string {
+  return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path
+}
+
+/** True when `cwd` is in a `<repo>-<name>` folder next to `repo`. */
+function siblingWorktreeOf(cwd: string, repo: string): boolean {
+  const parent = repo.slice(0, repo.lastIndexOf('/'))
+  if (!cwd.startsWith(`${parent}/`)) return false
+  const top = cwd.slice(parent.length + 1).split('/')[0] ?? ''
+  return top.startsWith(`${repo.slice(parent.length + 1)}-`)
 }
 
 /** The project that owns this Slack channel, with its repos and its folder mapped to this laptop's home. */

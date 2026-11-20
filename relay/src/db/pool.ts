@@ -42,6 +42,13 @@ export function createPool(url: string, options: { max?: number } = {}): Pool {
   // discards the broken client and creates a fresh one on the next checkout,
   // so there is nothing to do here beyond preventing the crash.
   pool.on('error', () => {})
+  // The pool's listener covers idle clients only. A client a caller holds
+  // between queries (a transaction, a LISTEN wait) raises the same 'error' on
+  // itself, and the daemon crashed on one when the pooler timed out. Its next
+  // query rejects, and the pool drops it on release, so ignoring it is safe.
+  pool.on('connect', (client) => {
+    client.on('error', () => {})
+  })
   return pool
 }
 

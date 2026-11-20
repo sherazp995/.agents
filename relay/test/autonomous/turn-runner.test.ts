@@ -172,7 +172,7 @@ describe('turn runner', () => {
     const { d } = deps(
       [
         (request) => {
-          request.onReply?.({ text: 'Started a subagent.', sessionId: 's-mid' })
+          request.onReply?.({ text: 'Started a subagent.', sessionId: 's-mid', read: [] })
           return REPLY
         },
       ],
@@ -185,7 +185,7 @@ describe('turn runner', () => {
 
     await runTurnOnPool(d, { ...ctx, onReply: (reply) => posted.push(reply) })
 
-    expect(posted).toEqual([{ text: 'Started a subagent.', sessionId: 's-mid', accountKey: 'claude' }])
+    expect(posted).toEqual([{ text: 'Started a subagent.', sessionId: 's-mid', read: [], accountKey: 'claude' }])
     expect(saved).toEqual(['s-mid', REPLY.kind === 'reply' ? REPLY.sessionId : ''])
   })
 

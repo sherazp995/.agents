@@ -15,6 +15,12 @@
  * limit then counts from the last result, and once anything was handed out
  * the turn always ends as a reply: what is left to post, plus a short note
  * when it ended by the limit or an error.
+ *
+ * A turn that takes messages mid-turn (`replayInput`) asks Claude to echo
+ * each stdin message back when the chat actually reads it
+ * (`--replay-user-messages`). Each reply handed out carries the texts read
+ * since the last one (`read`), so the scheduler can count a message as
+ * handled once a reply follows it, and a kill later never sends it again.
  */
 
 import { engineChildEnv, parseFinalResult, readsAsResumeRejection } from '../live/direct-session.js'
@@ -41,7 +47,7 @@ export function claudeUserLine(text: string): string {
 
 /** The prompt goes on stdin (`claudeUserLine`), not in the arguments. */
 /** `model` picks the model; `noMcp` starts with no MCP servers (none configured, and the user's ignored). */
-export function buildClaudeArgs(params: { brief: string; settingsJson: string; resume?: string; model?: string; noMcp?: boolean }): string[] {
+export function buildClaudeArgs(params: { brief: string; settingsJson: string; resume?: string; model?: string; noMcp?: boolean; replayInput?: boolean }): string[] {
   return [
     '-p',
     '--input-format',
@@ -49,6 +55,7 @@ export function buildClaudeArgs(params: { brief: string; settingsJson: string; r
     '--output-format',
     'stream-json',
     '--verbose',
+    ...(params.replayInput === true ? ['--replay-user-messages'] : []),
     '--append-system-prompt',
     params.brief,
     '--permission-mode',
@@ -86,8 +93,12 @@ export type TurnOutcome =
   | { kind: 'stopped' }
   | { kind: 'failed'; reason: string; stderrTail: string }
 
-/** One finished reply, handed out while the turn's process may still run. */
-export type HandedReply = { text: string; sessionId: string }
+/**
+ * One finished reply, handed out while the turn's process may still run.
+ * `read`: the stdin messages the chat read (Claude replayed them) since the
+ * last reply handed out, exactly as written, in order.
+ */
+export type HandedReply = { text: string; sessionId: string; read: readonly string[] }
 
 /** How the scheduler reaches a running turn: `send` is set while the turn takes input, and null otherwise. */
 export type TurnInbox = { send: ((text: string) => boolean) | null }
@@ -178,7 +189,8 @@ export async function runWorkerTurn(request: TurnRequest): Promise<TurnOutcome> 
   const reason = finished.kind === 'failed' ? `\n${finished.reason}` : ''
   const blocked = classifyBlocked({ exitCode: result.code, stderr: `${result.stderr}${reason}`, ...(result.spawnErrorCode ? { spawnErrorCode: result.spawnErrorCode } : {}) })
   if (blocked !== null) return { kind: 'account_blocked', reason: blocked, stderrTail }
-  if (readsAsResumeRejection(result.stdout, result.stderr)) return { kind: 'resume_rejected' }
+  // Replayed messages are the user's own words: one quoting the CLI's refusal must not read as one.
+  if (readsAsResumeRejection(withoutReplayedInput(result.stdout), result.stderr)) return { kind: 'resume_rejected' }
   return finished
 }
 
@@ -196,6 +208,27 @@ type Watcher = {
   /** True once any reply was handed out mid-turn. */
   handedOut(): boolean
   finish(result: GatedSpawnResult, stderrTail: string): TurnOutcome
+}
+
+/**
+ * A stdin message Claude echoed back as the chat read it: a top-level user
+ * event marked `isReplay` with string content. Tool results are user events
+ * too, but carry block content and no `isReplay`; a subagent's carry a
+ * parent_tool_use_id.
+ */
+function replayedText(event: Record<string, unknown> | undefined): string | undefined {
+  if (event?.type !== 'user' || event.isReplay !== true) return undefined
+  if (event.parent_tool_use_id !== null && event.parent_tool_use_id !== undefined) return undefined
+  const content = (event.message as { content?: unknown } | undefined)?.content
+  return typeof content === 'string' ? content : undefined
+}
+
+/** stdout without the replayed stdin messages, so only the CLI's own output is searched. */
+function withoutReplayedInput(stdout: string): string {
+  return stdout
+    .split('\n')
+    .filter((line) => parseLine(line)?.isReplay !== true)
+    .join('\n')
 }
 
 function parseLine(line: string): Record<string, unknown> | undefined {
@@ -220,7 +253,9 @@ function parseLine(line: string): Record<string, unknown> | undefined {
  *
  * With `onReply`, each successful result hands out the texts written since
  * the last one (or that result's own text when there were none), and
- * `finish` returns only what was not handed out yet.
+ * `finish` returns only what was not handed out yet. It also hands out the
+ * messages the chat read since the last reply with text; a result with no
+ * text or an error keeps them for the next one, since nothing answered them.
  */
 function claudeWatcher(onResult: () => void, onReply?: (reply: HandedReply) => void): Watcher {
   const texts: string[] = []
@@ -231,10 +266,17 @@ function claudeWatcher(onResult: () => void, onReply?: (reply: HandedReply) => v
   // texts[0..handed) are already out; the session of the last result handed out.
   let handed = 0
   let handedSession: string | undefined
+  // Replayed stdin messages read since the last reply with text.
+  let read: string[] = []
   return {
     handedOut: () => handedSession !== undefined,
     onLine(line) {
       const event = parseLine(line)
+      const replayed = replayedText(event)
+      if (replayed !== undefined) {
+        read.push(replayed)
+        return
+      }
       if (event?.type === 'assistant' && (event.parent_tool_use_id === null || event.parent_tool_use_id === undefined)) {
         texts.push(...assistantTexts(event.message))
         return
@@ -250,8 +292,10 @@ function claudeWatcher(onResult: () => void, onReply?: (reply: HandedReply) => v
         handed = texts.length
         const text = fresh.length > 0 ? fresh.join('\n\n') : typeof event.result === 'string' ? event.result.trim() : ''
         // Only a result with text counts as handed out; an empty one only restarts the time limit.
+        const carried = text.trim() !== '' ? read : []
+        if (text.trim() !== '') read = []
         if (text !== '') handedSession = event.session_id
-        onReply({ text, sessionId: event.session_id })
+        onReply({ text, sessionId: event.session_id, read: carried })
       }
       if (backgroundTasks === 0) onResult()
     },

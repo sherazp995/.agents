@@ -361,6 +361,13 @@ export const relayConfigSchema = z
       .strict() as z.ZodType<{
       provider: 'keychain' | 'libsecret'
     }>,
+    // `relay claude` / `relay codex` (src/cli/launch.ts): `dm_to` is the Slack
+    // user whose DM gets the chat's thread when its folder has no project
+    // channel. Absent means the workspace's only owner, and no DM with several.
+    launcher: z
+      .object({ dm_to: z.string().regex(/^[UW][A-Z0-9]+$/, 'a Slack user id, like U0123ABC') })
+      .strict()
+      .optional(),
     // Two laptops sharing one database (README, "Failover"): only the one
     // holding the record answers Slack. Absent means off, as before.
     failover: z

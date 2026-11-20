@@ -13,7 +13,7 @@ import { createLogger } from '../../src/obs/logger.js'
 import { processGroupAlive, spawnGated } from '../../src/process/gated-spawn.js'
 import { acquireLease, addNote, intakeMention, loadTask, PAUSED_NOTE, pinReminderTask, updateTask, type AutonomousTask } from '../../src/autonomous/store.js'
 import { downloadTaskFiles, type FileFetch } from '../../src/autonomous/files.js'
-import { createScheduler, INTERRUPTED_NOTE, pauseAutonomousTask, stopAutonomousTask, type SchedulerDeps, type SchedulerEffects, type TurnRequestContext, type TurnResult } from '../../src/autonomous/scheduler.js'
+import { claimRead, createScheduler, INTERRUPTED_NOTE, pauseAutonomousTask, stopAutonomousTask, type SchedulerDeps, type SchedulerEffects, type TurnRequestContext, type TurnResult } from '../../src/autonomous/scheduler.js'
 import { missingFolderText, placeTaskTurn, repositoryFallbackText } from '../../src/autonomous/runtime.js'
 import type { FailoverGate } from '../../src/failover/types.js'
 import type { TurnOutcome } from '../../src/autonomous/worker.js'
@@ -177,11 +177,11 @@ describe('autonomous scheduler', () => {
     const midTurn: (AutonomousTask | null | undefined)[] = []
     const h = harness([
       async (context) => {
-        context.onReply?.({ text: 'Started a subagent.', sessionId: 'sess-1', accountKey: 'claude' })
+        context.onReply?.({ text: 'Started a subagent.', sessionId: 'sess-1', read: [], accountKey: 'claude' })
         const deadline = Date.now() + 3000
         while (h.posts.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
         midTurn.push(await loadTask(pool, task.id))
-        context.onReply?.({ text: 'Subagent says PONG.', sessionId: 'sess-1', accountKey: 'claude' })
+        context.onReply?.({ text: 'Subagent says PONG.', sessionId: 'sess-1', read: [], accountKey: 'claude' })
         return reply('')
       },
     ])
@@ -198,7 +198,7 @@ describe('autonomous scheduler', () => {
     const { workspaceId, task } = await newTask()
     const h = harness([
       async (context) => {
-        context.onReply?.({ text: 'On it.', sessionId: 'sess-1', accountKey: 'claude' })
+        context.onReply?.({ text: 'On it.', sessionId: 'sess-1', read: [], accountKey: 'claude' })
         const deadline = Date.now() + 3000
         while (h.posts.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
         await addNote(pool, context.lease, 'Approved. Run it again now: git push')
@@ -221,8 +221,8 @@ describe('autonomous scheduler', () => {
     const { workspaceId } = await newTask()
     const h = harness([
       async (context) => {
-        context.onReply?.({ text: 'First.', sessionId: 'sess-1', accountKey: 'claude' })
-        context.onReply?.({ text: 'Second.', sessionId: 'sess-1', accountKey: 'claude' })
+        context.onReply?.({ text: 'First.', sessionId: 'sess-1', read: [], accountKey: 'claude' })
+        context.onReply?.({ text: 'Second.', sessionId: 'sess-1', read: [], accountKey: 'claude' })
         return reply('')
       },
     ])
@@ -244,7 +244,7 @@ describe('autonomous scheduler', () => {
     const { workspaceId } = await newTask()
     const h = harness([
       async (context) => {
-        context.onReply?.({ text: 'Half done.', sessionId: 'sess-1', accountKey: 'claude' })
+        context.onReply?.({ text: 'Half done.', sessionId: 'sess-1', read: [], accountKey: 'claude' })
         return outcome({ kind: 'stopped' })
       },
     ])
@@ -296,6 +296,62 @@ describe('autonomous scheduler', () => {
     await scheduler(workspaceId, h).tick()
 
     expect(h.posts).toEqual(['Deploy is green.'])
+    expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [] })
+  })
+
+  // The 2026-11-20 re-sends: a long turn killed by a daemon restart had read and answered these messages, and the next turn got them again.
+  it('consumes a message sent into the running turn with the first reply after the chat read it, so a stop does not send it again; an unread one stays', async () => {
+    const { workspaceId, task, say } = await newTask('build the report')
+    const sent: string[] = []
+    const wait = async (done: () => boolean) => {
+      const deadline = Date.now() + 3000
+      while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    const h = harness([
+      async (context) => {
+        if (context.inbox) context.inbox.send = (text) => sent.push(text) > 0
+        await say('what is the reply?')
+        await wait(() => sent.length === 1)
+        await say('and add a chart')
+        await wait(() => sent.length === 2)
+        context.onReply?.({ text: 'The reply is 4.', sessionId: 'sess-1', read: [sent[0] as string], accountKey: 'claude' })
+        await wait(() => h.posts.length === 1)
+        return outcome({ kind: 'stopped' })
+      },
+    ])
+    const s = scheduler(workspaceId, h, { tickMs: 20 })
+
+    await s.tick()
+
+    expect(h.posts).toEqual(['The reply is 4.'])
+    expect((await loadTask(pool, task.id))?.pendingEvents.map((event) => event.text)).toEqual(['and add a chart'])
+  })
+
+  it('consumes the messages a failed mid-turn reply answered when the stopped turn posts it', async () => {
+    const { workspaceId, task, say } = await newTask('build the report')
+    const sent: string[] = []
+    const h = harness([
+      async (context) => {
+        if (context.inbox) context.inbox.send = (text) => sent.push(text) > 0
+        await say('what is the reply?')
+        const deadline = Date.now() + 3000
+        while (sent.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+        context.onReply?.({ text: 'The reply is 4.', sessionId: 'sess-1', read: [sent[0] as string], accountKey: 'claude' })
+        return outcome({ kind: 'stopped' })
+      },
+    ])
+    const deps = schedulerDeps(workspaceId, h, { tickMs: 20 })
+    const post = deps.post
+    let calls = 0
+    deps.post = async (action, executor) => {
+      calls += 1
+      if (calls === 1) throw new Error('outbox down')
+      return post(action, executor)
+    }
+
+    await createScheduler(deps).tick()
+
+    expect(h.posts).toEqual(['The reply is 4.'])
     expect(await loadTask(pool, task.id)).toMatchObject({ pendingEvents: [] })
   })
 
@@ -782,5 +838,17 @@ describe('autonomous scheduler', () => {
       expect(h.turns[0]?.prompt).toContain('fix the login bug')
       expect(h.posts.at(-1)).toBe('Fixed it.')
     })
+  })
+})
+
+describe('claimRead', () => {
+  it('takes the oldest unread write with exactly the read text, so the same text sent twice needs two reads', () => {
+    const sent = { writes: [{ text: 'same', eventIds: ['e1'], read: false }, { text: 'same', eventIds: ['e2'], read: false }, { text: 'other', eventIds: ['e3', 'e4'], read: false }] }
+    const unmatched: string[] = []
+
+    expect(claimRead(sent, ['same', 'the turn prompt'], (text) => unmatched.push(text))).toEqual(['e1'])
+    expect(claimRead(sent, ['other', 'same'], (text) => unmatched.push(text))).toEqual(['e3', 'e4', 'e2'])
+    expect(claimRead(sent, ['same'], (text) => unmatched.push(text))).toEqual([])
+    expect(unmatched).toEqual(['the turn prompt', 'same'])
   })
 })

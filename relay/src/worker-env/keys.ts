@@ -51,6 +51,12 @@ export async function loadReaderKey(deps: LoadKeyDeps): Promise<ReaderKey | null
   return key
 }
 
+/** This laptop's key when the keystore has one; never makes one, for commands that must not change the keystore. */
+export async function readReaderKey(secrets: SecretProvider): Promise<ReaderKey | null> {
+  if (secrets.kind === 'env' || !(await secrets.has(WORKER_ENV_KEY_SECRET))) return null
+  return readerKeyFromPrivate(await secrets.get(WORKER_ENV_KEY_SECRET))
+}
+
 /** Publishes the key for every workspace and gives laptops without copies theirs. */
 export async function syncReaderKey(pool: Pool, key: ReaderKey, host: string, log: Logger): Promise<void> {
   const { rows } = await pool.query<{ id: string }>('SELECT id FROM workspaces ORDER BY id')

@@ -586,6 +586,43 @@ to it. Removing an entry falls back to the next layer down.
   answer once this one has added the env tables, and `relay env` says so
   until the database is updated.
 
+### Terminal chats: `relay claude` and `relay codex`
+
+Run `relay claude` or `relay codex` instead of `claude` or `codex`, with the
+same arguments. The chat starts the way Relay starts its Slack sessions:
+
+- on the first login in `~/.agents/accounts.toml` that is not cooling down
+  (Codex: also proven by `relay doctor`), whatever alias the shell set;
+- with the envs `relay env` stores for this laptop and folder. Commands read
+  this laptop's env key through `security`, so macOS asks the first time a
+  folder with stored envs is opened. Channel description envs are not used;
+- told the folder's project (folder, a folder inside it, or a worktree next to
+  a registered repo), its linked repos and its team. It cannot run
+  `relay team`: team requests only run in a thread Relay itself runs;
+- with a Slack thread: in the project's channel, otherwise in the laptop
+  owner's DM. The owner is `launcher.dm_to` in `relay.config.yaml`, or the
+  workspace's only owner; with several owners and no setting no thread is
+  opened. When the daemon does not post within 5 seconds the chat starts
+  without one.
+
+```yaml
+launcher:
+  dm_to: U0123ABC   # your Slack user id
+```
+
+A Claude chat is attached to its thread: replies there are pushed into the
+open chat, and go to Relay's own loop once it closes. When a Claude chat
+ends on a usage limit or an expired login, quit it and it reopens with
+`--resume` on the next free login, provided that login keeps its chats in the
+same folder. With `--continue`, a bare `--resume` or `--print` the chat id is
+not known in advance, so the thread is opened but not attached.
+
+A Codex chat can post in its thread with `relay live say`; replies there are
+answered by Relay's own loop. It does not move logins after a limit: resume it
+yourself with `relay codex resume <id>`.
+
+Nothing holds a database connection while the chat runs.
+
 ### A Playwright extension token in a channel description
 
 As a fallback, a line `PLAYWRIGHT_MCP_EXTENSION_TOKEN=<token>` (and

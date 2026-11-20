@@ -3,6 +3,10 @@ import { runKillClear, runKillEngage } from './cli/kill.js'
 import { Command } from 'commander'
 import type { Pool } from 'pg'
 import { runPrincipalsAdd } from './cli/principals.js'
+import { readIfPresent, relayPrepare, runInTerminal, runLaunch } from './cli/launch.js'
+import { readAccountPool, RedisCooldownStore } from './autonomous/accounts.js'
+import { codexVersion, isProvenEligible, readCodexEligibility } from './autonomous/codex-probe.js'
+import { closeRedis, createRedis, waitForReady } from './redis/client.js'
 import { runNotify } from './cli/notify.js'
 import { runUi } from './cli/ui.js'
 import { registerTeamCommands } from './cli/team.js'
@@ -696,4 +700,61 @@ program
     process.exitCode = result.exitCode
   })
 
-await program.parseAsync(process.argv)
+/**
+ * `relay claude [args]` and `relay codex [args]` (src/cli/launch.ts). Taken
+ * before commander parses, so every argument, --help included, reaches the
+ * real command untouched.
+ */
+async function launchChat(client: 'claude' | 'codex', userArgs: readonly string[]): Promise<number> {
+  const config = loadRelayConfig(defaultConfigPath())
+  const secrets = createSecretProvider(config)
+  const host = config.failover?.host ?? null
+  const cwd = process.cwd()
+  const bin = client === 'claude' ? (config.autonomous?.claude_bin ?? 'claude') : (config.autonomous?.codex_bin ?? 'codex')
+  const codexVersionNow = client === 'codex' ? codexVersion(bin).catch(() => 'unknown') : Promise.resolve('unknown')
+  const relayHome = resolveRelayHome().path
+  return runLaunch({
+    client,
+    bin,
+    userArgs,
+    cwd,
+    host,
+    accounts: () => readAccountPool(),
+    withCooldowns: async (use) => {
+      const redis = createRedis(config.redis.url)
+      try {
+        if (!(await waitForReady(redis))) throw new Error(`Redis at ${new URL(config.redis.url).host} did not answer, so login cooldowns cannot be read`)
+        return await use(new RedisCooldownStore(redis))
+      } finally {
+        await closeRedis(redis)
+      }
+    },
+    isCodexEligible: async (account) => isProvenEligible(await readCodexEligibility(relayHome), account.key, await codexVersionNow),
+    prepare: relayPrepare({
+      client,
+      cwd,
+      host,
+      dmTo: config.launcher?.dm_to,
+      openPool: async () => createPool(await resolveOperatorDatabaseUrl(config, secrets)),
+      closePool,
+      secrets,
+      repos: () => loadRepoRegistryIfPresent(defaultReposPath()).repos.map((repo) => repo.path),
+    }),
+    run: runInTerminal,
+    readTranscript: readIfPresent,
+    say: (text) => process.stderr.write(`relay: ${text}\n`),
+    baseEnv: process.env,
+  })
+}
+
+const launched = process.argv[2]
+if (launched === 'claude' || launched === 'codex') {
+  try {
+    process.exitCode = await launchChat(launched, process.argv.slice(3))
+  } catch (error) {
+    process.stderr.write(`relay ${launched} did not start: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exitCode = 1
+  }
+} else {
+  await program.parseAsync(process.argv)
+}

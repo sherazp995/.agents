@@ -34,6 +34,12 @@ describe('the spawn plan', () => {
     ])
   })
 
+  it('asks Claude to echo each message it reads only for a turn that takes messages mid-turn', () => {
+    const plain = params(CLAUDE)
+    expect(buildSpawnPlan(SETUP, plain).args).not.toContain('--replay-user-messages')
+    expect(buildSpawnPlan(SETUP, { ...plain, context: { ...plain.context, inbox: { send: null } } }).args).toContain('--replay-user-messages')
+  })
+
   it("starts a member in its worktree with its brief, its model and no MCP servers", () => {
     const member = { ...taskSubject(task), cwd: '/wt/a1', brief: 'You are Theo.', model: 'opus', noMcp: true }
     const claude = buildSpawnPlan(SETUP, params(CLAUDE, member))

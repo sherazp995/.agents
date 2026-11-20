@@ -38,6 +38,11 @@ describe('WORKER_BRIEF', () => {
     expect(WORKER_BRIEF).toContain('Never tell the user that their messages restart you or stop a build.')
   })
 
+  it('restarts stopped background work as a new agent, never by resuming it with SendMessage', () => {
+    expect(WORKER_BRIEF).toContain('start a new background agent and give it where the work stands')
+    expect(WORKER_BRIEF).toContain('never resume the old one with SendMessage')
+  })
+
   it('says a remote write waits for approval in the thread, and asks for nothing else', () => {
     expect(WORKER_BRIEF).toContain('waits for the user\'s approval in the thread')
     for (const gone of ['JSON', 'plan', 'worktree', 'remote_write']) expect(WORKER_BRIEF).not.toContain(gone)

@@ -112,7 +112,8 @@ describe('worker arguments and env', () => {
   it('runs claude as a regular chat in bypass mode with the hook settings', () => {
     const args = buildClaudeArgs({ brief: 'b', settingsJson: '{"hooks":{}}' })
     expect(args).toEqual(expect.arrayContaining(['--input-format', 'stream-json', '--permission-mode', 'bypassPermissions', '--settings', '{"hooks":{}}', '--append-system-prompt', 'b']))
-    for (const flag of ['--resume', '--json-schema', '--max-budget-usd', '--mcp-config', '--strict-mcp-config']) expect(args).not.toContain(flag)
+    for (const flag of ['--resume', '--json-schema', '--max-budget-usd', '--mcp-config', '--strict-mcp-config', '--replay-user-messages']) expect(args).not.toContain(flag)
+    expect(buildClaudeArgs({ brief: 'b', settingsJson: '{}', replayInput: true })).toContain('--replay-user-messages')
     expect(buildClaudeArgs({ brief: 'b', settingsJson: '{}', resume: 's1' }).slice(-2)).toEqual(['--resume', 's1'])
   })
 
@@ -294,6 +295,41 @@ describe('runWorkerTurn', () => {
       const replies: string[] = []
       expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi'), onReply: (reply) => replies.push(reply.text) }))).toEqual({ kind: 'reply', text: 'The chat then stopped with an error: API Error: overloaded', sessionId: 's1' })
       expect(replies).toEqual(['done part one'])
+    })
+
+    // Shaped like a real `--replay-user-messages` capture (2026-11-20): the chat echoes each stdin message as it reads it, after the tool call it was working on.
+    const replayed = (content: string, parent: string | null = null) =>
+      `printf '%s\\n' '${JSON.stringify({ type: 'user', message: { role: 'user', content }, session_id: 's1', parent_tool_use_id: parent, uuid: 'u1', timestamp: '2026-11-20T15:09:02.241Z', isReplay: true })}'`
+    const fed = 'New messages in the thread:\n- from A at 1: <relay:untrusted-data>"what is the reply?"</relay:untrusted-data>\n  say: x'
+
+    it('hands each reply out with the messages the chat read since the last reply, carried past an empty result', async () => {
+      const toolResult = `printf '%s\\n' '${JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'ok' }] }, session_id: 's1', parent_tool_use_id: null })}'`
+      const bin = script(tempDir(), 'claude', [
+        'read -r a',
+        replayed('go'),
+        assistant([text('Started.')]),
+        claudeResult('Started.'),
+        toolResult,
+        replayed('subagent prompt', 'tu-agent'),
+        replayed(fed),
+        claudeResult(''),
+        assistant([text('The reply is 4.')]),
+        claudeResult('The reply is 4.'),
+        assistant([text('Nothing new.')]),
+        claudeResult('Nothing new.'),
+      ].join('; '))
+      const replies: { text: string; read: readonly string[] }[] = []
+      await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('go'), onReply: (reply) => replies.push({ text: reply.text, read: reply.read }) }))
+      expect(replies).toEqual([
+        { text: 'Started.', read: ['go'] },
+        { text: 'The reply is 4.', read: [fed] },
+        { text: 'Nothing new.', read: [] },
+      ])
+    })
+
+    it('does not read a replayed message quoting the resume refusal as a rejected resume', async () => {
+      const bin = script(tempDir(), 'claude', `read -r a; ${replayed('it said: No conversation found with session ID abc')}; exit 1`)
+      expect(await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('x') }))).toMatchObject({ kind: 'failed' })
     })
   })
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { NOTIFY_MAX_CHARS, runNotify } from '../../src/cli/notify.js'
+import { laptopOwner, NOTIFY_MAX_CHARS, openLinkedThread, runNotify } from '../../src/cli/notify.js'
 import { applyMigrations } from '../../src/db/migrate.js'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { registerSecretValue } from '../../src/secrets/scrubber.js'
@@ -85,6 +85,36 @@ describe('relay notify', () => {
     expect(session).toMatchObject({ engineSessionId: attach.engineSessionId, engineCwd: attach.cwd, courierTarget: null })
 
     expect(await runNotify(pool, { workspaceId, text: 'unsent', attach, sendWaitMs: 0 })).toEqual([{ userId: operator, attached: false, fileQueued: false }])
+  })
+
+  it('opens a launcher thread in a channel, attached to the chat; unsent in time, it is cancelled and gives no thread', async () => {
+    const { workspaceId, operator } = await setup()
+    const engineSessionId = randomUUID()
+    const ts = `${Date.now()}.5`
+    const drain = setInterval(() => {
+      void pool.query(`UPDATE outbox SET status = 'sent', sent_ref = jsonb_build_object('channel', 'C9', 'message', $2::text) WHERE workspace_id = $1 AND sent_ref IS NULL AND status = 'pending'`, [workspaceId, ts])
+    }, 100)
+    try {
+      const thread = await openLinkedThread(pool, { workspaceId, owner: operator, channel: 'C9', text: 'Started', attach: { engineSessionId, cwd: '/p' }, sendWaitMs: 5_000 })
+      expect(thread).toEqual({ channel: 'C9', thread: ts })
+    } finally {
+      clearInterval(drain)
+    }
+    expect(await queued(workspaceId)).toEqual([{ kind: 'post', ref: { channel: 'C9' }, text: 'Started', markdown: true }])
+    expect(await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: `C9:${ts}` })).toMatchObject({ engineSessionId, engineCwd: '/p' })
+
+    expect(await openLinkedThread(pool, { workspaceId, owner: operator, text: 'late', sendWaitMs: 0 })).toBeNull()
+    const { rows } = await pool.query<{ status: string }>(`SELECT status FROM outbox WHERE workspace_id = $1 AND action->>'text' = 'late'`, [workspaceId])
+    expect(rows).toEqual([{ status: 'failed' }])
+  })
+
+  it('names the laptop owner from launcher.dm_to, else the only owner, and refuses with several', async () => {
+    const { workspaceId, operator } = await setup()
+    expect(await laptopOwner(pool, workspaceId, undefined)).toBe(operator)
+    expect(await laptopOwner(pool, workspaceId, operator)).toBe(operator)
+    await expect(laptopOwner(pool, workspaceId, 'U_UNKNOWN')).rejects.toThrow('not a mapped principal')
+    await provisionPrincipal(pool, workspaceId, 'slack', `U_${randomUUID().slice(0, 8)}`, 'Second owner', ['owner'])
+    await expect(laptopOwner(pool, workspaceId, undefined)).rejects.toThrow('set launcher.dm_to')
   })
 
   it('with --peer, claims the thread for that exact chat so replies skip the process scan', async () => {

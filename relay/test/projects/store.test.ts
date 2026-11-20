@@ -9,7 +9,7 @@ import { applyMigrations } from '../../src/db/migrate.js'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { createPersona, editPersona, personaText, removePersona, type LibraryContext } from '../../src/projects/persona-library.js'
 import { applyStarterTeam } from '../../src/projects/starter-team.js'
-import { addMember, createProject, deleteProject, getPersona, getProject, insertPersona, listMembers, listPersonas, projectFolderForChannel, projectForChannelWithRepos, updateMember } from '../../src/projects/store.js'
+import { addMember, createProject, deleteProject, getPersona, getProject, insertPersona, listMembers, listPersonas, projectFolderForChannel, projectForChannelWithRepos, projectForFolder, updateMember } from '../../src/projects/store.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 
@@ -77,6 +77,32 @@ describe('projects, the persona library and teams', () => {
     } finally {
       await pool.query('DELETE FROM failover_hosts WHERE name = $1', [host])
     }
+  })
+
+  it('finds the project holding a folder: the folder, a folder inside it, the deepest one, and a worktree next to a registered repo', async () => {
+    const { workspaceId } = await workspace()
+    const at = (name: string, channel: string, folder: string) => inTx((client) => createProject(client, workspaceId, { name, slackChannel: channel, folder, repos: [] }))
+    await at('Docs', 'C1', '/w/docs')
+    await at('Docs API', 'C2', '/w/docs/api')
+    await at('Web', 'C3', '/w/web')
+    const found = async (cwd: string, repos: string[] = []) => (await projectForFolder(pool, workspaceId, cwd, repos))?.name
+
+    expect(await found('/w/docs')).toBe('Docs')
+    expect(await found('/w/docs/guides/')).toBe('Docs')
+    expect(await found('/w/docs/api/src')).toBe('Docs API')
+    expect(await found('/w/docs-old')).toBeUndefined()
+    expect(await found('/w/web-fix-login/src', ['/w/web'])).toBe('Web')
+    expect(await found('/w/web-fix-login', [])).toBeUndefined()
+    expect(await found('/w/web-admin', ['/w/web', '/w/web-admin'])).toBeUndefined()
+    expect(await found('/elsewhere')).toBeUndefined()
+
+    // A git project folder's `<folder>-<task>` worktrees find it without registering the repo.
+    const root = mkdtempSync(join(tmpdir(), 'relay-project-git-'))
+    mkdirSync(join(root, 'app', '.git'), { recursive: true })
+    await at('App', 'C4', join(root, 'app'))
+    await at('App admin', 'C5', join(root, 'app-admin'))
+    expect(await found(join(root, 'app-fix-login', 'src'))).toBe('App')
+    expect(await found(join(root, 'app-admin'))).toBe('App admin')
   })
 
   it('reads a persona written on one laptop with the same text on another through the database, rewriting a stale local file', async () => {

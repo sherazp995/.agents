@@ -397,10 +397,10 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     const consumed = task.pendingEvents.map((event) => event.id)
     const notesRead = task.pendingNotes.length
     const inbox: TurnInbox = { send: null }
-    // Messages sent into the running turn: read with its reply, kept pending when it fails.
-    const sent: { events: AutonomousTask['pendingEvents']; files: AutonomousTask['files'] } = { events: [], files: [] }
+    // Messages sent into the running turn, one write per entry: consumed by the first reply after the chat read them, or with the turn's last reply.
+    const sent: SentIntoTurn = { events: [], files: [], writes: [] }
     const feeder = feedRunningTurn(task.id, lease, inbox, consumed, sent)
-    const replies = postRepliesAsTheyCome(task, lease, { eventIds: consumed, notesRead, dueAt })
+    const replies = postRepliesAsTheyCome(task, lease, { eventIds: consumed, notesRead, dueAt }, sent)
     let result: TurnResult
     try {
       result = await deps.effects.runTurn({
@@ -450,8 +450,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         await updateTask(deps.pool, lease, { nextWakeupAt: new Date(Date.now() + RETRY_LATER_MS) })
         return
       case 'stopped':
-        // A reply the chat wrote before it was stopped, whose post failed, still reaches the thread.
-        await post(task, replies.unposted().join('\n\n'))
+        // A reply the chat wrote before it was stopped, whose post failed, still reaches the thread, with the messages it answered.
+        await replies.flushUnposted()
         return
       case 'failed':
         // The turn's own messages are dropped with the failure, so the next message starts clean instead of looping.
@@ -472,7 +472,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     lease: Lease,
     inbox: TurnInbox,
     consumed: readonly string[],
-    sent: { events: AutonomousTask['pendingEvents']; files: AutonomousTask['files'] },
+    sent: SentIntoTurn,
   ): { stop(): Promise<void> } {
     let feeding: Promise<void> | undefined
     const feed = async (): Promise<void> => {
@@ -494,7 +494,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const events = fresh.pendingEvents.filter(isNew).filter((event) => event.fileIds.every((id) => fileOf.get(id)?.status !== 'pending'))
       if (events.length === 0) return
       const files = events.flatMap((event) => event.fileIds.flatMap((id) => fileOf.get(id) ?? []))
-      if (!inbox.send?.(renderNewMessages(events, files))) return
+      const text = renderNewMessages(events, files)
+      if (!inbox.send?.(text)) return
+      sent.writes.push({ text, eventIds: events.map((event) => event.id), read: false })
       sent.events.push(...events)
       sent.files.push(...files)
     }
@@ -545,28 +547,43 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * (a background subagent or command keeps it alive), one after another and
    * in order. The first one also records the session and consumes the turn's
    * own messages and notes, so a kill or restart later neither loses the
-   * session nor answers them twice. Messages sent in mid-turn stay pending
-   * until the turn ends: the chat may not have read them yet. A reply whose
-   * post failed is kept (`unposted`) and posted with the turn's last text.
+   * session nor answers them twice. A message sent in mid-turn is consumed by
+   * the first reply after the chat read it (`reply.read`, matched to the
+   * oldest write with that exact text); one it never read stays pending
+   * until the turn ends. A reply whose post failed is kept (`unposted`) with
+   * the messages it answered, and posted with the next one, the turn's last
+   * text, or `flushUnposted` when the turn is stopped.
    */
-  function postRepliesAsTheyCome(task: AutonomousTask, lease: Lease, input: Parameters<typeof consumeTurnInput>[2]): { add(reply: HandedReply & { accountKey: string }): void; settled(): Promise<void>; lastPostId(): string | undefined; consumedInput(): boolean; unposted(): string[] } {
+  function postRepliesAsTheyCome(task: AutonomousTask, lease: Lease, input: Parameters<typeof consumeTurnInput>[2], sent: SentIntoTurn): { add(reply: HandedReply & { accountKey: string }): void; settled(): Promise<void>; lastPostId(): string | undefined; consumedInput(): boolean; unposted(): string[]; flushUnposted(): Promise<void> } {
     let queue: Promise<void> = Promise.resolve()
     let last: string | undefined
     let consumedOnce = false
     const failed: string[] = []
+    // Messages a failed post answered: consumed with the post that finally carries it.
+    let failedIds: string[] = []
+    const inputNow = (readIds: readonly string[]): Parameters<typeof consumeTurnInput>[2] =>
+      consumedOnce ? { eventIds: readIds, notesRead: 0, dueAt: input.dueAt } : { ...input, eventIds: [...input.eventIds, ...readIds] }
+    const postKept = async (readIds: readonly string[], update: TaskUpdate, text: string): Promise<void> => {
+      const ids = [...failedIds, ...readIds]
+      const posted = await finishTurn(task, lease, inputNow(ids), update, text, last)
+      consumedOnce = true
+      failed.length = 0
+      failedIds = []
+      if (posted !== undefined) last = posted
+    }
     return {
       add(reply) {
+        // Claimed at once, in order, so a later reply never takes a write this one answered.
+        const readIds = claimRead(sent, reply.read, (text) => deps.log.debug({ taskId: task.id, chars: text.length }, 'the chat read a message that was not sent into this turn'))
         queue = queue
           .then(async () => {
             // Replies that failed earlier go first, so the thread keeps their order.
             const text = [...failed, reply.text].join('\n\n')
             try {
-              const posted = await finishTurn(task, lease, consumedOnce ? { eventIds: [], notesRead: 0, dueAt: input.dueAt } : input, { engineSessionId: reply.sessionId, accountKey: reply.accountKey }, text, last)
-              consumedOnce = true
-              failed.length = 0
-              if (posted !== undefined) last = posted
+              await postKept(readIds, { engineSessionId: reply.sessionId, accountKey: reply.accountKey }, text)
             } catch (error) {
               failed.splice(0, failed.length, text)
+              failedIds = [...failedIds, ...readIds]
               deps.log.error({ err: error, taskId: task.id }, 'could not post a reply from the running turn; it goes out with the next one')
             }
           })
@@ -575,6 +592,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       lastPostId: () => last,
       consumedInput: () => consumedOnce,
       unposted: () => [...failed],
+      async flushUnposted() {
+        await queue
+        if (failed.length === 0) return
+        await postKept([], {}, failed.join('\n\n'))
+      },
     }
   }
 
@@ -628,4 +650,31 @@ export function envUnreadableNote(reason: string): string {
 function firstPendingTs(task: AutonomousTask): string | null {
   const stamps = task.pendingEvents.map((event) => event.ref.message ?? event.ref.thread).filter((ts): ts is string => ts !== undefined)
   return stamps.length === 0 ? null : stamps.reduce((min, ts) => (Number(ts) < Number(min) ? ts : min))
+}
+
+/** What a turn was sent while it ran: every event and file, and each write's exact text and events. */
+type SentIntoTurn = {
+  events: AutonomousTask['pendingEvents']
+  files: AutonomousTask['files']
+  writes: { text: string; eventIds: readonly string[]; read: boolean }[]
+}
+
+/**
+ * The event ids of the writes the chat read: each read text takes the oldest
+ * unread write with exactly that text, so the same text sent twice needs two
+ * reads. A text that matches no write (the turn's own prompt, which Claude
+ * replays too) is passed to `unmatched` and claims nothing.
+ */
+export function claimRead(sent: Pick<SentIntoTurn, 'writes'>, read: readonly string[], unmatched: (text: string) => void): string[] {
+  const ids: string[] = []
+  for (const text of read) {
+    const write = sent.writes.find((entry) => !entry.read && entry.text === text)
+    if (write === undefined) {
+      unmatched(text)
+      continue
+    }
+    write.read = true
+    ids.push(...write.eventIds)
+  }
+  return ids
 }

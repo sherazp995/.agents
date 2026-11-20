@@ -42,3 +42,7 @@ slack:
 failover:
   host: hassan-mbp
   preferred: true
+
+# relay claude / relay codex: whose DM gets a terminal chat thread when its folder has no project channel.
+launcher:
+  dm_to: U0BP0RW8FCH # Sheraz

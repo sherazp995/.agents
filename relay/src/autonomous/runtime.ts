@@ -358,7 +358,8 @@ export function buildSpawnPlan(setup: SpawnSetup, params: SpawnPlanParams, resol
   if (account.client === 'claude') {
     return {
       bin: setup.claudeBin,
-      args: buildClaudeArgs({ brief, settingsJson: buildClaudeSettings({ hookCommand: setup.hookCommand, allTools: readOnly }), ...flags }),
+      // Only a turn that takes messages mid-turn needs to hear which ones the chat read.
+      args: buildClaudeArgs({ brief, settingsJson: buildClaudeSettings({ hookCommand: setup.hookCommand, allTools: readOnly }), ...flags, ...(context.inbox ? { replayInput: true } : {}) }),
       input: claudeUserLine(context.prompt),
       cwd,
       env,

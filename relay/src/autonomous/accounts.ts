@@ -119,14 +119,19 @@ export type BlockedReason = 'usage_limit' | 'rate_limit' | 'auth' | 'missing_cli
 const BLOCKED_PATTERNS: readonly { reason: BlockedReason; pattern: RegExp }[] = [
   { reason: 'usage_limit', pattern: /usage limit|spend limit|hit your (?!rate )(?:\w+ ){0,2}limit|limit reached|quota|credit balance is too low|out of credits/i },
   { reason: 'rate_limit', pattern: /rate limit|too many requests|\b429\b|overloaded/i },
-  { reason: 'auth', pattern: /not logged in|please log in|login required|unauthorized|\b401\b|invalid api key|authentication|failed to authenticate|oauth (?:session|token) (?:has )?expired/i },
+  { reason: 'auth', pattern: /not logged in|please log in|login required|unauthorized|\b401\b|invalid api key|authentication|failed to authenticate|oauth (?:session|token) (?:has )?expired|login expired|please run \/login/i },
 ]
 
 /** Why this exit means "try the next account", or null when it was an ordinary failure of the task itself. */
 export function classifyBlocked(result: { exitCode: number | null; stderr: string; spawnErrorCode?: string }): BlockedReason | null {
   if (result.spawnErrorCode === 'ENOENT') return 'missing_cli'
   if (result.exitCode === 0) return null
-  return BLOCKED_PATTERNS.find(({ pattern }) => pattern.test(result.stderr))?.reason ?? null
+  return blockedReasonIn(result.stderr)
+}
+
+/** Why `text` says an account cannot serve right now, or null; also read from a chat's last error message. */
+export function blockedReasonIn(text: string): BlockedReason | null {
+  return BLOCKED_PATTERNS.find(({ pattern }) => pattern.test(text))?.reason ?? null
 }
 
 /** How long each kind of block cools an account down. */
