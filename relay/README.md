@@ -93,6 +93,10 @@ if the build passed. A failed build keeps the old one and every session
 start says so until `relay update` passes. Its log is `relay/tmp/update.log`.
 `relay restart` restarts the daemon without rebuilding; a restart drops
 replies the daemon holds in memory, so pick a quiet moment.
+`relay status` says whether the daemon is running (from launchd or systemd,
+never the database, so it works while that is down), whether this laptop
+answers Slack or stands by, its last log line and the log's path; it exits 1
+when the daemon is not running.
 
 Create the Slack app first (below; it needs a browser), then:
 

@@ -14,6 +14,7 @@ import { registerTeamCommands } from './cli/team.js'
 import { DEFAULT_UI_PORT } from './config/schema.js'
 import { spawn } from 'node:child_process'
 import { runInstallService, runUninstallService, serviceBinaries, serviceInstalled } from './cli/service.js'
+import { runStatus } from './cli/status.js'
 import {
   DEFAULT_CONFIG_PATH,
   DEFAULT_DATABASE_URL,
@@ -619,6 +620,15 @@ channelCommand
     } finally {
       await closePool(pool)
     }
+  })
+
+program
+  .command('status')
+  .description('Whether the Relay daemon is running (from launchd or systemd), its last log line and its log path; exits 1 when it is not running')
+  .action(() => {
+    const result = runStatus()
+    process.stdout.write(`${result.report}\n`)
+    process.exitCode = result.exitCode
   })
 
 const dbCommand = program.command('db').description("Relay's Postgres database")
