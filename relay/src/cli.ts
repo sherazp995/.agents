@@ -14,7 +14,7 @@ import { registerTeamCommands } from './cli/team.js'
 import { DEFAULT_UI_PORT } from './config/schema.js'
 import { spawn } from 'node:child_process'
 import { runInstallService, runUninstallService, serviceBinaries, serviceInstalled } from './cli/service.js'
-import { runStatus } from './cli/status.js'
+import { runStatus, type DatabaseCheck } from './cli/status.js'
 import {
   DEFAULT_CONFIG_PATH,
   DEFAULT_DATABASE_URL,
@@ -42,8 +42,8 @@ import {
 import { createSecretProvider } from './secrets/index.js'
 import { loadRelayConfig, loadRepoRegistryIfPresent } from './config/load.js'
 import { ConfigError } from './config/errors.js'
-import { resolveOperatorDatabaseUrl } from './config/database-url.js'
-import { closePool, createPool } from './db/pool.js'
+import { resolveDatabaseUrl, resolveOperatorDatabaseUrl } from './config/database-url.js'
+import { closePool, createPool, DOCTOR_CONNECT_TIMEOUT_MS } from './db/pool.js'
 import { formatResults, runDoctor } from './doctor/run.js'
 import { RELAY_VERSION } from './version.js'
 import { defaultConfigPath, defaultPolicyPath, defaultReposPath, resolveRelayHome } from './config/paths.js'
@@ -624,12 +624,32 @@ channelCommand
 
 program
   .command('status')
-  .description('Whether the Relay daemon is running (from launchd or systemd), its last log line and its log path; exits 1 when it is not running')
-  .action(() => {
-    const result = runStatus()
+  .description(
+    'Whether the Relay daemon is running (from launchd or systemd), what it is doing, its last log line and error, ' +
+      'whether the database answers, and its log path; exits 1 when it is not running',
+  )
+  .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
+  .action(async (options: { config: string }) => {
+    const result = await runStatus({ checkDatabase: () => checkStatusDatabase(options.config) })
     process.stdout.write(`${result.report}\n`)
     process.exitCode = result.exitCode
   })
+
+/** One connection to the database the daemon uses (its URL, not the operator one), within doctor's time limit. */
+async function checkStatusDatabase(configPath: string): Promise<DatabaseCheck> {
+  const started = Date.now()
+  let pool: ReturnType<typeof createPool> | undefined
+  try {
+    const config = loadRelayConfig(configPath)
+    pool = createPool(await resolveDatabaseUrl(config, createSecretProvider(config)), { max: 1, connectTimeoutMs: DOCTOR_CONNECT_TIMEOUT_MS })
+    await pool.query('SELECT 1')
+    return { ok: true, ms: Date.now() - started }
+  } catch (error) {
+    return { ok: false, ms: Date.now() - started, error: (error as Error).message }
+  } finally {
+    if (pool !== undefined) await closePool(pool).catch(() => undefined)
+  }
+}
 
 const dbCommand = program.command('db').description("Relay's Postgres database")
 
