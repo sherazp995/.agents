@@ -1,5 +1,6 @@
 import type { Pool } from 'pg'
 import { isLiveControlled } from '../live/control.js'
+import type { CodexChatLookup } from '../live/open-codex.js'
 import type { Session } from '../sessions/store.js'
 import { isOwner } from './roles.js'
 
@@ -44,9 +45,10 @@ export async function memberRefusal(
   workspaceId: string,
   principalId: string,
   thread: Pick<Session, 'id' | 'principalId' | 'mode'> | null,
+  codexChat?: CodexChatLookup,
 ): Promise<string | undefined> {
   if (thread === null) return undefined
   if (thread.principalId !== principalId) return NOT_YOUR_THREAD_REPLY
-  if (thread.mode === 'direct' || (await isLiveControlled(pool, thread.id, workspaceId))) return OWNER_ONLY_REPLY
+  if (thread.mode === 'direct' || (await isLiveControlled(pool, thread.id, workspaceId, undefined, codexChat))) return OWNER_ONLY_REPLY
   return undefined
 }

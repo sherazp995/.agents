@@ -12,7 +12,7 @@ import { resolveOperatorDatabaseUrl } from '../../config/database-url.js'
 import { ConfigError } from '../../config/errors.js'
 import { resolveMigrationsDirectory } from '../../config/paths.js'
 import { selectPendingMigrations } from '../../db/migrate.js'
-import { closePool, createPool } from '../../db/pool.js'
+import { DOCTOR_CONNECT_TIMEOUT_MS, closePool, createPool } from '../../db/pool.js'
 import type { CheckResult } from '../checks.js'
 import { registerCheck, type Check, type CheckContext } from '../registry.js'
 
@@ -57,7 +57,7 @@ export function checkFailover(deps: FailoverCheckDependencies = {}): Check {
       }
 
       const build = deps.buildMigration ?? newestMigration()
-      const pool = createPool(url)
+      const pool = createPool(url, { connectTimeoutMs: DOCTOR_CONNECT_TIMEOUT_MS })
       try {
         const lease = (
           await pool.query<LeaseRow>(

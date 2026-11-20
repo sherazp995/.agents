@@ -1,6 +1,7 @@
 import pg from 'pg'
 import type { GlobalSetupContext } from 'vitest/node'
 import {
+  dropDatabaseWithRetry,
   maintenanceConnectionUrl,
   quoteDatabaseIdentifier,
   TEST_DATABASE_NAME_PATTERN,
@@ -73,7 +74,7 @@ async function sweepStaleDatabases(maintenanceUrl: string): Promise<void> {
       if (!match) continue
       const pid = Number(match[1])
       if (isProcessAlive(pid)) continue
-      await dropWithRetry(client, datname)
+      await dropDatabaseWithRetry(client, datname)
     }
   } finally {
     await client.end()
@@ -89,30 +90,9 @@ async function dropRunDatabases(maintenanceUrl: string, runId: string): Promise<
     const ownDatabases = rows
       .map((row) => row.datname)
       .filter((name) => TEST_DATABASE_NAME_PATTERN.exec(name)?.[1] === runId)
-    for (const name of ownDatabases) await dropWithRetry(client, name)
+    for (const name of ownDatabases) await dropDatabaseWithRetry(client, name)
   } finally {
     await client.end()
   }
 }
 
-/**
- * FORCE cannot end a backend our non-superuser role has no rights over, such
- * as an autovacuum worker that just started on the freshly written database
- * (42501). It finishes in moments, so the drop is retried; one that still
- * fails is left to the next run's sweep rather than failing a green run.
- */
-async function dropWithRetry(client: pg.Client, name: string): Promise<void> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      await client.query(`DROP DATABASE IF EXISTS ${quoteDatabaseIdentifier(name)} WITH (FORCE)`)
-      return
-    } catch (error) {
-      if ((error as { code?: string }).code !== '42501') throw error
-      if (attempt === 5) {
-        console.warn(`could not drop test database ${name} yet; the next run's sweep removes it`)
-        return
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500))
-    }
-  }
-}

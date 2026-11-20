@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { closePool, COMMAND_POOL_MAX, createPool, DAEMON_POOL_MAX } from '../../src/db/pool.js'
+import { closePool, COMMAND_POOL_MAX, createPool, DAEMON_POOL_MAX, DOCTOR_CONNECT_TIMEOUT_MS } from '../../src/db/pool.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 import type { Pool } from 'pg'
 
@@ -12,6 +12,12 @@ describe('pool size', () => {
     expect([command.options.max, daemon.options.max]).toEqual([COMMAND_POOL_MAX, 5])
     expect([COMMAND_POOL_MAX, command.options.idleTimeoutMillis, command.options.keepAlive]).toEqual([2, 10_000, true])
     await Promise.all([closePool(command), closePool(daemon)])
+  })
+  it("waits 3 seconds to connect unless told otherwise; doctor waits 10, since a healthy remote database took up to 2.95s", async () => {
+    const command = createPool('postgres://relay@localhost:5432/relay')
+    const doctor = createPool('postgres://relay@localhost:5432/relay', { connectTimeoutMs: DOCTOR_CONNECT_TIMEOUT_MS })
+    expect([command.options.connectionTimeoutMillis, doctor.options.connectionTimeoutMillis]).toEqual([3_000, 10_000])
+    await Promise.all([closePool(command), closePool(doctor)])
   })
 })
 

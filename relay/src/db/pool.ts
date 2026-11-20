@@ -17,20 +17,28 @@ export const DAEMON_POOL_MAX = 5
  */
 export const COMMAND_POOL_MAX = 2
 
+export const DEFAULT_CONNECT_TIMEOUT_MS = 3_000
+
+/** Doctor's connect limit: measured connects to a healthy remote database took up to 2.95s (2026-11-20). */
+export const DOCTOR_CONNECT_TIMEOUT_MS = 10_000
+
 /**
  * Creates the Postgres pool. One module knows connection details.
  *
- * The connection timeout is bounded so `relay doctor` reports an unreachable
- * server promptly instead of appearing to hang. Idle clients close after ten
+ * The connection timeout is bounded (3 seconds) so a command notices an
+ * unreachable server promptly instead of appearing to hang; `relay doctor`
+ * passes DOCTOR_CONNECT_TIMEOUT_MS, because a healthy remote database can take
+ * nearly 3 seconds to accept a connection and doctor must not call that a
+ * failure. Idle clients close after ten
  * seconds and sockets carry TCP keepalives, so a connection left behind by a
  * laptop that slept or changed network is noticed instead of holding one of
  * the pooler's few slots.
  */
-export function createPool(url: string, options: { max?: number } = {}): Pool {
+export function createPool(url: string, options: { max?: number; connectTimeoutMs?: number } = {}): Pool {
   const pool = new Pool({
     connectionString: url,
     max: options.max ?? COMMAND_POOL_MAX,
-    connectionTimeoutMillis: 3000,
+    connectionTimeoutMillis: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
     idleTimeoutMillis: 10_000,
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,

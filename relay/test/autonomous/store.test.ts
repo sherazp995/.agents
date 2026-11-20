@@ -133,6 +133,24 @@ describe('autonomous store', () => {
     expect(await count('sessions', workspaceId)).toBe(1)
   })
 
+  it('adopts a closed Codex chat\'s thread as a task in its folder with no chat id, for a new task and an existing one', async () => {
+    const { workspaceId, principalId } = await setup()
+    const linked = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef: 'C1:6.1' })
+    await pool.query(`UPDATE sessions SET engine_cwd = '/p', engine_session_id = 'codex-chat', engine_kind = 'codex' WHERE id = $1`, [linked.id])
+
+    const result = await intakeMention(pool, { ...intakeParams(workspaceId, principalId, 'C1:6.1', 'C1:6.2'), adopt: true })
+
+    expect(result).toMatchObject({ kind: 'created', session: { id: linked.id, mode: 'autonomous' }, task: { chatSessionId: null, chatCwd: '/p', engineSessionId: null } })
+    expect(await findActiveSession(pool, { workspaceId, adapter: 'slack', threadRef: 'C1:6.1' })).toMatchObject({ engineKind: 'claude', engineSessionId: null })
+
+    // A thread whose task already exists (Relay answered it earlier) is relinked to a Codex chat, then adopted again.
+    await pool.query(`UPDATE sessions SET mode = 'governed', engine_cwd = '/q', engine_session_id = 'codex-chat-2', engine_kind = 'codex' WHERE id = $1`, [linked.id])
+    await pool.query(`UPDATE autonomous_tasks SET chat_session_id = 'old-claude', engine_session_id = 'old-claude' WHERE session_id = $1`, [linked.id])
+    const again = await intakeMention(pool, { ...intakeParams(workspaceId, principalId, 'C1:6.1', 'C1:6.3'), adopt: true })
+
+    expect(again).toMatchObject({ kind: 'appended', task: { chatSessionId: null, chatCwd: '/q', engineSessionId: null } })
+  })
+
   it('changes nothing in a thread that already has a governed session', async () => {
     const { workspaceId, principalId } = await setup()
     const governed = await findOrCreateSession(pool, { workspaceId, principalId, adapter: 'slack', threadRef: 'C1:4.1' })

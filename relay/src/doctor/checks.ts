@@ -9,7 +9,7 @@ import {
   type KeychainItemStatus,
 } from '../secrets/keychain.js'
 import type { Policy, RelayConfig } from '../config/schema.js'
-import { closePool, createPool } from '../db/pool.js'
+import { DOCTOR_CONNECT_TIMEOUT_MS, closePool, createPool } from '../db/pool.js'
 import { closeRedis, createRedis, pingRedis } from '../redis/client.js'
 import { registerCheck } from './registry.js'
 import type { CheckContext } from './registry.js'
@@ -88,7 +88,7 @@ export function checkConfig(configPath: string, policyPath: string): CheckResult
 }
 
 export async function checkPostgres(url: string): Promise<CheckResult> {
-  const pool = createPool(url)
+  const pool = createPool(url, { connectTimeoutMs: DOCTOR_CONNECT_TIMEOUT_MS })
   try {
     await pool.query('SELECT 1')
     return { name: 'postgres', status: 'ok', detail: 'reachable' }

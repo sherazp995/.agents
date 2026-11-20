@@ -78,14 +78,20 @@ import { isFolder } from './autonomous/folder.js'
 import { STOPPED_TEXT } from './autonomous/router.js'
 import { loadRepoRegistryIfPresent } from './config/load.js'
 import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { CancellationRegistry } from './runs/cancel.js'
 import {
   buildReplyCommand,
   enqueueLiveControlMessage,
+  finishTakenBack,
   isLiveControlled,
+  markDelivered,
+  releaseTakenBack,
   takeBackMessage,
   waitForClaim,
 } from './live/control.js'
+import { codexQueueText, deliverToCodexChat, type CodexQueueDeps } from './live/codex-queue.js'
+import { defaultCodexChatLookup, type CodexChatLookup } from './live/open-codex.js'
 import { deliverViaCourier, type CourierAccounts } from './live/courier.js'
 import { KillSwitchEngagedError, PostgresKillSwitchStore, createKillSwitch } from './killswitch.js'
 import type { KillSwitch } from './killswitch.js'
@@ -757,7 +763,19 @@ export type OrchestratorDeps = {
   readonly directSession?: DirectSessionDependencies
   /** This laptop's failover name: live chats started here are recorded with it, and ones recorded elsewhere are refused. */
   readonly failoverHost?: string | null
+  /** Finds an open `relay codex` chat by its id (src/live/open-codex.ts); injected for tests. */
+  readonly codexChat?: CodexChatLookup
+  /** How a reply is queued into an open Codex chat: the binary, the sessions folder, and test seams. */
+  readonly codexDelivery?: Pick<CodexQueueDeps, 'bin' | 'sessionsRoot'> & Partial<Pick<CodexQueueDeps, 'queue' | 'pollMs' | 'turnWaitMs'>>
+  /** How long a failed hand-over to Relay's own loop waits before it is tried again. */
+  readonly handoverRetryMs?: number
+  /** Set when Relay's own loop answers a message taken back from a chat: it must not be parked again. */
+  readonly ownLoopOnly?: boolean
 }
+
+/** A failed hand-over of a taken-back message to Relay's own loop is tried this many times in all. */
+const HANDOVER_ATTEMPTS = 3
+const DEFAULT_HANDOVER_RETRY_MS = 30_000
 
 /** The orchestrator's view of autonomous mode (src/autonomous/router.ts and scheduler.ts behind it). */
 export type AutonomousRouting = {
@@ -825,7 +843,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // someone else's work either, and before any session or run row exists.
   const existing = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
   if (!(await principalIsOwner(pool, event.workspaceId, principalId))) {
-    const refusal = await memberRefusal(pool, event.workspaceId, principalId, existing)
+    const refusal = await memberRefusal(pool, event.workspaceId, principalId, existing, deps.codexChat)
     if (refusal !== undefined) {
       log.warn({ workspaceId: event.workspaceId, principalId, threadRef }, 'refused a member in a thread they may not use')
       await dispatcher.perform({ kind: 'post', ref: replyRef, text: refusal })
@@ -916,7 +934,8 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
 
   // A thread attached to a Claude chat ("sessions" Attach, `relay notify`)
   // belongs to that chat while it is open: its messages park for it below.
-  const liveAttached = existing !== null && existing.mode !== 'direct' && (await isLiveControlled(pool, existing.id, event.workspaceId))
+  const codexChat = deps.codexChat ?? defaultCodexChatLookup
+  const liveAttached = deps.ownLoopOnly !== true && existing !== null && existing.mode !== 'direct' && (await isLiveControlled(pool, existing.id, event.workspaceId, undefined, codexChat))
 
   // With autonomous mode on, every other conversation the adapter accepts (a
   // mention, a DM, a reply in a known thread) is an autonomous task, unless
@@ -977,7 +996,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // No run row is created: the work happens in the claiming session, and a
   // run row here would claim a governed execution that never occurred.
   // Decided once above (liveAttached), so a parked event costs one process scan, not two.
-  if (liveAttached || (!deps.autonomous && (await isLiveControlled(pool, session.id, event.workspaceId)))) {
+  if (liveAttached || (!deps.autonomous && deps.ownLoopOnly !== true && (await isLiveControlled(pool, session.id, event.workspaceId, undefined, codexChat)))) {
     // The chat runs on the other failover laptop: this one cannot reach it.
     const elsewhere = await openElsewhere(pool, session.id, deps.failoverHost ?? null)
     if (elsewhere !== null) {
@@ -1012,8 +1031,61 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     // was merely wasteful; at three minutes it would serialise every other
     // inbound event behind one parked message and risk exceeding platform
     // request timeouts. Nothing downstream is waiting on this either.
+    /**
+     * Relay's own loop answers a message no open chat took: the thread's
+     * autonomous task, or with autonomous mode off a governed run (a fresh
+     * session for a Codex thread). The message was taken back with its text
+     * kept, which is erased only once that loop has stored it; a hand-over
+     * that throws puts it back in the queue and is tried again, so a crash or
+     * a database hiccup never loses the operator's message.
+     */
+    const answerTakenBack = async (): Promise<void> => {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          // A thread the task cannot take (not governed) goes through the rest of the event path instead.
+          const routed = deps.autonomous ? await deps.autonomous.route(event, { threadRef, replyRef }, { adopt: true }) : 'not_autonomous'
+          if (routed !== 'handled') await handleChatEvent({ ...deps, ownLoopOnly: true }, event)
+          await finishTakenBack(pool, messageId)
+          return
+        } catch (error) {
+          await releaseTakenBack(pool, messageId).catch((releaseError: unknown) => log.error({ err: releaseError, messageId }, 'could not put the message back in the queue'))
+          if (attempt >= HANDOVER_ATTEMPTS) {
+            log.error({ err: error, sessionId: session.id, messageId }, "could not hand the message to Relay's own loop; it stays queued with its text")
+            return
+          }
+          log.warn({ err: error, sessionId: session.id, messageId, attempt }, "handing the message to Relay's own loop failed; trying again")
+          await new Promise((resolve) => setTimeout(resolve, deps.handoverRetryMs ?? DEFAULT_HANDOVER_RETRY_MS))
+          // Taken by something else meanwhile (a drain): that one answers it.
+          if (!(await takeBackMessage(pool, messageId))) return
+        }
+      }
+    }
+
     void (async () => {
       try {
+        // A Codex chat gets the message through codex queue, at once and without a model call; when it cannot,
+        // Relay's own loop answers now: no courier, and no grace period, since nothing else would collect it.
+        if (session.engineKind === 'codex') {
+          const chat = session.engineSessionId === null ? null : await codexChat(session.engineSessionId)
+          const delivery =
+            chat === null || deps.codexDelivery === undefined
+              ? ({ outcome: 'not_delivered', reason: 'the chat is not open' } as const)
+              : await deliverToCodexChat(chat, codexQueueText({ messageId, body: unwrapForAudit(event.text), replyCommand: buildReplyCommand(replyRef) }), messageId, {
+                  ...deps.codexDelivery,
+                  isOpen: async () => (await codexChat(chat.chatId)) !== null,
+                })
+          if (delivery.outcome === 'delivered') {
+            if (await markDelivered(pool, messageId)) {
+              if (delivery.confirmed) log.info({ workspaceId: event.workspaceId, sessionId: session.id }, 'queued an event into the open Codex chat')
+              else log.warn({ workspaceId: event.workspaceId, sessionId: session.id }, 'queued an event into the open Codex chat, but its turn never showed in the chat record; counted as delivered')
+            }
+            return
+          }
+          log.warn({ workspaceId: event.workspaceId, sessionId: session.id, reason: delivery.reason }, "could not queue into the open Codex chat; Relay's own loop answers it")
+          if (await takeBackMessage(pool, messageId)) await answerTakenBack()
+          return
+        }
+
         /**
          * PUSH FIRST, then fall back to the pull.
          *
@@ -1056,7 +1128,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
            * The claim's own answer decides what happened, rather than being
            * discarded.
            *
-           * `takeBackMessage` returns false when something else claimed the
+           * `markDelivered` returns false when something else claimed the
            * row first, which here means a concurrent `relay live drain`
            * collected it between the park and the push. The session has then
            * received the SAME message twice, once by each path. That is a
@@ -1065,7 +1137,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
            * "Delivered" as though the push were the only thing that
            * happened.
            */
-          const claimed = await takeBackMessage(pool, messageId)
+          const claimed = await markDelivered(pool, messageId)
           if (!claimed) {
             log.warn(
               { workspaceId: event.workspaceId, sessionId: session.id, peer: courierOutcome.peer },
@@ -1096,11 +1168,10 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
         if (!(await takeBackMessage(pool, messageId))) return
         log.warn(
           { workspaceId: event.workspaceId, sessionId: session.id },
-          'no live session collected the parked message; handing it to the thread\'s autonomous task',
+          "no live session collected the parked message; handing it to Relay's own loop",
         )
-        // The same session becomes the thread's autonomous task, which reads
-        // the thread so far. Without autonomous mode there is no one to answer.
-        if (deps.autonomous) await deps.autonomous.route(event, { threadRef, replyRef }, { adopt: true })
+        // The same session becomes the thread's autonomous task, which reads the thread so far.
+        await answerTakenBack()
       } catch (error) {
         // This path exists to prevent silence, so its own failure must be
         // visible rather than becoming the silence it guards against.
@@ -1146,7 +1217,8 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
           // created) once, above, before this run started, so this is
           // always the pointer as of the start of THIS run, never a value
           // this run itself produced.
-          ...(session.engineSessionId ? { resumeSessionId: session.engineSessionId } : {}),
+          // A Codex chat id is never resumed with claude: the run starts a fresh session in the thread's folder.
+          ...(session.engineSessionId && session.engineKind !== 'codex' ? { resumeSessionId: session.engineSessionId } : {}),
           // FR-ATT-5: run the engine in the folder this thread is attached
           // to, when it is attached to one. Null for every session that
           // predates attachment, which keeps today's behaviour of running
@@ -1497,6 +1569,8 @@ export async function startOrchestrator(
         ...(options.limits ? { limits: options.limits } : {}),
         ...(autonomousRuntime ? { autonomous: autonomousRuntime.routing } : {}),
         ...(courierAccounts ? { courierAccounts } : {}),
+        // Every Codex login's sessions folder links to the default login's, so one folder holds every chat.
+        codexDelivery: { bin: options.autonomous?.codex_bin ?? 'codex', sessionsRoot: join(homedir(), '.codex', 'sessions') },
         folderQuestions,
         failoverHost: options.failover?.host ?? null,
       },

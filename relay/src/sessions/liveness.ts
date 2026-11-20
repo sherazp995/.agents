@@ -97,12 +97,12 @@ export type ExecFileFn = (file: string, args: readonly string[]) => Promise<{ st
  */
 const EXEC_TIMEOUT_MS = 5_000
 
-export function defaultExecFile(file: string, args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
+export function defaultExecFile(file: string, args: readonly string[], env?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     // No shell: an argv array, so nothing in `args` (a directory path or a
     // session id, both potentially operator-influenced) can be reinterpreted
     // as shell syntax. Mirrors src/secrets/keychain.ts's own defaultExecFile.
-    execFile(file, args as string[], { timeout: EXEC_TIMEOUT_MS }, (error, stdout, stderr) => {
+    execFile(file, args as string[], { timeout: EXEC_TIMEOUT_MS, ...(env !== undefined ? { env } : {}) }, (error, stdout, stderr) => {
       if (error) {
         reject(error)
         return

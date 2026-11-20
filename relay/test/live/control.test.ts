@@ -7,7 +7,7 @@ import { closePool, createPool } from '../../src/db/pool.js'
 import { applyMigrations } from '../../src/db/migrate.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
-import { findOrCreateSession } from '../../src/sessions/store.js'
+import { attachSessionToEngineChat, findOrCreateSession, markSessionDirect, setSessionEngineSessionId, TakenOverSessionError } from '../../src/sessions/store.js'
 import {
   claimAllWorkspaceMessages,
   claimLiveControl,
@@ -16,6 +16,8 @@ import {
   isLiveControlled,
   releaseLiveControl,
   takeBackMessage,
+  finishTakenBack,
+  releaseTakenBack,
   waitForClaim,
   waitForMessage,
   WaiterAlreadyRunningError,
@@ -96,6 +98,66 @@ describeDb('live control', () => {
     const nothingRunning = async () => ({ stdout: '', stderr: '' })
 
     expect(await isLiveControlled(pool, sessionId, workspaceId, nothingRunning)).toBe(false)
+  })
+
+  it('counts a Codex-linked thread live only while its chat record is open, never by a Claude chat in its folder or a claim', async () => {
+    const { workspaceId, sessionId } = await buildSession()
+    const chatId = '01a1f9b7-c23a-7fd1-879a-5c2da28c6dff'
+    await attachSessionToEngineChat(pool, sessionId, chatId, '/Users/op/project', null, 'codex')
+    await claimLiveControl(pool, workspaceId, sessionId)
+    const claudeInFolder = async (file: string) =>
+      file === 'ps'
+        ? { stdout: '  4242 claude\n', stderr: '' }
+        : { stdout: 'claude 4242 op cwd DIR 1,17 3488 389002 /Users/op/project\n', stderr: '' }
+    const asked: string[] = []
+    const closed = async (id: string) => {
+      asked.push(id)
+      return null
+    }
+    const open = async (id: string) => ({ chatId: id, pid: 1, startedAt: 'x', codexHome: '/h' })
+
+    expect(await isLiveControlled(pool, sessionId, workspaceId, claudeInFolder, closed)).toBe(false)
+    expect(asked).toEqual([chatId])
+    expect(await isLiveControlled(pool, sessionId, workspaceId, claudeInFolder, open)).toBe(true)
+  })
+
+  it('never drains a Codex-linked thread into a Claude session, while still draining a Claude one', async () => {
+    const codex = await buildSession()
+    await attachSessionToEngineChat(pool, codex.sessionId, '01a1f9b7-c23a-7fd1-879a-5c2da28c6dff', '/p', null, 'codex')
+    await enqueueLiveControlMessage(pool, { workspaceId: codex.workspaceId, sessionId: codex.sessionId, principalId: codex.principalId, body: 'for codex', replyRef: '{}' })
+    const claude = await buildSession()
+    await attachSessionToEngineChat(pool, claude.sessionId, 'claude-chat', '/p')
+    await enqueueLiveControlMessage(pool, { workspaceId: claude.workspaceId, sessionId: claude.sessionId, principalId: claude.principalId, body: 'for claude', replyRef: '{}' })
+
+    expect(await resolveDrainWorkspace(pool, undefined)).not.toMatchObject({ outcome: 'resolved', workspaceId: codex.workspaceId })
+    expect(await claimAllWorkspaceMessages(pool, codex.workspaceId)).toEqual([])
+    expect((await claimAllWorkspaceMessages(pool, claude.workspaceId)).map((message) => message.body)).toEqual(['for claude'])
+  })
+
+  it('links a Codex chat only to a thread Relay has not taken over, and writes kind, chat, folder and host together', async () => {
+    const { sessionId } = await buildSession()
+    await attachSessionToEngineChat(pool, sessionId, '01a1f9b7-c23a-7fd1-879a-5c2da28c6dff', '/p', 'laptop-a', 'codex')
+    const { rows } = await pool.query('SELECT engine_kind, engine_session_id, engine_cwd, engine_host FROM sessions WHERE id = $1', [sessionId])
+    expect(rows).toEqual([{ engine_kind: 'codex', engine_session_id: '01a1f9b7-c23a-7fd1-879a-5c2da28c6dff', engine_cwd: '/p', engine_host: 'laptop-a' }])
+
+    const adopted = await buildSession()
+    await pool.query("UPDATE sessions SET mode = 'autonomous' WHERE id = $1", [adopted.sessionId])
+    await expect(attachSessionToEngineChat(pool, adopted.sessionId, '01a1f9b7-c23a-7fd1-879a-5c2da28c6dff', '/p', null, 'codex')).rejects.toBeInstanceOf(TakenOverSessionError)
+    const after = await pool.query('SELECT engine_kind, engine_session_id FROM sessions WHERE id = $1', [adopted.sessionId])
+    expect(after.rows).toEqual([{ engine_kind: 'claude', engine_session_id: null }])
+  })
+
+  it("sets the kind back to claude when Relay's loop or a direct thread records its own Claude chat in a thread a Codex chat held", async () => {
+    const kind = async (id: string) => (await pool.query<{ engine_kind: string }>('SELECT engine_kind FROM sessions WHERE id = $1', [id])).rows[0]?.engine_kind
+    const governed = await buildSession()
+    await attachSessionToEngineChat(pool, governed.sessionId, '01a1f9b7-c23a-7fd1-879a-5c2da28c6dff', '/p', null, 'codex')
+    await setSessionEngineSessionId(pool, governed.sessionId, 'claude-chat')
+    expect(await kind(governed.sessionId)).toBe('claude')
+
+    const direct = await buildSession()
+    await attachSessionToEngineChat(pool, direct.sessionId, '01a1f9b7-c23a-7fd1-879a-5c2da28c6dff', '/p', null, 'codex')
+    await markSessionDirect(pool, direct.sessionId, 'claude-chat', '/p')
+    expect(await kind(direct.sessionId)).toBe('claude')
   })
 
   it('scopes the claim check by workspace, so one workspace never reads another as controlled', async () => {
@@ -297,18 +359,19 @@ describeDb('live control', () => {
       replyRef: '{}',
     })
 
-    // takeBackMessage erases the body as it claims, so the caller must
-    // already hold the text before calling it. If the process dies between
-    // those two moments the message is gone: erased from the database and
-    // never answered. The row is the record that it happened; the text is
-    // not recoverable, and that is stated here rather than implied.
+    // The text stays through the take-back, so a hand-over that dies midway loses nothing; it is erased only once
+    // Relay's loop has stored the message.
     expect(await takeBackMessage(pool, messageId)).toBe(true)
-    const { rows } = await pool.query<{ body: string }>('SELECT body FROM live_control_messages WHERE id = $1', [
-      messageId,
-    ])
-    expect(rows[0]?.body).toBe('')
-    // And it cannot be taken twice, so a restart cannot answer it again.
+    const body = async () => (await pool.query<{ body: string }>('SELECT body FROM live_control_messages WHERE id = $1', [messageId])).rows[0]?.body
+    expect(await body()).toBe('taken back')
+    // It cannot be taken twice, so a second fallback cannot answer it again.
     expect(await takeBackMessage(pool, messageId)).toBe(false)
+
+    // A failed hand-over puts it back, text intact, to be taken again.
+    await releaseTakenBack(pool, messageId)
+    expect(await takeBackMessage(pool, messageId)).toBe(true)
+    await finishTakenBack(pool, messageId)
+    expect(await body()).toBe('')
   })
 
   it('returns nothing, rather than failing, when the workspace is quiet', async () => {

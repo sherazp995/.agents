@@ -279,15 +279,19 @@ describe('runWorkerTurn', () => {
     })
 
     it('counts the time limit from the last reply and keeps the replies when it stops the leftovers', async () => {
-      const bin = script(tempDir(), 'claude', [claudeResult('one'), 'sleep 0.7', claudeResult('two'), 'sleep 0.7', claudeResult('three'), 'sleep 30'].join('; '))
+      const bin = script(tempDir(), 'claude', [claudeResult('one'), 'sleep 1.2', claudeResult('two'), 'sleep 1.2', claudeResult('three'), 'sleep 30'].join('; '))
       const replies: string[] = []
-      const start = Date.now()
-      const outcome = await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi'), timeoutMs: 1000, onReply: (reply) => replies.push(reply.text) }))
-      // Without the restart the limit would kill it at 1s, before "three" at 1.4s; with it, it dies 1s after "three".
-      expect(Date.now() - start).toBeGreaterThanOrEqual(2300)
+      let lastReplyAt = 0
+      const outcome = await runWorkerTurn(turn({ bin, account: CLAUDE, input: claudeUserLine('hi'), timeoutMs: 2000, onReply: (reply) => {
+        replies.push(reply.text)
+        lastReplyAt = Date.now()
+      } }))
+      // Without the restart the 2s limit, counted from the spawn, kills it before "three" at about 2.4s.
+      // With it, it dies 2s after "three": measured from that reply, so a slow start cannot eat the window.
       expect(replies).toEqual(['one', 'two', 'three'])
-      expect(outcome).toEqual({ kind: 'reply', text: "Stopped this chat's leftover background tasks after 1 second with no reply.", sessionId: 's1' })
-    })
+      expect(Date.now() - lastReplyAt).toBeGreaterThanOrEqual(1900)
+      expect(outcome).toEqual({ kind: 'reply', text: "Stopped this chat's leftover background tasks after 2 seconds with no reply.", sessionId: 's1' })
+    }, 15_000)
 
     it('ends as a reply with a note, not a failure, when an error result follows a reply', async () => {
       const error = `echo '${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'API Error: overloaded' })}'`
@@ -384,6 +388,9 @@ describe('runWorkerTurn', () => {
     expect(await runWorkerTurn(turn({ bin: spent, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'usage_limit' })
     const loggedOut = script(tempDir(), 'claude', errorResult('Not logged in · Please run /login'))
     expect(await runWorkerTurn(turn({ bin: loggedOut, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'auth' })
+    // The real text of a login whose token expired (2026-11-20 transcripts).
+    const expired = script(tempDir(), 'claude', errorResult('Login expired · Please run /login'))
+    expect(await runWorkerTurn(turn({ bin: expired, account: CLAUDE }))).toMatchObject({ kind: 'account_blocked', reason: 'auth' })
   })
 
   it('reads a turn with its answer as a reply even when stderr mentions a limit', async () => {

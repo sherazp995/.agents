@@ -111,6 +111,30 @@ export async function openLinkedThread(pool: Pool, params: LinkedThreadParams): 
 }
 
 /**
+ * Links a terminal Codex chat to the thread its launcher opened. Done late,
+ * once the chat is known: Codex saves a chat only after its first message.
+ * Throws TakenOverSessionError when Relay's own loop took the thread over in
+ * the meantime, so the thread stays with it.
+ */
+export async function linkCodexChat(
+  pool: Pool,
+  params: { workspaceId: string; owner: string; thread: { channel: string; thread: string }; chatId: string; cwd: string; host: string | null },
+): Promise<void> {
+  const session = await threadSession(pool, params.workspaceId, params.owner, { channel: params.thread.channel, message: params.thread.thread })
+  if (session === undefined) throw new NotifyError(`${params.owner} is not a mapped Slack user, so the thread has no session to link.`)
+  await attachSessionToEngineChat(pool, session.id, params.chatId, params.cwd, params.host, 'codex')
+}
+
+/** Queues a post in a thread; the daemon sends it. */
+export async function postInThread(pool: Pool, workspaceId: string, thread: { channel: string; thread: string }, text: string): Promise<void> {
+  await pool.query(`INSERT INTO outbox (workspace_id, adapter, action, next_attempt_at) VALUES ($1, $2, $3, now())`, [
+    workspaceId,
+    PLATFORM,
+    { kind: 'post', ref: { channel: thread.channel, thread: thread.thread }, text: scrubSecrets(text.trim()), markdown: true },
+  ])
+}
+
+/**
  * The laptop owner: `configured` (launcher.dm_to) when it is a mapped user,
  * otherwise the workspace's only owner. Throws when it cannot tell.
  */

@@ -15,11 +15,11 @@ import { listEngineSessions } from '../src/sessions/discovery.js'
 import { SESSION_ATTACH_ACTION_ID } from '../src/chat/slack/session-attach.js'
 import { startDirectThread } from '../src/live/direct-thread.js'
 import { ASK_AGAIN_TEXT, CANCELLED_TEXT, FolderQuestions, questionText } from '../src/chat/slack/folder-questions.js'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Writable } from 'node:stream'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Pool, PoolClient } from 'pg'
 import { closePool, createPool } from '../src/db/pool.js'
 import { applyMigrations } from '../src/db/migrate.js'
@@ -1882,11 +1882,26 @@ describeDb('orchestrator', () => {
       const principalId = await provisionPrincipal(pool, workspaceId, 'slack', platformUserId, 'Op', ['operator'])
       await adapter.start(async () => {})
 
-      // A real session on this machine, so the handler's re-derivation of
-      // the folder from discovery finds something to bind to.
-      const discovered = await listEngineSessions({ limit: 1 })
+      // The handler reads transcripts under the home folder, so HOME points at
+      // a fixture: an older terminal chat and a newer `claude -p` run, which
+      // the picker must skip (it lists terminal chats only).
+      const home = mkdtempSync(join(tmpdir(), 'relay-attach-home-'))
+      const projects = join(home, '.claude', 'projects')
+      const chatCwd = mkdtempSync(join(tmpdir(), 'relay-attach-chat-'))
+      const terminal = join(projects, '-chat', 'aaaaaaaa-0000-4000-8000-000000000001.jsonl')
+      const headless = join(projects, '-worker', 'bbbbbbbb-0000-4000-8000-000000000002.jsonl')
+      mkdirSync(dirname(terminal), { recursive: true })
+      mkdirSync(dirname(headless), { recursive: true })
+      writeFileSync(terminal, `${JSON.stringify({ type: 'user', cwd: chatCwd, entrypoint: 'cli' })}\n`)
+      writeFileSync(headless, `${JSON.stringify({ type: 'user', cwd: tmpdir(), entrypoint: 'sdk-cli' })}\n`)
+      utimesSync(terminal, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+      vi.stubEnv('HOME', home)
+      onTestFinished(() => {
+        vi.unstubAllEnvs()
+      })
+      const discovered = await listEngineSessions({ root: projects, limit: 1, interactiveOnly: true })
       const target = discovered[0]
-      expect(target, 'expected at least one Claude Code session on this machine').toBeDefined()
+      expect(target?.sessionId).toBe('aaaaaaaa-0000-4000-8000-000000000001')
 
       const channel = `D_${randomUUID().slice(0, 8)}`
       const messageTs = '4000.000001'
@@ -1920,6 +1935,23 @@ describeDb('orchestrator', () => {
       // to the thread Slack stamped on the click, never the payload's.
       expect(rows[0]?.engine_cwd).toBe(target?.cwd)
       expect(rows[0]?.principal_id).toBe(principalId)
+
+      // A `claude -p` run is not a chat anyone sits in: a click naming it binds nothing.
+      const headlessTs = '4000.000002'
+      await boltApp.dispatchAction(SESSION_ATTACH_ACTION_ID, {
+        actions: [
+          {
+            action_id: SESSION_ATTACH_ACTION_ID,
+            type: 'button',
+            value: JSON.stringify({ engineSessionId: 'bbbbbbbb-0000-4000-8000-000000000002', engineCwd: '/tmp/ignored-by-design', channel: 'C_IGNORED_BY_DESIGN', thread: '9999.999999' }),
+          },
+        ],
+        user: { id: platformUserId },
+        channel: { id: channel },
+        message: { ts: headlessTs },
+      })
+      const headlessRows = await pool.query(`SELECT 1 FROM sessions WHERE workspace_id = $1 AND thread_ref = $2 AND engine_session_id IS NOT NULL`, [workspaceId, composeThreadRef(channel, headlessTs)])
+      expect(headlessRows.rows).toHaveLength(0)
 
       await adapter.stop()
     })

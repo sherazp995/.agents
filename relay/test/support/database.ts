@@ -1,8 +1,11 @@
+import pg from 'pg'
 import { inject } from 'vitest'
 import {
   buildDatabaseName,
   createDatabaseIfMissing,
+  dropDatabaseWithRetry,
   maintenanceConnectionUrl,
+  quoteDatabaseIdentifier,
 } from './database-naming.js'
 
 declare module 'vitest' {
@@ -78,4 +81,35 @@ export async function getTestDatabaseUrl(): Promise<string> {
   const url = new URL(process.env.RELAY_TEST_DATABASE_URL as string)
   url.pathname = `/${name}`
   return url.toString()
+}
+
+/**
+ * A new, empty database next to this worker's, for a test that needs one no
+ * other test file connects to (or that must hold exactly one workspace).
+ * Its name does not match the sweep, so drop it with dropSiblingDatabase.
+ */
+export async function freshSiblingDatabase(suffix: string): Promise<string> {
+  const workerUrl = new URL(await getTestDatabaseUrl())
+  const name = `${workerUrl.pathname.slice(1).replace(/_test$/, '')}_${suffix}_test`
+  await withMaintenanceClient(async (admin) => {
+    await dropDatabaseWithRetry(admin, name, { throwOnGiveUp: true })
+    await admin.query(`CREATE DATABASE ${quoteDatabaseIdentifier(name)}`)
+  })
+  workerUrl.pathname = `/${name}`
+  return workerUrl.toString()
+}
+
+/** Drops a database made by freshSiblingDatabase; throws when it cannot, since no sweep would. */
+export async function dropSiblingDatabase(url: string): Promise<void> {
+  await withMaintenanceClient((admin) => dropDatabaseWithRetry(admin, new URL(url).pathname.slice(1), { throwOnGiveUp: true }))
+}
+
+async function withMaintenanceClient(work: (admin: pg.Client) => Promise<void>): Promise<void> {
+  const admin = new pg.Client({ connectionString: maintenanceConnectionUrl(process.env.RELAY_TEST_DATABASE_URL) })
+  await admin.connect()
+  try {
+    await work(admin)
+  } finally {
+    await admin.end()
+  }
 }

@@ -8,36 +8,9 @@ import { applyMigrations } from '../../src/db/migrate.js'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { daemonPidFilePath } from '../../src/secrets/keychain.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
-import { getTestDatabaseUrl } from '../support/database.js'
-import { maintenanceConnectionUrl, quoteDatabaseIdentifier } from '../support/database-naming.js'
+import { dropSiblingDatabase, freshSiblingDatabase } from '../support/database.js'
 
 const MIGRATIONS = 'src/db/migrations'
-
-/** A fresh database next to this worker's, so no other test file's connection is open to it (the move refuses those). */
-async function freshDatabase(suffix: string): Promise<string> {
-  const workerUrl = new URL(await getTestDatabaseUrl())
-  const name = `${workerUrl.pathname.slice(1).replace(/_test$/, '')}_${suffix}_test`
-  const admin = new pg.Client({ connectionString: maintenanceConnectionUrl(process.env.RELAY_TEST_DATABASE_URL) })
-  await admin.connect()
-  try {
-    await admin.query(`DROP DATABASE IF EXISTS ${quoteDatabaseIdentifier(name)} WITH (FORCE)`)
-    await admin.query(`CREATE DATABASE ${quoteDatabaseIdentifier(name)}`)
-  } finally {
-    await admin.end()
-  }
-  workerUrl.pathname = `/${name}`
-  return workerUrl.toString()
-}
-
-async function dropDatabase(url: string): Promise<void> {
-  const admin = new pg.Client({ connectionString: maintenanceConnectionUrl(process.env.RELAY_TEST_DATABASE_URL) })
-  await admin.connect()
-  try {
-    await admin.query(`DROP DATABASE IF EXISTS ${quoteDatabaseIdentifier(new URL(url).pathname.slice(1))} WITH (FORCE)`)
-  } finally {
-    await admin.end()
-  }
-}
 
 /** Every row of every Relay table as text, so a lost microsecond or byte shows as a difference. */
 async function snapshot(url: string): Promise<Record<string, string[]>> {
@@ -81,8 +54,8 @@ describe('runDbMove', () => {
 
   beforeEach(async () => {
     stored.clear()
-    sourceUrl = await freshDatabase('movesrc')
-    targetUrl = await freshDatabase('movedst')
+    sourceUrl = await freshSiblingDatabase('movesrc')
+    targetUrl = await freshSiblingDatabase('movedst')
     const source = createPool(sourceUrl)
     try {
       await applyMigrations(source, MIGRATIONS)
@@ -97,8 +70,8 @@ describe('runDbMove', () => {
   })
 
   afterAll(async () => {
-    await dropDatabase(sourceUrl)
-    await dropDatabase(targetUrl)
+    await dropSiblingDatabase(sourceUrl)
+    await dropSiblingDatabase(targetUrl)
   })
 
   it('copies every row into an empty database, then points config at it through the keystore', async () => {

@@ -3,7 +3,8 @@ import { runKillClear, runKillEngage } from './cli/kill.js'
 import { Command } from 'commander'
 import type { Pool } from 'pg'
 import { runPrincipalsAdd } from './cli/principals.js'
-import { readIfPresent, relayPrepare, runInTerminal, runLaunch } from './cli/launch.js'
+import { readIfPresent, relayCodexLink, relayPrepare, runInTerminal, runLaunch, type RelayPrepareDeps } from './cli/launch.js'
+import { deleteCodexChatRecord, writeCodexChatRecord } from './live/open-codex.js'
 import { readAccountPool, RedisCooldownStore } from './autonomous/accounts.js'
 import { codexVersion, isProvenEligible, readCodexEligibility } from './autonomous/codex-probe.js'
 import { closeRedis, createRedis, waitForReady } from './redis/client.js'
@@ -48,6 +49,8 @@ import { defaultConfigPath, defaultPolicyPath, defaultReposPath, resolveRelayHom
 import { runSecretsMigrate, runSecretsSet } from './cli/secrets.js'
 import { relaySecretsHelperPath } from './secrets/keychain.js'
 import { existsSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runReposAdd } from './cli/repos.js'
 import { runDbCreate, runDbMove } from './cli/db.js'
@@ -713,6 +716,16 @@ async function launchChat(client: 'claude' | 'codex', userArgs: readonly string[
   const bin = client === 'claude' ? (config.autonomous?.claude_bin ?? 'claude') : (config.autonomous?.codex_bin ?? 'codex')
   const codexVersionNow = client === 'codex' ? codexVersion(bin).catch(() => 'unknown') : Promise.resolve('unknown')
   const relayHome = resolveRelayHome().path
+  const prepareDeps: RelayPrepareDeps = {
+    client,
+    cwd,
+    host,
+    dmTo: config.launcher?.dm_to,
+    openPool: async () => createPool(await resolveOperatorDatabaseUrl(config, secrets)),
+    closePool,
+    secrets,
+    repos: () => loadRepoRegistryIfPresent(defaultReposPath()).repos.map((repo) => repo.path),
+  }
   return runLaunch({
     client,
     bin,
@@ -730,16 +743,18 @@ async function launchChat(client: 'claude' | 'codex', userArgs: readonly string[
       }
     },
     isCodexEligible: async (account) => isProvenEligible(await readCodexEligibility(relayHome), account.key, await codexVersionNow),
-    prepare: relayPrepare({
-      client,
-      cwd,
-      host,
-      dmTo: config.launcher?.dm_to,
-      openPool: async () => createPool(await resolveOperatorDatabaseUrl(config, secrets)),
-      closePool,
-      secrets,
-      repos: () => loadRepoRegistryIfPresent(defaultReposPath()).repos.map((repo) => repo.path),
-    }),
+    prepare: relayPrepare(prepareDeps),
+    // Every Codex login's sessions folder links to the default login's, so one folder holds every chat.
+    ...(client === 'codex'
+      ? {
+          codex: {
+            sessionsRoot: join(homedir(), '.codex', 'sessions'),
+            ...relayCodexLink(prepareDeps),
+            writeRecord: (record) => writeCodexChatRecord(record),
+            deleteRecord: (chatId) => deleteCodexChatRecord(chatId),
+          },
+        }
+      : {}),
     run: runInTerminal,
     readTranscript: readIfPresent,
     say: (text) => process.stderr.write(`relay: ${text}\n`),

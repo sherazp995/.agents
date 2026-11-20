@@ -247,6 +247,11 @@ export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
     'is autonomous.claude_bin or autonomous.codex_bin from relay.config.yaml (src/cli.ts launchChat), the same ' +
     'two vendor CLIs Relay already runs for its Slack sessions, so its destinations are the Anthropic and OpenAI ' +
     'entries above.',
+  'src/live/codex-queue.ts':
+    "Runs `codex queue` (runQueue) to hand a Slack reply to an open `relay codex` chat: the binary is " +
+    'autonomous.codex_bin from relay.config.yaml (src/orchestrator.ts startOrchestrator), the same vendor CLI ' +
+    "Relay already runs, and the message goes to that chat's own Codex process, so its destination is the " +
+    'OpenAI entry above.',
   'src/cli/db.ts':
     'Spawns `sudo -u postgres psql` on Linux or `psql` on macOS, chosen by psqlCommand() in the same file, for ' +
     '`relay db create`. Both connect only to the Postgres named by database.url, and the command refuses any host ' +

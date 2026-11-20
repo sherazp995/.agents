@@ -153,7 +153,7 @@ describe('against a REAL git repository, which is where the guarantee lives', ()
   it('creates a real worktree on a named branch at the recorded base commit', () => {
     const entry = repoEntrySchema.parse({ name: 'fixture', path: origin, permitted_operations: ['read', 'write'] })
 
-    const result = createWorktree(entry, 'run-7', 'Add a feature', { worktreeRoot: worktrees })
+    const result = createWorktree(entry, 'run-7', 'Add a feature', { worktreeRoot: worktrees, freeBytes: () => MINIMUM_FREE_BYTES * 2 })
 
     expect(result.outcome).toBe('created')
     if (result.outcome !== 'created') return
@@ -173,7 +173,7 @@ describe('against a REAL git repository, which is where the guarantee lives', ()
       status: String(execFileSync('git', ['status', '--porcelain'], { cwd: origin, encoding: 'utf8' })),
     }
 
-    const result = createWorktree(entry, 'run-8', 'Change things', { worktreeRoot: worktrees })
+    const result = createWorktree(entry, 'run-8', 'Change things', { worktreeRoot: worktrees, freeBytes: () => MINIMUM_FREE_BYTES * 2 })
     expect(result.outcome).toBe('created')
     if (result.outcome !== 'created') return
 
@@ -195,8 +195,8 @@ describe('against a REAL git repository, which is where the guarantee lives', ()
   it('FR-CODE-12: two concurrent runs on one repository do not interfere', () => {
     const entry = repoEntrySchema.parse({ name: 'fixture', path: origin, permitted_operations: ['read', 'write'] })
 
-    const first = createWorktree(entry, 'run-a', 'First', { worktreeRoot: worktrees })
-    const second = createWorktree(entry, 'run-b', 'Second', { worktreeRoot: worktrees })
+    const first = createWorktree(entry, 'run-a', 'First', { worktreeRoot: worktrees, freeBytes: () => MINIMUM_FREE_BYTES * 2 })
+    const second = createWorktree(entry, 'run-b', 'Second', { worktreeRoot: worktrees, freeBytes: () => MINIMUM_FREE_BYTES * 2 })
 
     expect(first.outcome).toBe('created')
     expect(second.outcome).toBe('created')

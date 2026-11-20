@@ -64,7 +64,11 @@ export type Session = {
   mode: SessionMode
   /** The exact chat (ListAgents "name [ref]") the courier pushes this thread's messages to; null means match by engineCwd. */
   courierTarget: string | null
+  /** The kind of chat engineSessionId names (0032_session_engine_kind.sql): a Codex id is never resumed with claude. */
+  engineKind: EngineKind
 }
+
+export type EngineKind = 'claude' | 'codex'
 
 export type FindOrCreateSessionParams = {
   workspaceId: string
@@ -86,6 +90,7 @@ export type SessionRow = {
   engine_cwd: string | null
   mode: string
   courier_target?: string | null
+  engine_kind?: string
 }
 
 export function toSession(row: SessionRow): Session {
@@ -102,6 +107,7 @@ export function toSession(row: SessionRow): Session {
     engineCwd: row.engine_cwd,
     mode: toSessionMode(row.mode),
     courierTarget: row.courier_target ?? null,
+    engineKind: row.engine_kind === 'codex' ? 'codex' : 'claude',
   }
 }
 
@@ -300,7 +306,8 @@ export async function setSessionEngineSessionId(
   engineSessionId: string,
 ): Promise<void> {
   const { rowCount } = await pool.query(
-    `UPDATE sessions SET engine_session_id = $2 WHERE id = $1`,
+    // Relay's loop runs Claude, so the id it records is a Claude chat's, even in a thread a Codex chat once held.
+    `UPDATE sessions SET engine_session_id = $2, engine_kind = 'claude' WHERE id = $1`,
     [sessionId, engineSessionId],
   )
   if (rowCount === 0) {
@@ -329,17 +336,31 @@ export async function attachSessionToEngineChat(
   engineCwd: string,
   /** The failover laptop the chat runs on; null with failover off. */
   engineHost: string | null = null,
+  engineKind: EngineKind = 'claude',
 ): Promise<void> {
   // A reminder's read-only task (0029_task_read_only.sql) must never be handed to a chat without that limit.
+  // A Codex chat links late (Codex saves a chat only after its first message), so it takes only a thread Relay's
+  // own loop has not taken over in the meantime.
   const { rowCount } = await pool.query(
-    `UPDATE sessions SET engine_session_id = $2, engine_cwd = $3, engine_host = $4
-     WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM autonomous_tasks WHERE session_id = $1 AND read_only)`,
-    [sessionId, engineSessionId, engineCwd, engineHost],
+    `UPDATE sessions SET engine_session_id = $2, engine_cwd = $3, engine_host = $4, engine_kind = $5
+     WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM autonomous_tasks WHERE session_id = $1 AND read_only)
+       AND ($5 <> 'codex' OR mode = 'governed')`,
+    [sessionId, engineSessionId, engineCwd, engineHost, engineKind],
   )
   if (rowCount !== 0) return
-  const { rows } = await pool.query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])
-  if (rows.length > 0) throw new ReadOnlySessionError()
-  throw new Error(`attachSessionToEngineChat: no session found with id "${sessionId}"`)
+  const { rows } = await pool.query<{ mode: string }>('SELECT mode FROM sessions WHERE id = $1', [sessionId])
+  const row = rows[0]
+  if (row === undefined) throw new Error(`attachSessionToEngineChat: no session found with id "${sessionId}"`)
+  if (engineKind === 'codex' && row.mode !== 'governed') throw new TakenOverSessionError()
+  throw new ReadOnlySessionError()
+}
+
+/** Relay's own loop took the thread over before the Codex chat could be linked to it. */
+export class TakenOverSessionError extends Error {
+  constructor() {
+    super("Relay's own loop already answers this thread, so replies there stay with it")
+    this.name = 'TakenOverSessionError'
+  }
 }
 
 /** The thread's task was started by a Slackbot reminder and is read-only, so it cannot be attached to a chat. */
@@ -395,7 +416,7 @@ export async function markSessionDirect(
   engineHost: string | null = null,
 ): Promise<void> {
   await pool.query(
-    "UPDATE sessions SET mode = 'direct', engine_session_id = $2, engine_cwd = $3, engine_host = $4, last_active_at = NOW() WHERE id = $1",
+    "UPDATE sessions SET mode = 'direct', engine_session_id = $2, engine_cwd = $3, engine_host = $4, engine_kind = 'claude', last_active_at = NOW() WHERE id = $1",
     [sessionId, engineSessionId, engineCwd, engineHost],
   )
 }

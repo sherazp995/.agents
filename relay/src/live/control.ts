@@ -26,6 +26,7 @@ import type { Pool, PoolClient } from 'pg'
 
 import { defaultExecFile, hasLiveClaudeProcess } from '../sessions/liveness.js'
 import type { ExecFileFn } from '../sessions/liveness.js'
+import { defaultCodexChatLookup, type CodexChatLookup } from './open-codex.js'
 
 /**
  * Thrown when a session already has a waiter. Distinct from "no message
@@ -150,18 +151,23 @@ export async function isLiveControlled(
   // whatever happens to be alive on the machine, which would make this
   // module's central rule pass or fail for reasons unrelated to the rule.
   execFileFn: ExecFileFn = defaultExecFile,
+  codexChat: CodexChatLookup = defaultCodexChatLookup,
 ): Promise<boolean> {
   const { rows } = await pool.query<{
     claimed: boolean
     engine_cwd: string | null
     engine_session_id: string | null
+    engine_kind: string
   }>(
-    `SELECT live_control_claimed_at IS NOT NULL AS claimed, engine_cwd, engine_session_id FROM sessions
+    `SELECT live_control_claimed_at IS NOT NULL AS claimed, engine_cwd, engine_session_id, engine_kind FROM sessions
        WHERE id = $1 AND ($2::uuid IS NULL OR workspace_id = $2)`,
     [sessionId, workspaceId ?? null],
   )
   const row = rows[0]
   if (row === undefined) return false
+  // A Codex chat is open only while the launcher's record of it is, checked first: no Claude process, and no
+  // claim, stands in for it.
+  if (row.engine_kind === 'codex') return row.engine_session_id !== null && (await codexChat(row.engine_session_id)) !== null
   if (row.claimed) return true
   if (row.engine_cwd === null) return false
 
@@ -253,6 +259,8 @@ export async function claimAllWorkspaceMessages(
              -- wide by design, and a message reaching a sibling session is
              -- the intended behaviour rather than a leak.
              AND (s.live_control_claimed_at IS NOT NULL OR s.engine_cwd IS NOT NULL)
+             -- A Codex chat gets its messages through codex queue; a Claude session must never drain them.
+             AND s.engine_kind <> 'codex'
            ORDER BY lcm.created_at
            FOR UPDATE OF lcm SKIP LOCKED
        ) AS old
@@ -274,10 +282,28 @@ export async function claimAllWorkspaceMessages(
  * waiter and this cannot both win.
  */
 export async function takeBackMessage(pool: Pool, messageId: string): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `UPDATE live_control_messages SET claimed_at = now(), body = '' WHERE id = $1 AND claimed_at IS NULL`,
-    [messageId],
-  )
+  // The text stays until Relay's loop has stored the message as its own (finishTakenBack): erased here, a
+  // hand-over that failed would lose the operator's message for good.
+  const { rowCount } = await pool.query(`UPDATE live_control_messages SET claimed_at = now() WHERE id = $1 AND claimed_at IS NULL`, [messageId])
+  return rowCount === 1
+}
+
+/** Erases a taken-back message's text once Relay's loop has stored the message. */
+export async function finishTakenBack(pool: Pool, messageId: string): Promise<void> {
+  await pool.query(`UPDATE live_control_messages SET body = '' WHERE id = $1`, [messageId])
+}
+
+/** Hands a taken-back message whose hand-over failed back to the queue, text intact, so it can be taken again. */
+export async function releaseTakenBack(pool: Pool, messageId: string): Promise<void> {
+  await pool.query(`UPDATE live_control_messages SET claimed_at = NULL WHERE id = $1`, [messageId])
+}
+
+/**
+ * Marks a message delivered by a push (the courier, or `codex queue`) and
+ * erases its text. False when something else claimed it first.
+ */
+export async function markDelivered(pool: Pool, messageId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(`UPDATE live_control_messages SET claimed_at = now(), body = '' WHERE id = $1 AND claimed_at IS NULL`, [messageId])
   return rowCount === 1
 }
 

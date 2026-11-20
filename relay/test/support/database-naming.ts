@@ -100,3 +100,28 @@ function isDuplicateDatabaseError(error: unknown): boolean {
     (error as { code?: unknown }).code === '42P04'
   )
 }
+
+/**
+ * Drops a test database, retrying while Postgres refuses (42501): FORCE
+ * cannot end a backend our non-superuser role has no rights over, such as an
+ * autovacuum worker that just started on a freshly written database. It
+ * finishes in moments. After five tries it warns and returns, leaving the
+ * database to the next run's sweep; with `throwOnGiveUp`, for names the
+ * sweep does not match, it throws instead.
+ */
+export async function dropDatabaseWithRetry(client: pg.Client, name: string, options: { throwOnGiveUp?: boolean; waitMs?: number } = {}): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await client.query(`DROP DATABASE IF EXISTS ${quoteDatabaseIdentifier(name)} WITH (FORCE)`)
+      return
+    } catch (error) {
+      if ((error as { code?: string }).code !== '42501') throw error
+      if (attempt === 5) {
+        if (options.throwOnGiveUp === true) throw error
+        console.warn(`could not drop test database ${name} yet; the next run's sweep removes it`)
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, options.waitMs ?? 500))
+    }
+  }
+}

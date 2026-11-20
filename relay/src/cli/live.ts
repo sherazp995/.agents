@@ -168,7 +168,8 @@ export async function resolveDrainWorkspace(
        JOIN sessions s ON s.id = lcm.session_id
       WHERE lcm.claimed_at IS NULL
         AND s.state = 'active'
-        AND (s.live_control_claimed_at IS NOT NULL OR s.engine_cwd IS NOT NULL)`,
+        AND (s.live_control_claimed_at IS NOT NULL OR s.engine_cwd IS NOT NULL)
+        AND s.engine_kind <> 'codex'`,
   )
 
   if (rows.length === 0) return { outcome: 'nothing_waiting' }

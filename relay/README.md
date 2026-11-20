@@ -617,9 +617,17 @@ ends on a usage limit or an expired login, quit it and it reopens with
 same folder. With `--continue`, a bare `--resume` or `--print` the chat id is
 not known in advance, so the thread is opened but not attached.
 
-A Codex chat can post in its thread with `relay live say`; replies there are
-answered by Relay's own loop. It does not move logins after a limit: resume it
-yourself with `relay codex resume <id>`.
+A Codex chat is linked to its thread once Codex saves it, which is after its
+first message (the launcher finds it by a marker in its instructions, and
+`relay codex resume <id>` links at once). While it is open, replies there are
+handed to the chat with `codex queue`, and it answers with `relay live say`.
+Before the link, after the chat closes, or when `codex queue` refuses a
+message, Relay's own loop answers it at once, with a fresh session that reads
+the thread (a Codex chat is never resumed by Relay's Claude turns). When a
+Codex chat hits a usage limit or an expired login, the thread says so at once;
+quit it and it resumes with `codex resume <id>` on the next free login. The
+launcher keeps a record of each open Codex chat under `run/codex-chats/` in the
+Relay home, removed when the chat exits.
 
 Nothing holds a database connection while the chat runs.
 

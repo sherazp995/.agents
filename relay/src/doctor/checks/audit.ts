@@ -18,7 +18,7 @@ import { createSecretProvider } from '../../secrets/index.js'
 import type { CheckResult } from '../checks.js'
 import { registerCheck } from '../registry.js'
 import type { CheckContext } from '../registry.js'
-import { closePool, createPool } from '../../db/pool.js'
+import { DOCTOR_CONNECT_TIMEOUT_MS, closePool, createPool } from '../../db/pool.js'
 import { resolveOperatorDatabaseUrl } from '../../config/database-url.js'
 import { ConfigError } from '../../config/errors.js'
 
@@ -36,7 +36,7 @@ registerCheck({
         remediation: 'Run `relay secrets migrate`, or point database.url at a keystore item that exists.',
       }
     }
-    const pool = createPool(url)
+    const pool = createPool(url, { connectTimeoutMs: DOCTOR_CONNECT_TIMEOUT_MS })
     try {
       // Verified per workspace, because the chain is per workspace: one
       // shared chain would let activity in one be inferred from sequence

@@ -1,4 +1,4 @@
-// relay-test-needs: services (relay doctor checks the real Postgres, Redis and Keychain)
+// relay-test-needs: services (relay doctor checks this laptop's real database, Redis, Keychain and Slack)
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { beforeAll, describe, expect, it } from 'vitest'
@@ -48,7 +48,8 @@ beforeAll(async () => {
 describe('compiled CLI', () => {
   it('runs relay doctor against real dependencies, names every check, and exits 0', async () => {
     const { code, stdout } = await runCli(['doctor'])
-    expect(code).toBe(0)
+    // The output is the message, so a failure names the check that failed.
+    expect(code, stdout).toBe(0)
     expect(stdout).toContain('node')
     expect(stdout).toContain('config')
     expect(stdout).toContain('postgres')

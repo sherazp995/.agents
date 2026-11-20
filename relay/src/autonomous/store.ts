@@ -174,13 +174,13 @@ export type IntakeResult =
  */
 export async function intakeMention(pool: Pool, params: IntakeMentionParams): Promise<IntakeResult> {
   return inTransaction(pool, async (client) => {
-    const createTask = async (session: Session, chat: TakenOverChat | null = null): Promise<IntakeResult> => {
+    const createTask = async (session: Session, chat: TakenOverChat | null = null, chatCwd: string | null = null): Promise<IntakeResult> => {
       const { rows } = await client.query<TaskRow>(
         `INSERT INTO autonomous_tasks (workspace_id, session_id, requester_principal_id, pending_events, files, seen_event_ids, next_wakeup_at,
                                        chat_session_id, chat_cwd, engine_session_id, read_only)
          VALUES ($1, $2, $3, $4, $5, ARRAY[$6], now(), $7, $8, $7, $9)
          RETURNING *`,
-        [params.workspaceId, session.id, params.principalId, JSON.stringify([params.event]), JSON.stringify(params.files), params.event.id, chat?.sessionId ?? null, chat?.cwd ?? params.chatCwd ?? null, params.readOnly === true],
+        [params.workspaceId, session.id, params.principalId, JSON.stringify([params.event]), JSON.stringify(params.files), params.event.id, chat?.sessionId ?? null, chat?.cwd ?? chatCwd ?? params.chatCwd ?? null, params.readOnly === true],
       )
       return { kind: 'created', task: toTask(requireRow(rows[0])), session }
     }
@@ -205,13 +205,23 @@ export async function intakeMention(pool: Pool, params: IntakeMentionParams): Pr
       if (!params.adopt || active.mode !== 'governed') return { kind: 'not_autonomous' }
       // The attachment ends with the chat, so later messages go to the task instead of parking again.
       await client.query(
-        `UPDATE sessions SET mode = 'autonomous', live_control_claimed_at = NULL, engine_cwd = NULL, engine_session_id = NULL, engine_host = NULL, courier_target = NULL WHERE id = $1`,
+        `UPDATE sessions SET mode = 'autonomous', live_control_claimed_at = NULL, engine_cwd = NULL, engine_session_id = NULL, engine_host = NULL, engine_kind = 'claude', courier_target = NULL WHERE id = $1`,
         [active.id],
       )
       const existingTask = await client.query('SELECT 1 FROM autonomous_tasks WHERE session_id = $1', [active.id])
+      const adopted = toSession({ ...active, mode: 'autonomous', engine_cwd: null, engine_session_id: null, engine_kind: 'claude', courier_target: null })
+      // A Codex chat cannot be resumed by the task's Claude turns: the task keeps its folder and starts a fresh
+      // session that reads the thread.
+      if (active.engine_kind === 'codex') {
+        if (existingTask.rows.length === 0) return createTask(adopted, null, active.engine_cwd)
+        await client.query(
+          'UPDATE autonomous_tasks SET chat_session_id = NULL, chat_cwd = COALESCE($2, chat_cwd), engine_session_id = NULL, account_key = NULL, updated_at = now() WHERE session_id = $1',
+          [active.id, active.engine_cwd],
+        )
+      }
       // The task carries the chat on, so its turns resume that same chat id in its folder.
-      const chat = active.engine_session_id !== null && active.engine_cwd !== null ? { sessionId: active.engine_session_id, cwd: active.engine_cwd } : null
-      if (existingTask.rows.length === 0) return createTask(toSession({ ...active, mode: 'autonomous', engine_cwd: null, engine_session_id: null, courier_target: null }), chat)
+      const chat = active.engine_kind !== 'codex' && active.engine_session_id !== null && active.engine_cwd !== null ? { sessionId: active.engine_session_id, cwd: active.engine_cwd } : null
+      if (existingTask.rows.length === 0) return createTask(adopted, chat)
       if (chat !== null) {
         await client.query(
           'UPDATE autonomous_tasks SET chat_session_id = $2, chat_cwd = $3, engine_session_id = $2, account_key = NULL, updated_at = now() WHERE session_id = $1',
