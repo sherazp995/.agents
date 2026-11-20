@@ -13,7 +13,7 @@ import { accessSync, constants, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readAccountPool } from '../../autonomous/accounts.js'
-import { codexVersion, probeCodexAccount, writeCodexEligibility, type CodexEligibility } from '../../autonomous/codex-probe.js'
+import { codexVersion, probeCodexAccount, readCodexEligibility, writeCodexEligibility, type CodexEligibility, type CodexEligibilityEntry } from '../../autonomous/codex-probe.js'
 import { DEFAULT_CODEX_HOME } from '../../autonomous/turn-runner.js'
 import { loadRepoRegistryIfPresent } from '../../config/load.js'
 import { defaultReposPath, resolveRelayHome } from '../../config/paths.js'
@@ -80,19 +80,34 @@ registerCheck({
     }
 
     const hookCommand = `'${process.execPath}' '${hookScript}'`
-    // Each probe runs in its own codex home and temp folder, so they run side by side: one after another took about 15 seconds per login.
-    const probed = await Promise.all(
-      codexAccounts.map(async (account) => [account.key, await probeCodexAccount({ account, codexBin: autonomous.codex_bin, version, hookCommand, codexHome: account.configDir ?? DEFAULT_CODEX_HOME })] as const),
+    const relayHome = resolveRelayHome().path
+    const saved = await readCodexEligibility(relayHome)
+    // A real codex turn per login takes about 20 seconds, so a passing proof made with this same codex version, hook command and
+    // codex home is reused; a failed, new or changed login is probed. --recheck probes every login.
+    const stillProven = (entry: CodexEligibilityEntry | undefined, codexHome: string): entry is CodexEligibilityEntry =>
+      ctx.recheck !== true && entry?.eligible === true && entry.codexVersion === version && entry.hookCommand === hookCommand && entry.codexHome === codexHome
+    // Each probe runs in its own codex home and temp folder, so they run side by side.
+    const checked = await Promise.all(
+      codexAccounts.map(async (account) => {
+        const codexHome = account.configDir ?? DEFAULT_CODEX_HOME
+        const previous = saved[account.key]
+        if (stillProven(previous, codexHome)) return { key: account.key, entry: previous, reused: true }
+        const entry = await probeCodexAccount({ account, codexBin: autonomous.codex_bin, version, hookCommand, codexHome })
+        return { key: account.key, entry: { ...entry, hookCommand, codexHome }, reused: false }
+      }),
     )
-    const eligibility: CodexEligibility = Object.fromEntries(probed)
-    await writeCodexEligibility(resolveRelayHome().path, eligibility)
+    // Reused entries are written back with the new ones: the file holds exactly the pool's current codex logins.
+    const eligibility: CodexEligibility = Object.fromEntries(checked.map(({ key, entry }) => [key, entry]))
+    await writeCodexEligibility(relayHome, eligibility)
 
-    const lines = Object.entries(eligibility).map(([key, entry]) => `${key}: ${entry.eligible ? 'eligible' : 'not eligible'} (${entry.detail})`)
-    const allEligible = Object.values(eligibility).every((entry) => entry.eligible)
+    const describe = ({ key, entry, reused }: (typeof checked)[number]) =>
+      reused ? `${key}: eligible (proven ${entry.checkedAt.slice(0, 16).replace('T', ' ')} UTC)` : `${key}: ${entry.eligible ? 'eligible' : 'not eligible'} (${entry.detail})`
+    const allEligible = checked.every(({ entry }) => entry.eligible)
+    const anyReused = checked.some(({ reused }) => reused)
     return {
       name: CODEX_HOOK,
       status: allEligible ? 'ok' : 'degraded',
-      detail: `${version}. ${lines.join('; ')}`,
+      detail: `${version}. ${checked.map(describe).join('; ')}${anyReused ? '. Saved proofs reused; `relay doctor --recheck` probes again' : ''}`,
       ...(allEligible ? {} : { remediation: 'An account that is not eligible is never used for codex turns. Trust relay\'s hook in that codex home, or log it in, then re-run `relay doctor`.' }),
     }
   },

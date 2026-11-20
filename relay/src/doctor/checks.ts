@@ -25,6 +25,8 @@ export type CheckResult = {
   status: CheckStatus
   detail: string
   remediation?: string
+  /** Long supporting detail (an audit trail, every finding), printed only by `relay doctor --verbose`. */
+  more?: string
 }
 
 const MINIMUM_NODE_MAJOR = 22

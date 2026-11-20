@@ -207,11 +207,14 @@ describe('runInit: doctor integration', () => {
     const degradedDoctor: DoctorRunner = async () => ({
       results: [{ name: 'postgres', status: 'failed', detail: 'connection refused', remediation: 'Run `docker compose up -d`.' }],
       exitCode: 1,
+      elapsedMs: 1500,
     })
 
     const result = await runInit(baseOptions({ runDoctorFn: degradedDoctor }))
 
     expect(result.exitCode).toBe(0)
+    expect(result.report).toContain('  FAILED    postgres  connection refused')
+    expect(result.report).toContain('0 ok, 0 degraded, 1 failed in 1.5s')
     expect(result.report).toContain('docker compose up -d')
     expect(result.report).toContain('relay init does not fail on them')
   })

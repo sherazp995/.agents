@@ -26,15 +26,16 @@ function writeFixtureSource(relativePath: string, content: string): string {
 }
 
 describe('checkEgress, FR-DATA-14', () => {
-  it('reports ok against this repository\'s own real source, and states what it verified and assumed', async () => {
+  it('reports ok against this repository\'s own real source in one line, and keeps what it verified and assumed for --verbose', async () => {
     const check = checkEgress()
     const result = await check.run(IGNORED_CONTEXT)
 
     expect(result.name).toBe('egress')
     expect(result.status).toBe('ok')
-    expect(result.detail).toMatch(/^Verified:/m)
-    expect(result.detail).toMatch(/^Assumed:/m)
-    expect(result.detail).toContain('confirmed: Slack')
+    expect(result.detail).toMatch(/^\d+ destinations confirmed, \d+ local spawn targets explained \(scanned from source\); --verbose for the audit$/)
+    expect(result.more).toMatch(/^Verified:/m)
+    expect(result.more).toMatch(/^Assumed:/m)
+    expect(result.more).toContain('confirmed: Slack')
   })
 
   it('fails, rather than ignores, an undeclared fetch destination', async () => {
@@ -81,6 +82,29 @@ describe('checkEgress, FR-DATA-14', () => {
     expect(result.detail).toMatch(/UNDECLARED fetch target "not-declared\.example"/)
     expect(result.detail).not.toContain(home)
     expect(result.detail).toContain('~')
+    expect(result.more).not.toContain(home)
+  })
+
+  it('reports a recorded build-time audit in one line when there is no source tree, and keeps the audit for --verbose', async () => {
+    const recorded = {
+      builtAt: '2026-11-19T16:51:15.696Z',
+      verified: ['Every fetch() call.'],
+      assumed: ['Vendor SDK internals.'],
+      findings: [
+        { kind: 'confirmed' as const, destination: 'Slack', evidence: 'fetch to slack.com at a.ts:1' },
+        { kind: 'confirmed' as const, destination: 'Slack', evidence: 'fetch to slack.com at b.ts:2' },
+        { kind: 'unresolved' as const, identifier: 'file', file: 'c.ts', line: 3, note: 'a local keychain call' },
+      ],
+    }
+    const check = checkEgress('/nonexistent/relay-src', homedir(), NO_OTHER_DECLARATIONS, () => recorded)
+    const result = await check.run(IGNORED_CONTEXT)
+
+    expect(result).toMatchObject({
+      status: 'ok',
+      detail: '1 destinations confirmed, 1 local spawn targets explained (recorded at build time 2026-11-19T16:51:15.696Z); --verbose for the audit',
+    })
+    expect(result.more).toContain('Verified: Every fetch() call.')
+    expect(result.more).toContain('confirmed: Slack (fetch to slack.com at b.ts:2)')
   })
 
   it('is registered under the name relay doctor reports it by', () => {

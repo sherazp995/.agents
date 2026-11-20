@@ -91,6 +91,8 @@ build it. After that, when agents-sync pulls commits that touch `relay/`,
 Relay rebuilds itself in the background and restarts a running daemon only
 if the build passed. A failed build keeps the old one and every session
 start says so until `relay update` passes. Its log is `relay/tmp/update.log`.
+`relay restart` restarts the daemon without rebuilding; a restart drops
+replies the daemon holds in memory, so pick a quiet moment.
 
 Create the Slack app first (below; it needs a browser), then:
 
@@ -244,6 +246,12 @@ relay doctor        # every dependency, truthfully
 ```
 
 `doctor` reports what is actually true rather than what is configured.
+Checks run side by side, one aligned line each, ending with the counts
+and run time. `relay doctor --verbose` adds each check's long detail (the
+egress audit). The codex hook proof runs a real codex turn per login, so a
+passing proof for the same codex version, hook command and codex home is
+reused; `relay doctor --recheck` proves every login again (do that after
+logging a codex login out or in).
 
 ### Run it
 
@@ -264,6 +272,21 @@ A running process is not evidence. Relay has shipped a bug where the daemon
 stayed alive having never completed the Socket Mode handshake.
 
 Then mention Relay in a channel it is in, or DM it.
+
+### Database connections
+
+The hosted pooler caps each database login at a fixed number of clients
+(15 on the current plan), and each laptop has its own login. The daemon
+holds at most `database.pool_max` connections (default 5, allowed 2 to 15);
+each command you or a session runs (`relay doctor`, `relay live`, ...)
+holds at most 2. Idle connections close after ten seconds and carry TCP
+keepalives, so one left behind by a sleeping laptop does not keep a slot.
+
+```yaml
+database:
+  url: keystore:relay-database-url
+  pool_max: 5
+```
 
 ### Failover
 

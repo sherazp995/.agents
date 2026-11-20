@@ -1,5 +1,6 @@
 import type { Logger } from '../obs/logger.js'
 import { createSecretProvider } from '../secrets/index.js'
+import type { SecretProvider } from '../secrets/provider.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
 import { RELAY_VERSION } from '../version.js'
 import { checkConfigDetailed, checkNodeVersion } from './checks.js'
@@ -36,6 +37,14 @@ const SYMBOL: Record<CheckResult['status'], string> = {
   degraded: 'degraded',
   failed: 'FAILED',
 }
+const STATUS_WIDTH = 10
+
+export type FormatOptions = {
+  /** Also print each result's long `more` detail. */
+  verbose?: boolean
+  /** How long the run took, shown in the closing summary line. */
+  elapsedMs?: number
+}
 
 /**
  * Renders every result, including passes, so silence is never mistaken for
@@ -48,13 +57,21 @@ const SYMBOL: Record<CheckResult['status'], string> = {
  * author who forgets to redact still cannot leak a secret through this
  * function.
  */
-export function formatResults(results: CheckResult[]): string {
+export function formatResults(results: CheckResult[], options: FormatOptions = {}): string {
   if (results.length === 0) return 'relay doctor: no checks ran'
+  const nameWidth = Math.max(...results.map((result) => result.name.length)) + 2
+  const indent = ' '.repeat(2 + STATUS_WIDTH + nameWidth)
+  const under = (text: string) => text.split('\n').join(`\n${indent}`)
   const lines = results.map((result) => {
-    const base = `[${SYMBOL[result.status]}] ${result.name}: ${result.detail}`
-    return result.remediation ? `${base}\n         fix: ${result.remediation}` : base
+    const row = [`  ${SYMBOL[result.status].padEnd(STATUS_WIDTH)}${result.name.padEnd(nameWidth)}${under(result.detail)}`]
+    if (result.remediation) row.push(`${indent}fix: ${under(result.remediation)}`)
+    if (options.verbose && result.more) row.push(`${indent}${under(result.more)}`)
+    return row.join('\n')
   })
-  return scrubSecrets([`relay doctor (relay ${RELAY_VERSION})`, ...lines].join('\n'))
+  const count = (status: CheckResult['status']) => results.filter((result) => result.status === status).length
+  const took = options.elapsedMs === undefined ? '' : ` in ${(options.elapsedMs / 1000).toFixed(1)}s`
+  const summary = `${count('ok')} ok, ${count('degraded')} degraded, ${count('failed')} failed${took}`
+  return scrubSecrets([`relay doctor (relay ${RELAY_VERSION})`, '', ...lines, '', summary].join('\n'))
 }
 
 /**
@@ -103,9 +120,10 @@ async function runCheckSafely(name: string, run: () => CheckResult | Promise<Che
  * as a passing Slack or database check and no check goes unmentioned.
  */
 export async function runDoctor(
-  options: { configPath: string; policyPath: string; log?: Logger },
+  options: { configPath: string; policyPath: string; log?: Logger; recheck?: boolean },
   checks: Check[] = defaultChecks()
-): Promise<{ results: CheckResult[]; exitCode: number }> {
+): Promise<{ results: CheckResult[]; exitCode: number; elapsedMs: number }> {
+  const startedAt = Date.now()
   const results: CheckResult[] = [await runCheckSafely('node', () => checkNodeVersion(process.version))]
 
   let configResult: CheckResult
@@ -117,8 +135,9 @@ export async function runDoctor(
       ctx = {
         config: detailed.config,
         policy: detailed.policy,
-        secrets: createSecretProvider(detailed.config),
+        secrets: readOncePerRun(createSecretProvider(detailed.config)),
         ...(options.log ? { log: options.log } : {}),
+        ...(options.recheck ? { recheck: true } : {}),
       }
     }
   } catch (error) {
@@ -139,9 +158,8 @@ export async function runDoctor(
 
   if (ctx) {
     const readyCtx = ctx
-    for (const check of checks) {
-      results.push(await runCheckSafely(check.name, () => check.run(readyCtx)))
-    }
+    // Side by side: the checks read different services and none needs another's result. Promise.all keeps registry order.
+    results.push(...(await Promise.all(checks.map((check) => runCheckSafely(check.name, () => check.run(readyCtx))))))
   } else {
     for (const check of checks) {
       results.push({ name: check.name, status: 'degraded', detail: 'not attempted, because configuration is invalid' })
@@ -149,5 +167,27 @@ export async function runDoctor(
   }
 
   const exitCode = results.some((result) => result.status === 'failed') ? 1 : 0
-  return { results, exitCode }
+  return { results, exitCode, elapsedMs: Date.now() - startedAt }
+}
+
+/**
+ * Checks now run at once, and several read the same keystore item (the
+ * database URL, the Slack tokens). One read per item per run keeps them from
+ * calling the keychain side by side for the same secret.
+ */
+export function readOncePerRun(secrets: SecretProvider): SecretProvider {
+  const values = new Map<string, Promise<string>>()
+  const present = new Map<string, Promise<boolean>>()
+  const once = <T>(cache: Map<string, Promise<T>>, name: string, read: () => Promise<T>): Promise<T> => {
+    const cached = cache.get(name)
+    if (cached) return cached
+    const fresh = read()
+    cache.set(name, fresh)
+    return fresh
+  }
+  return {
+    kind: secrets.kind,
+    get: (name) => once(values, name, () => secrets.get(name)),
+    has: (name) => once(present, name, () => secrets.has(name)),
+  }
 }

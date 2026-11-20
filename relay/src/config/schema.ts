@@ -260,6 +260,10 @@ export const relayConfigSchema = z
         operator_url: urlWithScheme(['postgres:', 'postgresql:'])
           .refine((value) => !hasPassword(value), { message: 'operator_url must not hold a password; leave it unset where the server needs one' })
           .optional(),
+        // Connections this laptop's daemon may hold (README, "Database
+        // connections"). The hosted pooler caps each login, so keep it low;
+        // at least 2, since a held LISTEN or lock needs a second client.
+        pool_max: z.number().int().min(2).max(15).optional(),
       })
       .strict(),
     redis: z.object({ url: urlWithScheme(['redis:', 'rediss:']) }).strict(),

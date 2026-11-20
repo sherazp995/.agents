@@ -10,7 +10,7 @@ import type { Check, CheckContext } from '../../src/doctor/registry.js'
 // and, through checks.js, the postgres and redis registrations. The default
 // registry test below depends on this import having happened, exactly as the
 // CLI does.
-import { formatResults, runDoctor } from '../../src/doctor/run.js'
+import { formatResults, readOncePerRun, runDoctor } from '../../src/doctor/run.js'
 import type { SecretProvider } from '../../src/secrets/provider.js'
 import { registerSecretValue, resetSecretScrubberForTests } from '../../src/secrets/scrubber.js'
 
@@ -32,11 +32,62 @@ describe('formatResults', () => {
   it('never reports a check as passing when it was not run', () => {
     expect(formatResults([])).toContain('no checks ran')
   })
+
+  it('lines checks up in columns, puts fixes under their check, and ends with the counts and run time', () => {
+    const output = formatResults(
+      [
+        { name: 'node', status: 'ok', detail: 'v24.19.0' },
+        { name: 'slack-scopes', status: 'degraded', detail: 'too many scopes', remediation: 'Reinstall the app.' },
+        { name: 'audit', status: 'failed', detail: 'unreadable' },
+      ],
+      { elapsedMs: 2140 },
+    )
+    expect(output.split('\n').slice(2)).toEqual([
+      '  ok        node          v24.19.0',
+      '  degraded  slack-scopes  too many scopes',
+      '                          fix: Reinstall the app.',
+      '  FAILED    audit         unreadable',
+      '',
+      '1 ok, 1 degraded, 1 failed in 2.1s',
+    ])
+  })
+
+  it('prints a check\'s long detail only when verbose', () => {
+    const results: CheckResult[] = [{ name: 'egress', status: 'ok', detail: '6 confirmed', more: 'Verified: every fetch\nconfirmed: Slack' }]
+    expect(formatResults(results)).not.toContain('Verified')
+    const pad = ' '.repeat(20)
+    expect(formatResults(results, { verbose: true })).toContain(`${pad}Verified: every fetch\n${pad}confirmed: Slack`)
+  })
 })
 
 describe('runDoctor', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('runs checks side by side and still reports them in registry order', async () => {
+    const slow = (name: string, ms: number): Check => ({
+      name,
+      run: () => new Promise((resolve) => setTimeout(() => resolve({ name, status: 'ok', detail: `${ms}ms` }), ms)),
+    })
+    const startedAt = Date.now()
+    const { results, elapsedMs } = await runDoctor({ configPath: REAL_CONFIG_PATH, policyPath: REAL_POLICY_PATH }, [slow('first', 300), slow('second', 300), slow('third', 10)])
+    const took = Date.now() - startedAt
+
+    expect(results.slice(2).map((result) => result.name)).toEqual(['first', 'second', 'third'])
+    expect(took).toBeGreaterThanOrEqual(300)
+    expect(took).toBeLessThan(550)
+    expect(elapsedMs).toBeGreaterThanOrEqual(300)
+  })
+
+  it('reads each keystore item once per run, however many checks ask for it at the same time', async () => {
+    const get = vi.fn(async (name: string) => `value-of-${name}`)
+    const provider = readOncePerRun({ kind: 'env', get, has: async () => true })
+
+    const values = await Promise.all([provider.get('relay-database-url'), provider.get('relay-database-url'), provider.get('slack-bot-token')])
+
+    expect(values).toEqual(['value-of-relay-database-url', 'value-of-relay-database-url', 'value-of-slack-bot-token'])
+    expect(get.mock.calls.map(([name]) => name)).toEqual(['relay-database-url', 'slack-bot-token'])
   })
 
   function writeInvalidPolicy(): string {

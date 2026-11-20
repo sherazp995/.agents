@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Restarts the Relay daemon without rebuilding: `relay restart` runs it, and
+# relay-update runs it after a passing build. Prints one line saying what it
+# did; exits 1 when the service manager refused the restart. A restart drops
+# replies the daemon holds in memory, so pick a quiet moment.
+set -uo pipefail
+
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet relay.service 2>/dev/null; then
+  systemctl --user restart relay.service >&2 || { echo "systemctl could not restart relay.service" >&2; exit 1; }
+  echo "restarted relay.service"
+elif command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$(id -u)/com.relay.orchestrator" >/dev/null 2>&1; then
+  launchctl kickstart -k "gui/$(id -u)/com.relay.orchestrator" >&2 || { echo "launchctl could not restart com.relay.orchestrator" >&2; exit 1; }
+  echo "restarted com.relay.orchestrator"
+else
+  echo "no daemon is running, so none was restarted"
+fi

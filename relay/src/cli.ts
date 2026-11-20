@@ -63,12 +63,15 @@ program
   .description('Diagnose the installation and report every dependency')
   .option('-c, --config <path>', 'runtime config path', defaultConfigPath())
   .option('-p, --policy <path>', 'policy path', defaultPolicyPath())
-  .action(async (options: { config: string; policy: string }) => {
-    const { results, exitCode } = await runDoctor({
+  .option('-v, --verbose', 'also print each check\'s long detail (the egress audit)')
+  .option('--recheck', 'prove every codex login again instead of reusing saved proofs')
+  .action(async (options: { config: string; policy: string; verbose?: boolean; recheck?: boolean }) => {
+    const { results, exitCode, elapsedMs } = await runDoctor({
       configPath: options.config,
       policyPath: options.policy,
+      ...(options.recheck ? { recheck: true } : {}),
     })
-    process.stdout.write(`${formatResults(results)}\n`)
+    process.stdout.write(`${formatResults(results, { verbose: options.verbose === true, elapsedMs })}\n`)
     process.exitCode = exitCode
   })
 
@@ -678,9 +681,9 @@ program
       registeredRepos: () => loadRepoRegistryIfPresent(reposPath).repos.map((repo) => repo.name),
       reposAdd: (path) => runReposAdd({ path, reposPath }),
       doctor: async () => {
-        const { results, exitCode } = await runDoctor({ configPath: options.config, policyPath: options.policy })
+        const { results, exitCode, elapsedMs } = await runDoctor({ configPath: options.config, policyPath: options.policy })
         // Reported, not a setup failure: some checks (the Linux sandbox) cannot pass on every machine.
-        return { report: `${formatResults(results)}\nrelay doctor exit code: ${exitCode}`, exitCode: 0 }
+        return { report: `${formatResults(results, { elapsedMs })}\nrelay doctor exit code: ${exitCode}`, exitCode: 0 }
       },
       interactive: process.stdin.isTTY === true,
       askHidden: promptHidden,

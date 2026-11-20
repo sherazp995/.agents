@@ -1,9 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { closePool, createPool } from '../../src/db/pool.js'
+import { closePool, COMMAND_POOL_MAX, createPool, DAEMON_POOL_MAX } from '../../src/db/pool.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 import type { Pool } from 'pg'
 
 const url = process.env.RELAY_TEST_DATABASE_URL
+
+describe('pool size', () => {
+  it('holds two connections for a command unless told otherwise, so one laptop stays under the pooler cap', async () => {
+    const command = createPool('postgres://relay@localhost:5432/relay')
+    const daemon = createPool('postgres://relay@localhost:5432/relay', { max: DAEMON_POOL_MAX })
+    expect([command.options.max, daemon.options.max]).toEqual([COMMAND_POOL_MAX, 5])
+    expect([COMMAND_POOL_MAX, command.options.idleTimeoutMillis, command.options.keepAlive]).toEqual([2, 10_000, true])
+    await Promise.all([closePool(command), closePool(daemon)])
+  })
+})
 
 describe('pool error handling', () => {
   if (!url) {

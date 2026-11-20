@@ -14,6 +14,8 @@ export type CheckContext = {
   policy: Policy
   secrets: SecretProvider
   log?: Logger
+  /** `relay doctor --recheck`: re-prove what a check would otherwise reuse from an earlier run (the codex hook proof). */
+  recheck?: boolean
 }
 
 /**

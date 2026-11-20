@@ -56,13 +56,11 @@ command -v node >/dev/null 2>&1 || fail "node not found"
 (cd "$root" && pnpm exec tsc -p tsconfig.json --noEmitOnError) >> "$log" 2>&1 || fail "the build failed"
 (cd "$root" && node scripts/copy-assets.mjs) >> "$log" 2>&1 || fail "copying the build assets failed"
 
-restarted="no daemon is running, so none was restarted"
-if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet relay.service 2>/dev/null; then
-  systemctl --user restart relay.service >> "$log" 2>&1 || fail "the build passed, but systemctl could not restart relay.service"
-  restarted="restarted relay.service"
-elif command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$(id -u)/com.relay.orchestrator" >/dev/null 2>&1; then
-  launchctl kickstart -k "gui/$(id -u)/com.relay.orchestrator" >> "$log" 2>&1 || fail "the build passed, but launchctl could not restart com.relay.orchestrator"
-  restarted="restarted com.relay.orchestrator"
+if ! restarted=$("$root/bin/relay-restart" 2>> "$log"); then
+  # Not fail(): the new build is already in place, only the restart was refused.
+  echo "failed $commit: built, but the daemon could not be restarted" > "$status"
+  echo "Relay is built at $commit, but the daemon could not be restarted; run relay restart. Log: $log" >&2
+  exit 1
 fi
 
 echo "ok $commit" > "$status"

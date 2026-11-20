@@ -38,6 +38,12 @@ describe('resolveOperatorDatabaseUrl', () => {
     await expect(resolveOperatorDatabaseUrl(configWith('keystore:relay-database-url'), keystoreHolding(url))).resolves.toBe(url)
   })
 
+  it('accepts a pool_max from 2 to 15 and refuses anything outside it', () => {
+    const accepts = (poolMax: unknown) => relayConfigSchema.shape.database.safeParse({ url: MISSING, pool_max: poolMax }).success
+    expect([2, 5, 15].map(accepts)).toEqual([true, true, true])
+    expect([1, 16, 2.5, '5'].map(accepts)).toEqual([false, false, false, false])
+  })
+
   it('refuses an operator_url that holds a password', () => {
     const database = (operatorUrl: string) => relayConfigSchema.shape.database.safeParse({ url: MISSING, operator_url: operatorUrl }).success
     expect(database('postgres://relay_app@localhost:5432/relay')).toBe(true)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # `relay` on PATH: install.py links ~/.local/bin/relay here. Runs the compiled
-# CLI of this checkout; `relay update` rebuilds it, which works even when the
-# build is missing or broken, because it never loads the compiled code.
+# CLI of this checkout; `relay update` rebuilds it and `relay restart` restarts
+# the daemon, both working even when the build is missing or broken, because
+# neither loads the compiled code.
 set -euo pipefail
 
 source="${BASH_SOURCE[0]}"
@@ -17,6 +18,9 @@ export RELAY_HOME="${RELAY_HOME:-$root}"
 if [ "${1:-}" = update ]; then
   shift
   exec "$root/bin/relay-update" "$@"
+fi
+if [ "${1:-}" = restart ]; then
+  exec "$root/bin/relay-restart"
 fi
 
 cli="$root/dist/src/cli.js"

@@ -26,7 +26,15 @@ const PROBE_PROMPT =
   'This is an automated hook check. Run the shell command `git merge relay-probe` once (it will be refused; do not retry it), ' +
   'then run the shell command `true`, then reply with the single word done.'
 
-export type CodexEligibilityEntry = { eligible: boolean; codexVersion: string; checkedAt: string; detail: string }
+export type CodexEligibilityEntry = {
+  eligible: boolean
+  codexVersion: string
+  checkedAt: string
+  detail: string
+  /** The hook command and codex home the proof ran with; relay doctor proves again when either changes (a Node upgrade, a moved dist). */
+  hookCommand?: string
+  codexHome?: string
+}
 export type CodexEligibility = Record<string, CodexEligibilityEntry>
 
 export function codexEligibilityPath(relayHome: string): string {

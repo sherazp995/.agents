@@ -43,6 +43,28 @@ function capabilitiesWithDestination(): readonly string[] {
     .map((definition) => definition.name)
 }
 
+/** A finding an operator must act on; everything else is supporting audit detail. */
+function isProblem(finding: EgressFinding): boolean {
+  return finding.kind === 'undeclared' || finding.kind === 'inconsistent' || (finding.kind === 'unresolved' && finding.note === undefined)
+}
+
+/**
+ * The short line `relay doctor` prints: the problems when there are any,
+ * otherwise a count. The full audit (what was verified, what is assumed,
+ * every finding) goes to `more`, printed by `relay doctor --verbose`.
+ */
+function summarize(findings: readonly EgressFinding[], lines: readonly string[], home: string, recordedAt?: string): Pick<CheckResult, 'detail' | 'more'> {
+  const problems = findings.filter(isProblem)
+  const confirmed = new Set(findings.filter((finding) => finding.kind === 'confirmed').map((finding) => finding.destination)).size
+  const explained = findings.filter((finding) => finding.kind === 'unresolved' && finding.note !== undefined).length
+  const source = recordedAt === undefined ? 'scanned from source' : `recorded at build time ${recordedAt}`
+  const detail =
+    problems.length > 0
+      ? problems.map(formatFinding).join('\n')
+      : `${confirmed} destinations confirmed, ${explained} local spawn targets explained (${source}); --verbose for the audit`
+  return { detail: redactHome(detail, home), more: redactHome(lines.join('\n'), home) }
+}
+
 /**
  * Removes every occurrence of the operator's home directory from a piece of
  * text before it can reach a CheckResult (FR-SEC-1): a scanned file path can
@@ -113,6 +135,7 @@ export function checkEgress(
   rootDir = 'src',
   home: string = homedir(),
   inventory: readonly EgressDestination[] = EGRESS_INVENTORY,
+  readRecorded: () => RecordedEgressAudit | undefined = readRecordedEgressAudit,
 ): Check {
   return {
     name: 'egress',
@@ -122,7 +145,7 @@ export function checkEgress(
       // healthy installation looked broken. The audit is recorded at build
       // time instead, and reported as what it is.
       if (!existsSync(rootDir)) {
-        const recorded = readRecordedEgressAudit()
+        const recorded = readRecorded()
         if (recorded === undefined) {
           return {
             name: 'egress',
@@ -145,7 +168,7 @@ export function checkEgress(
         return {
           name: 'egress',
           status: recordedFailure ? 'failed' : 'ok',
-          detail: redactHome(lines.join('\n'), home),
+          ...summarize(recorded.findings, lines, home, recorded.builtAt),
           ...(recordedFailure ? { remediation: REMEDIATION } : {}),
         }
       }
@@ -161,20 +184,20 @@ export function checkEgress(
         `Assumed: ${comparison.assumed.join(' ')}`,
         ...comparison.findings.map(formatFinding),
       ]
-      const detail = redactHome(lines.join('\n'), home)
+      const summary = summarize(comparison.findings, lines, home)
 
       if (hasFailure) {
-        return { name: 'egress', status: 'failed', detail, remediation: REMEDIATION }
+        return { name: 'egress', status: 'failed', ...summary, remediation: REMEDIATION }
       }
       if (hasDegradation) {
         return {
           name: 'egress',
           status: 'degraded',
-          detail,
+          ...summary,
           remediation: 'Confirm each unresolved spawn target above is not a hidden destination, then add a note to KNOWN_UNRESOLVED_SPAWN_NOTES in src/data/egress.ts if it is a known-safe case.',
         }
       }
-      return { name: 'egress', status: 'ok', detail }
+      return { name: 'egress', status: 'ok', ...summary }
     },
   }
 }

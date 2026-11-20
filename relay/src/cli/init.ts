@@ -250,7 +250,7 @@ async function defaultPromptLine(question: string): Promise<string> {
 export type DoctorRunner = (options: {
   configPath: string
   policyPath: string
-}) => Promise<{ results: CheckResult[]; exitCode: number }>
+}) => Promise<{ results: CheckResult[]; exitCode: number; elapsedMs?: number }>
 
 export type InitOptions = {
   configPath: string
@@ -324,11 +324,11 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
 
   sections.push(renderSecretsGuidance())
 
-  const { results, exitCode: doctorExitCode } = await runDoctorImpl({
+  const { results, exitCode: doctorExitCode, elapsedMs } = await runDoctorImpl({
     configPath: options.configPath,
     policyPath: options.policyPath,
   })
-  sections.push(formatResults(results))
+  sections.push(formatResults(results, elapsedMs === undefined ? {} : { elapsedMs }))
   if (doctorExitCode !== 0) {
     sections.push(
       'relay doctor reports open items above. relay init does not fail on them: each one is a dependency or ' +

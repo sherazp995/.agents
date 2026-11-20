@@ -38,7 +38,7 @@ import { defaultPersonasDir } from '../src/projects/persona-files.js'
 import { DEFAULT_UI_PORT } from '../src/config/schema.js'
 import { createLogger, type Logger } from '../src/obs/logger.js'
 import { createRotatingLogDestination } from '../src/obs/rotation.js'
-import { createPool, closePool } from '../src/db/pool.js'
+import { createPool, closePool, DAEMON_POOL_MAX } from '../src/db/pool.js'
 import { applyMigrations, newestMigrationName, pendingMigrations } from '../src/db/migrate.js'
 import { failoverTablesExist, otherHostsHaveRunningWorkers } from '../src/failover/lease.js'
 import { FailoverRunner } from '../src/failover/run.js'
@@ -293,7 +293,7 @@ async function main(): Promise<void> {
   const policy = loadPolicy(POLICY_PATH)
   const log = await createDaemonLogger(config)
   const secrets = createDaemonSecretProvider(config, resolveRelayHome().path)
-  const pool = createPool(await resolveDatabaseUrl(config, secrets))
+  const pool = createPool(await resolveDatabaseUrl(config, secrets), { max: config.database.pool_max ?? DAEMON_POOL_MAX })
   // This laptop's env key: published now and on a timer, also while standing by, so the answering laptop seals envs for it (README, "Envs for Relay's sessions").
   const workerEnvKey = await loadReaderKey({
     secrets,
