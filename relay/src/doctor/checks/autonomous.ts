@@ -58,6 +58,9 @@ registerCheck({
   },
 })
 
+/** Set by the doctor CLI test, which runs a build outside dist; the check then neither probes nor writes the saved proofs. */
+export const SKIP_CODEX_PROOF_ENV = 'RELAY_DOCTOR_SKIP_CODEX_PROOF'
+
 registerCheck({
   name: CODEX_HOOK,
   async run(ctx: CheckContext): Promise<CheckResult> {
@@ -66,6 +69,9 @@ registerCheck({
     const codexAccounts = (await readAccountPool()).filter((account) => account.client === 'codex')
     if (codexAccounts.length === 0) return { name: CODEX_HOOK, status: 'ok', detail: 'no codex account in the pool' }
     if (!executable(autonomous.codex_bin)) return { name: CODEX_HOOK, status: 'ok', detail: `codex is not installed at ${autonomous.codex_bin}; it is optional, so codex is not used` }
+    // A build in another folder (the doctor CLI test's) has its own hook path, which codex has not trusted: proving it would
+    // fail and save "not eligible" over the real proofs, which turns codex workers off until the next relay doctor.
+    if (process.env[SKIP_CODEX_PROOF_ENV] === '1') return { name: CODEX_HOOK, status: 'ok', detail: `skipped: ${SKIP_CODEX_PROOF_ENV}=1, saved proofs left as they are` }
 
     // The compiled hook script sits beside this file's dist tree: dist/src/doctor/checks -> dist/scripts.
     const hookScript = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'scripts', 'hook-pretooluse.js')

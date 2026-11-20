@@ -166,7 +166,7 @@ describe('the setup page server', () => {
         expect(reply.body).not.toMatch(/ style=|<style/i)
         expect(reply.headers['content-security-policy']).toContain("style-src 'self';")
       }
-      expect(readFileSync('scripts/copy-assets.mjs', 'utf8')).toContain("['src/ui/assets', 'dist/src/ui/assets']")
+      expect(readFileSync('scripts/copy-assets.mjs', 'utf8')).toContain("['src/ui/assets', 'src/ui/assets']")
     } finally {
       await h.server.close()
     }

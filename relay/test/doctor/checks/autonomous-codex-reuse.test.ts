@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -23,7 +23,7 @@ vi.mock('../../../src/autonomous/codex-probe.js', async (importOriginal) => {
   return { ...actual, codexVersion: vi.fn(async () => 'codex-cli 9.9.9'), probeCodexAccount: probe }
 })
 
-import '../../../src/doctor/checks/autonomous.js'
+import { SKIP_CODEX_PROOF_ENV } from '../../../src/doctor/checks/autonomous.js'
 import { defaultChecks, type CheckContext } from '../../../src/doctor/registry.js'
 
 const codexHook = defaultChecks().find((check) => check.name === 'autonomous-codex-hook')!
@@ -52,6 +52,19 @@ describe('autonomous-codex-hook reuses saved proofs', () => {
   afterEach(() => {
     if (previousHome === undefined) delete process.env.RELAY_HOME
     else process.env.RELAY_HOME = previousHome
+  })
+
+  it('with the skip variable set (the doctor CLI test build), probes nothing and writes no saved proofs', async () => {
+    process.env[SKIP_CODEX_PROOF_ENV] = '1'
+    try {
+      const result = await codexHook.run(context())
+      expect(result).toMatchObject({ status: 'ok' })
+      expect(result.detail).toContain('skipped')
+    } finally {
+      delete process.env[SKIP_CODEX_PROOF_ENV]
+    }
+    expect(probe).not.toHaveBeenCalled()
+    expect(existsSync(join(home, 'codex-eligibility.json'))).toBe(false)
   })
 
   it('probes every login the first time, then reuses the saved proofs without a codex turn and keeps them in the file', async () => {

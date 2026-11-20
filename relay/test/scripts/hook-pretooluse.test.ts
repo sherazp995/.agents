@@ -1,8 +1,10 @@
 import { execFile, spawn } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { Server } from 'node:http'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { Policy } from '../../src/config/schema.js'
 import { HookBridgeServer } from '../../src/engine/hook-bridge.js'
 import type { HookDecisionRequest, HookDecisionResult } from '../../src/engine/hook-bridge.js'
@@ -12,6 +14,8 @@ import type { AutonomousTask } from '../../src/autonomous/store.js'
 const execFileAsync = promisify(execFile)
 
 const BUILD_TIMEOUT_MS = 120_000
+/** Its own build folder (git-ignored tmp/), never dist: dist/scripts/hook-pretooluse.js is the hook live workers run. */
+const BUILD_DIR = join('tmp', `hook-build-${process.pid}`)
 const SCRIPT_TIMEOUT_MS = 20_000
 
 /**
@@ -28,7 +32,7 @@ function runHookScript(
   args: readonly string[] = [],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', ['dist/scripts/hook-pretooluse.js', ...args], {
+    const child = spawn('node', [join(BUILD_DIR, 'scripts', 'hook-pretooluse.js'), ...args], {
       env: { ...process.env, ...env },
     })
     let stdout = ''
@@ -79,7 +83,7 @@ beforeAll(async () => {
         'tsc', '--target', 'ES2023', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
         '--lib', 'ES2023', '--strict', '--noUncheckedIndexedAccess', '--noImplicitOverride',
         '--exactOptionalPropertyTypes', '--verbatimModuleSyntax', '--skipLibCheck',
-        '--outDir', 'dist', '--rootDir', '.',
+        '--outDir', BUILD_DIR, '--rootDir', '.',
         'src/engine/hook-bridge.ts', 'scripts/hook-pretooluse.ts',
       ],
       { timeout: BUILD_TIMEOUT_MS },
@@ -88,6 +92,10 @@ beforeAll(async () => {
     throw new Error(`targeted build failed, so the compiled hook script could not be verified: ${(error as Error).message}`)
   }
 }, BUILD_TIMEOUT_MS + 10_000)
+
+afterAll(() => {
+  rmSync(BUILD_DIR, { recursive: true, force: true })
+})
 
 let activeBridge: HookBridgeServer | undefined
 let activeRawServer: Server | undefined

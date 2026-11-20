@@ -1,5 +1,7 @@
 /**
- * Copies non-TypeScript assets into `dist` after a build.
+ * Copies non-TypeScript assets into `dist` after a build, or into the build
+ * folder named as the first argument (the doctor CLI test builds into its own
+ * folder so it never rewrites the dist the daemon runs).
  *
  * `tsc` emits only JavaScript, so the `.sql` migrations (and the setup
  * page's stylesheet) stay behind in `src/`. That is invisible while developing, because the source tree is
@@ -12,16 +14,17 @@
  * never created.
  */
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const out = resolve(root, process.argv[2] ?? 'dist')
 
 // The setup page's stylesheet sits next to src/ui/server.ts, which serves it
 // from its own folder; without it every page renders unstyled.
 const assets = [
-  ['src/db/migrations', 'dist/src/db/migrations'],
-  ['src/ui/assets', 'dist/src/ui/assets'],
+  ['src/db/migrations', 'src/db/migrations'],
+  ['src/ui/assets', 'src/ui/assets'],
 ]
 
 for (const [from, to] of assets) {
@@ -30,8 +33,8 @@ for (const [from, to] of assets) {
     console.error(`copy-assets: ${from} does not exist, so the build is incomplete rather than finished.`)
     process.exit(1)
   }
-  mkdirSync(dirname(join(root, to)), { recursive: true })
-  cpSync(source, join(root, to), { recursive: true })
+  mkdirSync(dirname(join(out, to)), { recursive: true })
+  cpSync(source, join(out, to), { recursive: true })
 }
 
 /**
@@ -49,11 +52,11 @@ for (const [from, to] of assets) {
  * a build-time result, with the build's own timestamp.
  */
 const { scanSourceForEgressEvidence, compareEgressToSource, EGRESS_INVENTORY } = await import(
-  join(root, 'dist/src/data/egress.js')
+  join(out, 'src/data/egress.js')
 )
 
-const { registerBuiltinCapabilities } = await import(join(root, 'dist/src/capabilities/wiring.js'))
-const { listCapabilities } = await import(join(root, 'dist/src/capabilities/registry.js'))
+const { registerBuiltinCapabilities } = await import(join(out, 'src/capabilities/wiring.js'))
+const { listCapabilities } = await import(join(out, 'src/capabilities/registry.js'))
 registerBuiltinCapabilities()
 // The built-in capabilities that declare a destination. Passing an empty
 // list here instead fabricated an "inconsistent" finding: the inventory
@@ -72,6 +75,6 @@ const evidence = scanSourceForEgressEvidence('src')
 const comparison = compareEgressToSource(EGRESS_INVENTORY, evidence, destinations)
 
 writeFileSync(
-  join(root, 'dist', 'egress-audit.json'),
+  join(out, 'egress-audit.json'),
   `${JSON.stringify({ builtAt: new Date().toISOString(), verified: comparison.verified, assumed: comparison.assumed, findings: comparison.findings }, null, 2)}\n`,
 )
