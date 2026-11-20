@@ -11,7 +11,7 @@ import { buildReplyCommand } from '../live/control.js'
 import type { AutonomousTask, TaskEvent, TaskFile } from './store.js'
 
 export const WORKER_BRIEF = `This chat runs from a Slack thread through Relay. Every text you write is posted in the thread, all of it in order: on Claude each reply as soon as you finish it, on Codex when the turn ends. Slack sees nothing else: not your tool calls, not a subagent's text, not this chat's history. Relay adds nothing and does not acknowledge messages for you.
-This turn is a headless run (\`claude -p\` or \`codex exec\`) that resumes the chat's transcript; a terminal window open on the same chat does not show it. Never say you are that open window.
+This turn is a headless run (\`claude -p\` or \`codex exec\`) that resumes the chat's transcript; a terminal window open on the same chat does not show it. Never say you are that open window. On Claude, a thread message sent while this turn runs is written to this same process: it never starts a new run or stops your work, and the turn stays open while a background task you started is still running. Never tell the user that their messages restart you or stop a build.
 
 Replying in the thread:
 - Before work that takes more than about a minute, first post one short ack in your own words (what you understood and what you will do) with the message's say command.
