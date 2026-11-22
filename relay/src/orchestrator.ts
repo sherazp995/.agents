@@ -98,6 +98,11 @@ import type { KillSwitch } from './killswitch.js'
 import { createRun, finishRun, findActiveRunForSession } from './runs/store.js'
 import { resolveWorkspaceId } from './tenancy/workspaces.js'
 import { memberRefusal, OWNER_ONLY_REPLY, platformUserIsOwner, principalIsOwner } from './tenancy/access.js'
+import { hasShellFolder } from './shell/folder-store.js'
+import { ShellJobs } from './shell/job.js'
+import type { ShellReplyPort } from './shell/types.js'
+import { routeShellEvent } from './shell/chat-route.js'
+import { shellReplyBlocks } from './chat/slack/shell-password.js'
 
 /**
  * How long a parked message waits for a live session to collect it before
@@ -166,6 +171,8 @@ export type CreateProductionSlackAdapterOptions = Omit<
   directSession?: DirectSessionDependencies
   /** With failover on, Slack events are left unacknowledged once this laptop stops answering. */
   failover?: FailoverGate
+  /** Shell threads with a job running here: known before their folder row exists, so their `stop` gets through. */
+  shellThreads?: { isActive(threadRef: string): boolean }
 }
 
 /**
@@ -195,7 +202,7 @@ export async function createProductionSlackAdapter(
 ): Promise<{ adapter: SlackAdapter; workspaceId: string }> {
   let resolvedWorkspaceId: string | undefined
 
-  const { approvalReceiptKey, onApprovalResolved, folderQuestions, directSession, failover, ...adapterOptions } = options
+  const { approvalReceiptKey, onApprovalResolved, folderQuestions, directSession, failover, shellThreads, ...adapterOptions } = options
   const adapter = await SlackAdapter.create(secrets, {
     ...adapterOptions,
     ...(failover && !adapterOptions.boltApp ? { boltApp: await gatedBoltApp(secrets, adapterOptions, failover) } : {}),
@@ -215,7 +222,10 @@ export async function createProductionSlackAdapter(
       if (!resolvedWorkspaceId) return false
       // A thread waiting for a folder has no session yet, but its answer must get through.
       if (folderQuestions?.isWaiting(threadRef)) return true
-      return isKnownSessionQuery(pool, resolvedWorkspaceId, 'slack', threadRef)
+      // A thread that ran `!` lines takes its next message and its `stop` without a mention (README, "Shell from Slack").
+      if (shellThreads?.isActive(threadRef)) return true
+      if (await isKnownSessionQuery(pool, resolvedWorkspaceId, 'slack', threadRef)) return true
+      return hasShellFolder(pool, { workspaceId: resolvedWorkspaceId, adapter: 'slack', threadRef })
     },
     // FR-ATT-5: the session picker's two real implementations. Without
     // these the adapter falls back to its own documented defaults, an empty
@@ -650,8 +660,14 @@ async function handleStopInstruction(
   event: ChatEvent,
   threadRef: string,
   replyRef: ChatRef,
+  options: { readonly quietWhenNothing?: boolean } = {},
 ): Promise<void> {
   const { pool, dispatcher, log, cancellationRegistry } = deps
+  // Shell lines were stopped in this thread: their reply says so, so "Nothing to stop here" would be wrong.
+  const nothingToStop = async (): Promise<void> => {
+    if (options.quietWhenNothing === true) return
+    await dispatcher.perform({ kind: 'post', ref: replyRef, text: 'Nothing to stop here.' })
+  }
 
   // An autonomous task has no in-process run to cancel: its Stop is durable
   // (worker tree killed, operations cancelled, approvals expired) and needs
@@ -679,13 +695,13 @@ async function handleStopInstruction(
   }
 
   if (!session) {
-    await dispatcher.perform({ kind: 'post', ref: replyRef, text: 'Nothing to stop here.' })
+    await nothingToStop()
     return
   }
 
   const run = await findActiveRunForSession(pool, session.id)
   if (!run) {
-    await dispatcher.perform({ kind: 'post', ref: replyRef, text: 'Nothing to stop here.' })
+    await nothingToStop()
     return
   }
 
@@ -771,6 +787,8 @@ export type OrchestratorDeps = {
   readonly handoverRetryMs?: number
   /** Set when Relay's own loop answers a message taken back from a chat: it must not be parked again. */
   readonly ownLoopOnly?: boolean
+  /** The shell from Slack (README, "Shell from Slack"): the owner's `!` lines run here instead of agent work. Absent, `!` messages are ordinary messages. */
+  readonly shell?: ShellJobs
 }
 
 /** A failed hand-over of a taken-back message to Relay's own loop is tried this many times in all. */
@@ -856,12 +874,15 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // run row, the same "fail closed before persistence" shape PRE-2's own
   // branch above uses.
   if (event.origin !== 'reminder' && isStopInstruction(event.text)) {
+    // The owner's shell lines in this thread die first; agent work sharing the thread is stopped below as usual.
+    const stoppedShell = deps.shell?.stop(threadRef, principalId) === true
+    if (stoppedShell && existing === null) return
     // A request waiting for a folder has no session to stop yet.
     if (existing === null && deps.folderQuestions?.cancel(threadRef, principalId)) {
       await dispatcher.perform({ kind: 'post', ref: replyRef, text: CANCELLED_TEXT })
       return
     }
-    await handleStopInstruction(deps, event, threadRef, replyRef)
+    await handleStopInstruction(deps, event, threadRef, replyRef, { quietWhenNothing: stoppedShell })
     return
   }
   if (event.origin !== 'reminder' && isEndInstruction(event.text)) {
@@ -907,6 +928,16 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   if (event.origin === 'reminder') {
     await routeReminder(deps, event, { threadRef, replyRef })
     return
+  }
+
+  // After the reminder branch on purpose: a reminder acts as the owner without the owner typing it, so it never runs shell lines.
+  if (deps.shell) {
+    const routed = await routeShellEvent(
+      { pool, dispatcher, log, shell: deps.shell, killSwitchAvailable: killSwitch !== undefined, ...(deps.folderQuestions ? { folderQuestions: deps.folderQuestions } : {}) },
+      event,
+      { principalId, threadRef, replyRef, existing },
+    )
+    if (routed === 'handled') return
   }
 
   // A thread with no session yet: the answer to a folder question, or a new
@@ -1469,9 +1500,34 @@ export async function startOrchestrator(
     lookup: (channel) => lookupChannelFolder(fetchPurpose, channel),
     projectFolder: async (channel) => (projectWorkspaceId === undefined ? undefined : projectFolderForChannel(pool, projectWorkspaceId, channel)),
   })
+  // The shell from Slack (src/shell/). Built before the adapter so the adapter can route its password
+  // buttons here; the Slack reply port, the workspace and the kill switch are bound once they exist.
+  let shellReplies: ShellReplyPort | undefined
+  let shellKillSwitch: KillSwitch | undefined
+  const shellJobs = new ShellJobs({
+    pool,
+    log,
+    replies: () => shellReplies,
+    renderBlocks: shellReplyBlocks,
+    principalFor: async (platformUserId) => (projectWorkspaceId === undefined ? null : resolvePrincipal(pool, projectWorkspaceId, 'slack', platformUserId)),
+    ...(options.failover ? { mayStartWork: () => options.failover?.mayStartWork() ?? Promise.resolve(true) } : {}),
+    killSwitch: {
+      refresh: async () => shellKillSwitch?.refresh(),
+      isEngaged: () => shellKillSwitch?.isEngaged() ?? false,
+      reason: () => {
+        const state = shellKillSwitch?.state()
+        return state?.engaged === true ? state.reason : undefined
+      },
+    },
+    cancellationRegistry,
+    home: homedir(),
+    host: options.failover?.host ?? null,
+  })
   const { adapter, workspaceId } = await createProductionSlackAdapter(pool, secrets, {
     log,
     folderQuestions,
+    shellThreads: shellJobs,
+    shellPassword: shellJobs.passwordPort,
     acceptThreadMentions: autonomousEnabled,
     // A reminder only ever starts a read-only autonomous task, so none is taken without autonomous mode.
     ...(autonomousEnabled ? { reminderChannels: new Map((options.slack?.reminders ?? []).map((entry) => [entry.channel, entry.act_as])) } : {}),
@@ -1496,6 +1552,8 @@ export async function startOrchestrator(
     log.error({ err: error }, 'kill switch store unreadable at startup; continuing without a kill switch (autonomous mode is off)')
     return undefined
   })
+  shellKillSwitch = killSwitch
+  shellReplies = adapter.shellReplies()
 
   const dispatcher = new OutboundDispatcher(pool, adapter, workspaceId, {
     log,
@@ -1573,6 +1631,7 @@ export async function startOrchestrator(
         codexDelivery: { bin: options.autonomous?.codex_bin ?? 'codex', sessionsRoot: join(homedir(), '.codex', 'sessions') },
         folderQuestions,
         failoverHost: options.failover?.host ?? null,
+        shell: shellJobs,
       },
       event,
     )
@@ -1628,6 +1687,8 @@ export async function startOrchestrator(
     },
 
     async closeSlack(): Promise<void> {
+      // Shell lines die first, while Slack can still take their last edit and before anything here can fail.
+      await shellJobs.closeAll('this laptop stopped answering')
       await dispatcher.stop()
       // Start nothing new; turns already running finish and post.
       if (autonomousRuntime && draining === null) {
@@ -1638,7 +1699,7 @@ export async function startOrchestrator(
     },
 
     busy(): boolean {
-      return activeHandlers.size > 0 || (draining !== null && !drained)
+      return activeHandlers.size > 0 || (draining !== null && !drained) || shellJobs.busy()
     },
 
     /**
@@ -1665,6 +1726,8 @@ export async function startOrchestrator(
      *      pool and exit.
      */
     async stop(): Promise<void> {
+      // First, so a later step that throws cannot leave a shell line running.
+      await shellJobs.closeAll('Relay is shutting down')
       drainScheduler.stop()
       uploadDrainScheduler.stop()
       await uiServer?.close()

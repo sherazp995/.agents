@@ -533,6 +533,81 @@ The waiting request lives in memory, so after a Relay restart send it
 again. A channel whose description names no folder, and a DM, work as
 before.
 
+### Shell from Slack
+
+Start every line of a message with `!` and Relay runs those lines in your
+own login shell on the laptop that is answering, with no Claude or Codex
+turn and no login used:
+
+```text
+! git status
+! git add .
+! git commit -m "fix the thing"
+```
+
+- **Where to send it.** In a DM, or in a channel by mentioning Relay
+  (`@Relay ! pwd`), like any new Relay thread. Replies in that thread then
+  need no mention.
+- **One reply per message.** Each command shows as `` `$ git status` ``
+  with its output in a bash block. The first line that fails (any exit
+  other than 0) marks the rest `skipped`, and they do not run.
+- **Owner only.** A member's `!` message is refused, and so is a reminder:
+  it acts as the owner without the owner typing it. Lines before the first
+  `!` line are a note (`@Ahsan look at this`) and never run; from the first
+  `!` line on, every line must start with `!`, or nothing runs. Relay undoes
+  Slack's own escaping once (`&amp;` back to `&`, a link Slack added
+  around a URL you typed back to that text), refuses a line where Slack
+  turned text into a link with another label or a mention, and otherwise
+  runs exactly what you typed (curly quotes too).
+- **The thread remembers its folder**, like a terminal tab: after
+  `! cd ~/Documents/insitu`, later `!` messages in that thread start
+  there. That folder is the only thing stored (table `shell_folders`); no
+  commands, output or passwords are. A thread starts in its Claude or
+  Codex chat's folder (an autonomous task's own folder included), else
+  the channel's project or described folder, else your home folder. `! cd` alone goes back there. Moving the shell
+  never moves the thread's Claude or Codex chat, which keeps its own
+  folder; the reply names both when they differ. If the saved folder no
+  longer exists, the message is refused until you send `! cd`.
+- **Only the folder carries over.** Each line is its own shell, so
+  exports and variables do not reach the next line. The shell is a login
+  shell (`$SHELL -l -c`): `.zprofile` paths work, `.zshrc` aliases do not.
+  Lines get the Relay daemon's environment, so anything set there (its
+  launchd or systemd env) is readable by the commands you run.
+  There is no terminal, so interactive programs (vim, `git rebase -i`, a
+  password prompt other than sudo's) fail instead of waiting.
+- **Limits.** Each line may run 5 minutes, waiting for a sudo password
+  included; long output keeps its start and end. Messages in one thread
+  run one after another (at most 3 waiting).
+- **`stop`** in the thread kills the running line (SIGTERM, then SIGKILL
+  after 3 seconds) and drops the waiting messages; only the owner who ran
+  them can stop them. The kill switch (`relay kill`) must be available for
+  `!` lines to run, and engaging it, even from the CLI, kills a running
+  line within a few seconds. A handover to the other laptop or a Relay
+  stop kills running lines first. Nothing is replayed after a crash; the
+  reply may stay at its last edit, so send the message again.
+- **Replies in a shell thread.** A thread that ran `!` lines takes your
+  next `!` message and `stop` without a mention. A plain reply without a
+  mention there is ignored, as in any thread without a session; mention
+  Relay to start agent work in it.
+
+**sudo.** A line that runs `sudo` gets a password prompt on its reply: an
+**Enter password** button opens a Slack popup with one field, and what you
+send goes straight to sudo. Only the owner who ran the line can answer,
+each prompt is used once, and it ends after 2 minutes without an answer
+(sudo then fails and the rest is skipped). Two trade-offs: Slack popups
+have no masked field, so the password is visible while you type it (it
+never appears in the thread), and it passes through Slack's servers on its
+way to Relay. Relay never logs, stores or queues it. `/usr/bin/sudo` called
+by its full path skips Relay's prompt and fails, since there is no
+terminal.
+
+For commands you run often, skip the password entirely with a sudoers rule
+for just those commands (`sudo visudo -f /etc/sudoers.d/relay`):
+
+```text
+yourname ALL=(root) NOPASSWD: /bin/launchctl kickstart -k system/com.example.service
+```
+
 ### Envs for Relay's sessions
 
 `relay env` keeps envs for the sessions Relay starts in the shared

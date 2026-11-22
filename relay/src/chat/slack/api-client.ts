@@ -4,13 +4,14 @@
  * behind the SlackBoltApp and SlackApiClient seams (src/chat/slack/types.ts),
  * and reading the two Slack tokens.
  */
-import { App, defaultProcessEventErrorHandler, SocketModeReceiver } from '@slack/bolt'
+import { App, defaultProcessEventErrorHandler, LogLevel, SocketModeReceiver } from '@slack/bolt'
 import { ErrorCode, WebClient } from '@slack/web-api'
-import { CONFIRM_MODAL_BLOCK_ID, EDIT_MODAL_BLOCK_ID, EDIT_MODAL_CALLBACK_ID } from '../../approvals/blockkit.js'
+import { CONFIRM_MODAL_BLOCK_ID, CONFIRM_MODAL_CALLBACK_ID, EDIT_MODAL_BLOCK_ID, EDIT_MODAL_CALLBACK_ID } from '../../approvals/blockkit.js'
 import { ALWAYS_ACTIVE, type FailoverGate } from '../../failover/types.js'
 import { SecretNotFoundError } from '../../secrets/provider.js'
 import type { SecretProvider } from '../../secrets/provider.js'
 import { TransportError } from '../outbox.js'
+import { SHELL_PASSWORD_BLOCK_ID, SHELL_PASSWORD_CALLBACK_ID, SHELL_PASSWORD_GENERIC_ERROR } from './shell-password.js'
 import type {
   SlackApiClient,
   SlackBlockActionElement,
@@ -104,6 +105,7 @@ export class StaleClaimError extends Error {
 export function createGatedSocketModeReceiver(appToken: string, gate: FailoverGate): SocketModeReceiver {
   const receiver = new SocketModeReceiver({
     appToken,
+    logLevel: LogLevel.INFO,
     processEventErrorHandler: async (args) => (args.error instanceof StaleClaimError ? false : defaultProcessEventErrorHandler(args)),
   })
   const init = receiver.init.bind(receiver)
@@ -121,8 +123,30 @@ export function createGatedSocketModeReceiver(appToken: string, gate: FailoverGa
   return receiver
 }
 
+const APPROVAL_FALLBACK_TEXT = 'Something went wrong; your decision was not recorded. Please try again.'
+const CONFIRM_FALLBACK = { blockId: CONFIRM_MODAL_BLOCK_ID, text: APPROVAL_FALLBACK_TEXT }
+
+/**
+ * Each popup's inline error for when its listener rejected. Slack only takes
+ * an error keyed by a block of the open view, so every popup names its own
+ * input block here; a new popup adds a row. An unknown callback id gets the
+ * confirmation popup's row, as before this table existed.
+ */
+const VIEW_FALLBACKS: Readonly<Record<string, { readonly blockId: string; readonly text: string }>> = {
+  [CONFIRM_MODAL_CALLBACK_ID]: CONFIRM_FALLBACK,
+  [EDIT_MODAL_CALLBACK_ID]: { blockId: EDIT_MODAL_BLOCK_ID, text: APPROVAL_FALLBACK_TEXT },
+  [SHELL_PASSWORD_CALLBACK_ID]: { blockId: SHELL_PASSWORD_BLOCK_ID, text: SHELL_PASSWORD_GENERIC_ERROR },
+}
+
+/** The `errors` createLiveSlackBoltApp acks a popup with when its listener rejected. */
+export function viewFallbackErrors(callbackId: string): Record<string, string> {
+  const { blockId, text } = VIEW_FALLBACKS[callbackId] ?? CONFIRM_FALLBACK
+  return { [blockId]: text }
+}
+
 export function createLiveSlackBoltApp(botToken: string, appToken: string, gate: FailoverGate = ALWAYS_ACTIVE): SlackBoltApp {
-  const app = new App({ token: botToken, receiver: createGatedSocketModeReceiver(appToken, gate) })
+  // INFO pinned: at DEBUG, Bolt and its socket client print request bodies, a shell password popup's included.
+  const app = new App({ token: botToken, receiver: createGatedSocketModeReceiver(appToken, gate), logLevel: LogLevel.INFO })
   return {
     event(eventType, listener) {
       app.event(eventType, async (args) => {
@@ -165,8 +189,8 @@ export function createLiveSlackBoltApp(botToken: string, appToken: string, gate:
     view(callbackId, listener) {
       app.view(callbackId, async ({ ack, view, body }) => {
         // Defense in depth, fix round 1: SlackAdapter's own view listener
-        // functions (handleConfirmModalSubmission, handleEditModalSubmission)
-        // already catch everything internally and never reject this
+        // functions (handleConfirmModalSubmission, handleEditModalSubmission,
+        // handleShellPasswordSubmission) already catch everything internally and never reject this
         // promise, but if something upstream of that ever did (decoding
         // `body`, a bug in a future listener), an unacked modal hangs until
         // Slack's own timeout, which is strictly worse than a generic,
@@ -181,11 +205,7 @@ export function createLiveSlackBoltApp(botToken: string, appToken: string, gate:
           if (response) await ack(response)
           else await ack()
         } catch {
-          const blockId = callbackId === EDIT_MODAL_CALLBACK_ID ? EDIT_MODAL_BLOCK_ID : CONFIRM_MODAL_BLOCK_ID
-          await ack({
-            response_action: 'errors',
-            errors: { [blockId]: 'Something went wrong; your decision was not recorded. Please try again.' },
-          }).catch(() => {})
+          await ack({ response_action: 'errors', errors: viewFallbackErrors(callbackId) }).catch(() => {})
         }
       })
     },

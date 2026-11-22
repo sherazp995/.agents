@@ -38,6 +38,15 @@ import {
 } from './api-client.js'
 import { handleApprovalButton, handleConfirmModalSubmission, handleEditModalSubmission } from './approval-interactions.js'
 import type { ApprovalInteractionContext } from './approval-interactions.js'
+import {
+  handleShellPasswordButton,
+  handleShellPasswordCancel,
+  handleShellPasswordSubmission,
+  SHELL_PASSWORD_ACTION_IDS,
+  SHELL_PASSWORD_CALLBACK_ID,
+} from './shell-password.js'
+import type { ShellPasswordContext } from './shell-password.js'
+import type { ShellReplyPort } from '../../shell/types.js'
 import { buildChatFiles, composeThreadRef, IGNORED_MESSAGE_SUBTYPES, RecentEventWindow } from './events.js'
 import { reminderActAs, type ReminderChannels } from './reminder.js'
 import type {
@@ -167,6 +176,7 @@ export class SlackAdapter implements ChatAdapter {
   readonly #recentEvents = new RecentEventWindow(DEDUPE_WINDOW_SIZE)
   readonly #approvalContext: ApprovalInteractionContext
   readonly #sessionAttachContext: SessionAttachContext
+  readonly #shellPasswordContext: ShellPasswordContext
 
   #started = false
   #dispatch: ((event: ChatEvent) => Promise<void>) | undefined
@@ -212,6 +222,7 @@ export class SlackAdapter implements ChatAdapter {
       attachThreadToSession: deps.attachThreadToSession,
       log: deps.log,
     }
+    this.#shellPasswordContext = { port: deps.shellPassword, apiClient: deps.apiClient, log: deps.log }
   }
 
   static async create(secrets: SecretProvider, options: SlackAdapterCreateOptions = {}): Promise<SlackAdapter> {
@@ -261,6 +272,7 @@ export class SlackAdapter implements ChatAdapter {
           await post('Direct sessions are not configured on this Relay installation.')
         }),
       attachThreadToSession: options.attachThreadToSession ?? (async () => undefined),
+      shellPassword: options.shellPassword,
       sleep: options.sleep ?? defaultSleep,
       maxRateLimitRetries: options.maxRateLimitRetries ?? DEFAULT_MAX_RATE_LIMIT_RETRIES,
       log: options.log,
@@ -338,8 +350,37 @@ export class SlackAdapter implements ChatAdapter {
       await handleSessionAttachButton(this.#sessionAttachContext, envelope)
     })
 
+    // A shell command's sudo password buttons and popup, same bypass of
+    // #deliveryQueue/#dispatch: sudo is waiting on this answer, and the
+    // queue may hold the very message whose line is waiting. The request id
+    // travels in each button's value; the handlers catch their own errors.
+    this.#boltApp.action(SHELL_PASSWORD_ACTION_IDS.enter, (envelope) => handleShellPasswordButton(this.#shellPasswordContext, envelope))
+    this.#boltApp.action(SHELL_PASSWORD_ACTION_IDS.cancel, (envelope) => handleShellPasswordCancel(this.#shellPasswordContext, envelope))
+    this.#boltApp.view(SHELL_PASSWORD_CALLBACK_ID, (envelope) => handleShellPasswordSubmission(this.#shellPasswordContext, envelope))
+
     await this.#boltApp.start()
     this.#started = true
+  }
+
+  /**
+   * Posts and edits shell replies (src/shell/job.ts) straight through Slack's
+   * API, with the same rate limit retries and size check as perform(), but
+   * not through the outbox: the job's edits must land in the order it makes
+   * them, and a reply carrying a password button must never be replayed by
+   * an outbox retry after the request ended.
+   */
+  shellReplies(): ShellReplyPort {
+    return {
+      post: async ({ channel, thread, text, blocks }) => {
+        this.#assertWithinByteLimit(text)
+        const result = await this.#callApi(() => this.#apiClient.postMessage({ channel, thread, text, blocks: [...blocks] }))
+        return { channel: result.channel ?? channel, ts: result.ts }
+      },
+      update: async ({ channel, ts, text, blocks }) => {
+        this.#assertWithinByteLimit(text)
+        await this.#callApi(() => this.#apiClient.updateMessage({ channel, ts, text, blocks: [...blocks] }))
+      },
+    }
   }
 
   /** The team proposal card's Approve and Reject (src/chat/slack/team-proposal-card.ts); the handler catches its own errors. */

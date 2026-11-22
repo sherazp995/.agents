@@ -18,6 +18,18 @@ function questions(found: ChannelFolderLookup, clock = { now: 0 }) {
   return new FolderQuestions({ lookup: async () => found, home, now: () => clock.now })
 }
 
+describe('FolderQuestions.folderForShell', () => {
+  it('never asks: a project folder wins, a missing folder is still returned, no folder is none, an unreadable description refuses', async () => {
+    const project = new FolderQuestions({ lookup: async () => ({ kind: 'none' }), projectFolder: async () => join(home, 'web'), home })
+    expect(await project.folderForShell('C1')).toEqual({ kind: 'folder', path: join(home, 'web') })
+    const absent = questions({ kind: 'folder', path: missing })
+    expect(await absent.folderForShell('C1')).toEqual({ kind: 'folder', path: missing })
+    expect(absent.isWaiting('C1:1')).toBe(false)
+    expect(await questions({ kind: 'none' }).folderForShell('C1')).toEqual({ kind: 'none' })
+    expect(await questions({ kind: 'failed', missingScope: false }).folderForShell('C1')).toMatchObject({ kind: 'refused' })
+  })
+})
+
 describe('FolderQuestions.forNewThread', () => {
   it('uses the description folder when it exists, and today\'s rules when there is none', async () => {
     expect(await questions({ kind: 'folder', path: join(home, 'web') }).forNewThread('C1:1', 'C1', 'P1', request)).toEqual({ kind: 'folder', path: join(home, 'web') })

@@ -268,6 +268,10 @@ export const KNOWN_UNRESOLVED_SPAWN_NOTES: Readonly<Record<string, string>> = {
     'destination list and records every attempt. Where a confined run is permitted to go therefore falls under the ' +
     '"explicit, approved target of the current action" entry, and the sandbox is what makes that list enforceable ' +
     'rather than advisory.',
+  'src/shell/run-line.ts':
+    "Spawns the owner's own login shell ($SHELL, as `<shell> -l -c`) to run the commands the owner typed in Slack " +
+    '(README, "Shell from Slack"; owner only, kill switch required). Its destinations are whatever those commands ' +
+    'reach, the same as typing them in a terminal on this laptop, not a destination Relay itself chooses.',
   'src/secrets/keychain.ts':
     'A generic execFile wrapper\'s own `file` parameter (defaultExecFile), and the configured KeychainReader\'s ' +
     'file: /usr/bin/security or <RELAY_HOME>/bin/relay-secrets (native/relay-secrets), both local Keychain reads ' +

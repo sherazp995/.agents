@@ -42,6 +42,7 @@ import {
   UNRESOLVED_OUTCOME_DESCRIPTIONS,
 } from '../../../src/approvals/blockkit.js'
 import { encodeSessionAttachValue, SESSION_ATTACH_ACTION_ID } from '../../../src/chat/slack/session-attach.js'
+import { SHELL_PASSWORD_ACTION_IDS, SHELL_PASSWORD_BLOCK_ID, SHELL_PASSWORD_CALLBACK_ID, SHELL_PASSWORD_INPUT_ACTION_ID } from '../../../src/chat/slack/shell-password.js'
 import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from '../../../src/chat/slack/session-attach.js'
 import type { EngineSession } from '../../../src/sessions/discovery.js'
 import { ReadOnlySessionError } from '../../../src/sessions/store.js'
@@ -1732,6 +1733,69 @@ describe('SlackAdapter perform', () => {
       /rate limited/,
     )
     expect(apiClient.posted).toHaveLength(0)
+  })
+})
+
+describe('SlackAdapter shellReplies', () => {
+  const blocks = [{ type: 'markdown', text: '`$ pwd`' }]
+
+  it('posts and edits the reply with its blocks, waiting out a rate limit on each', async () => {
+    const apiClient = new StubSlackApiClient()
+    const waits: number[] = []
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      boltApp: new StubBoltApp(),
+      apiClient,
+      sleep: async (ms) => void waits.push(ms),
+    })
+    const replies = adapter.shellReplies()
+
+    apiClient.failNextCallsWithRateLimit(1, 1)
+    const posted = await replies.post({ channel: 'C1', thread: '1.0', text: 'pwd', blocks })
+    apiClient.failNextCallsWithRateLimit(1, 2)
+    await replies.update({ channel: posted.channel, ts: posted.ts, text: 'pwd done', blocks })
+
+    expect(posted).toEqual({ channel: 'C1', ts: '1.000001' })
+    expect(apiClient.posted).toEqual([{ channel: 'C1', thread: '1.0', text: 'pwd', blocks }])
+    expect(apiClient.updated).toEqual([{ channel: 'C1', ts: '1.000001', text: 'pwd done', blocks }])
+    expect(waits).toEqual([1000, 2000])
+  })
+
+  it('routes the password buttons and popup registered in start() to the wired port', async () => {
+    const boltApp = new StubBoltApp()
+    const answered: string[] = []
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), {
+      boltApp,
+      apiClient: new StubSlackApiClient(),
+      sleep: instantSleep,
+      shellPassword: {
+        canAnswer: async () => false,
+        submit: async ({ requestId }) => (answered.push(`submit ${requestId}`), 'accepted'),
+        cancel: async ({ requestId }) => (answered.push(`cancel ${requestId}`), 'cancelled'),
+      },
+    })
+    await adapter.start(async () => {})
+
+    await boltApp.dispatchAction(SHELL_PASSWORD_ACTION_IDS.enter, { actions: [{ action_id: SHELL_PASSWORD_ACTION_IDS.enter, type: 'button', value: 'r1' }], user: { id: 'U1' } })
+    await boltApp.dispatchAction(SHELL_PASSWORD_ACTION_IDS.cancel, { actions: [{ action_id: SHELL_PASSWORD_ACTION_IDS.cancel, type: 'button', value: 'r1' }], user: { id: 'U1' } })
+    const response = await boltApp.dispatchView(SHELL_PASSWORD_CALLBACK_ID, {
+      view: {
+        callback_id: SHELL_PASSWORD_CALLBACK_ID,
+        private_metadata: JSON.stringify({ requestId: 'r1' }),
+        state: { values: { [SHELL_PASSWORD_BLOCK_ID]: { [SHELL_PASSWORD_INPUT_ACTION_ID]: { value: 'pw' } } } },
+      },
+      user: { id: 'U1' },
+    })
+
+    expect(answered).toEqual(['cancel r1', 'submit r1'])
+    expect(response).toBeUndefined()
+  })
+
+  it('returns the channel Slack names, as a post to a user id lands in a DM', async () => {
+    const apiClient = new StubSlackApiClient()
+    apiClient.postMessage = async () => ({ ts: '9.9', channel: 'D1' })
+    const adapter = await createTestAdapter(fakeSecrets(bothTokens()), { boltApp: new StubBoltApp(), apiClient, sleep: instantSleep })
+
+    expect(await adapter.shellReplies().post({ channel: 'U1', thread: '1.0', text: 'pwd', blocks })).toEqual({ channel: 'D1', ts: '9.9' })
   })
 })
 

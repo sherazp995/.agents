@@ -8,6 +8,7 @@ import type { SlackBlock } from '../../approvals/blockkit.js'
 import type { ApprovalOption, ResolveApprovalResult } from '../../approvals/store.js'
 import type { Logger } from '../../obs/logger.js'
 import type { EngineSession } from '../../sessions/discovery.js'
+import type { ShellPasswordPort } from '../../shell/types.js'
 import type { AdapterCapabilities } from '../contract.js'
 import type { AttachThreadToSessionParams, AttachThreadToSessionResult } from './session-attach.js'
 import type { ReminderChannels } from './reminder.js'
@@ -258,6 +259,15 @@ export type SlackAdapterOptions = {
    * bound to a pool and this adapter's own workspace id.
    */
   attachThreadToSession?: (params: AttachThreadToSessionParams) => Promise<AttachThreadToSessionResult | undefined>
+  /**
+   * Answers a shell command's sudo password request from the reply's
+   * "Enter password" and "Cancel" buttons and the popup
+   * (src/chat/slack/shell-password.ts). Absent means not wired: the buttons
+   * and popup are received and refused with a log line, fail closed like
+   * resolveApprovalInteraction's default. Production code passes the shell
+   * jobs' password requests (src/shell/).
+   */
+  shellPassword?: ShellPasswordPort
   /** Overrides the declared capabilities. Production code should never need this; it exists for test doubles that must present a capability gap for runChatAdapterConformance's honesty check to exercise, see test/chat/slack/adapter.test.ts. */
   capabilities?: Partial<AdapterCapabilities>
   /** Overrides the wait between rate limited retries. Defaults to a real setTimeout; tests inject an instant resolver so adapter.test.ts never actually sleeps. */
@@ -290,6 +300,7 @@ export type SlackAdapterDeps = {
   listRecentSessions: (limit: number) => Promise<readonly EngineSession[]>
   onDirectCommand: (request: DirectCommandRequest) => Promise<void>
   attachThreadToSession: (params: AttachThreadToSessionParams) => Promise<AttachThreadToSessionResult | undefined>
+  shellPassword: ShellPasswordPort | undefined
   sleep: (ms: number) => Promise<void>
   maxRateLimitRetries: number
   log: Logger | undefined

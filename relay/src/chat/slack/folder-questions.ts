@@ -95,6 +95,19 @@ export class FolderQuestions {
     return found.kind === 'folder' && isFolder(found.path) ? found.path : undefined
   }
 
+  /**
+   * The channel's project or described folder for a `!` line (src/shell/job.ts); never asks. Unlike
+   * existingChannelFolder, a description that cannot be read is a refusal, never "no folder": a shell
+   * line must not run in the home folder because a lookup failed. Whether the folder exists is the caller's check.
+   */
+  async folderForShell(channel: string): Promise<{ kind: 'folder'; path: string } | { kind: 'none' } | { kind: 'refused'; text: string }> {
+    const project = await this.#projectFolder(channel)
+    if (project !== undefined) return { kind: 'folder', path: project }
+    const found = await this.#lookup(channel)
+    if (found.kind === 'failed') return { kind: 'refused', text: found.missingScope ? MISSING_SCOPE_TEXT : UNREADABLE_TEXT }
+    return found
+  }
+
   #ask(threadRef: string, principalId: string, request: WaitingRequest, missing: string, source: 'description' | 'project'): NewThreadFolder {
     this.#prune()
     this.#waiting.set(threadRef, { request, principalId, expiresAt: this.#now() + WAITING_TTL_MS })
