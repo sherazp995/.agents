@@ -13,8 +13,8 @@
  *
  * Failover (README, "Failover"): a tick starts work only while this laptop
  * holds the "who is answering" record (`failover.mayStartWork()`); when it
- * does not, it starts nothing and steps down, while turns already running
- * keep renewing their leases and post their replies. `drain()` is the step
+ * does not, it starts nothing, while turns already running keep renewing
+ * their leases and post their replies. `drain()` is the step
  * down's wait for them. A laptop signals and waits only on its own workers;
  * a turn a gone laptop left mid-way is marked interrupted and its thread told
  * once (markInterruptedTasks).
@@ -32,6 +32,7 @@ import { execFileSync } from 'node:child_process'
 import type { Pool, PoolClient } from 'pg'
 import type { ChatAction, ChatRef } from '../chat/contract.js'
 import type { Logger } from '../obs/logger.js'
+import { keepClaimRenewed } from '../failover/claim-renewal.js'
 import { ALWAYS_ACTIVE, type FailoverGate } from '../failover/types.js'
 import { killProcessGroup, processGroupAlive } from '../process/gated-spawn.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
@@ -289,11 +290,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       return
     }
     if (draining) return
-    // Every pass that could start a turn asks first; a laptop that lost the record starts nothing and steps down.
-    if (!(await gate.mayStartWork())) {
-      gate.stepDown('the autonomous scheduler may no longer start work')
-      return
-    }
+    // Every pass that could start a turn asks first; without the record it starts nothing.
+    if (!(await gate.mayStartWork())) return
     await markInterrupted()
     await deps.effects.sweep()
     const due = await listDueWakeups(deps.pool, deps.workspaceId, gate.host)
@@ -321,23 +319,20 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   }
 
   async function runStep(taskId: string, controller: AbortController): Promise<void> {
+    const claimedAt = Date.now()
     const lease = await acquireLease(deps.pool, taskId, deps.owner, ttlMs)
     if (!lease) return
     let lost = false
-    const renewal = setInterval(() => {
-      void renewLease(deps.pool, lease, ttlMs).then(
-        (held) => {
-          if (held) return
-          lost = true
-          controller.abort()
-        },
-        () => {
-          lost = true
-          controller.abort()
-        },
-      )
-    }, Math.max(1000, Math.floor(ttlMs / 3)))
-    renewal.unref()
+    const stopRenewing = keepClaimRenewed({
+      renew: () => renewLease(deps.pool, lease, ttlMs),
+      ttlMs,
+      claimedAt,
+      onLost: () => {
+        lost = true
+        controller.abort()
+      },
+      onError: (error) => deps.log.warn({ err: error, taskId }, 'renewing a task claim failed; the turn continues until the claim expires'),
+    })
     try {
       const task = await loadTask(deps.pool, taskId)
       if (!task || task.leaseGeneration !== lease.generation) return
@@ -348,7 +343,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       await step({ ...task, workerPid: null, workerPgid: null }, lease, controller.signal, () => lost)
     } finally {
-      clearInterval(renewal)
+      stopRenewing()
       if (!lost) await releaseLease(deps.pool, lease).catch(() => undefined)
     }
   }

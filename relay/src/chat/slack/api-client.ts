@@ -99,8 +99,8 @@ export class StaleClaimError extends Error {
  * inside App.processEvent before any middleware runs, so a check in
  * middleware would be too late: the event would be acknowledged and lost.
  * Here a stale claim throws before processEvent, the error handler declines
- * to acknowledge, and Slack resends the event once this laptop has closed
- * its connection.
+ * to acknowledge, and Slack can resend the event. The failover runner alone
+ * decides whether this laptop recovers or closes its connection.
  */
 export function createGatedSocketModeReceiver(appToken: string, gate: FailoverGate): SocketModeReceiver {
   const receiver = new SocketModeReceiver({
@@ -112,10 +112,7 @@ export function createGatedSocketModeReceiver(appToken: string, gate: FailoverGa
   receiver.init = (app) => {
     const processEvent = app.processEvent.bind(app)
     app.processEvent = async (event) => {
-      if (!gate.holdsFresh()) {
-        gate.stepDown('a Slack event arrived after the failover claim went stale')
-        throw new StaleClaimError()
-      }
+      if (!gate.holdsFresh()) throw new StaleClaimError()
       await processEvent(event)
     }
     init(app)

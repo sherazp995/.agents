@@ -24,6 +24,17 @@ const json = (time: number, msg: string) => JSON.stringify({ level: 30, time, ms
 const T = Date.parse('2026-11-20T18:22:59.000Z')
 
 describe('relay status', async () => {
+  it.each([
+    ['recovering', ['failover: recovering the role; new work waits'], 'recovering the failover role'],
+    ['answering after recovery', ['failover: recovering the role; new work waits', 'failover: recovered the role; answering Slack'], 'answering Slack'],
+    ['stepping down', ['failover: stepping down; finishing running work, then restarting as standby'], 'stepping down'],
+    ['stepping down with its work', ['failover: stepping down; finishing running work, then restarting as standby', 'failover: stepping down, waiting on running turns, worker processes'], 'stepping down, waiting on running turns, worker processes'],
+  ])('says when the daemon is %s', async (_name, messages, doing) => {
+    const tail = ['orchestrator is running: Socket Mode is connected', ...messages].map((message, index) => json(T + index, message)).join('\n')
+    const result = await runStatus({ platform: 'darwin', uid: 501, run: () => LAUNCHD_RUNNING, processStartMs: () => T - 10_000, readTail: () => tail })
+    expect(result.report.split('\n')[0]).toBe(`Relay daemon: running (pid 32870, started 1 time), ${doing}`)
+  })
+
   it('reports a running daemon with its pid, that it answers Slack, its last log line and log path, exit 0', async () => {
     const tail = [json(T - 9000, 'failover is on: waiting until this laptop holds the record before connecting to Slack'), json(T, 'orchestrator is running: Socket Mode is connected')].join('\n')
     const result = await runStatus({ platform: 'darwin', uid: 501, run: () => LAUNCHD_RUNNING, processStartMs: () => T - 10_000, readTail: (path) => (path === '/relay/tmp/relay.log' ? tail : null) })

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Pool } from 'pg'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { applyMigrations } from '../../src/db/migrate.js'
@@ -601,6 +601,55 @@ describe('autonomous scheduler', () => {
     expect((await loadTask(pool, task.id))?.pendingEvents).toHaveLength(1)
   })
 
+  /** Fails only the renewals of running turns; every other query still reaches the database. */
+  function failTaskRenewals(): { mockRestore(): void } {
+    const query = pool.query.bind(pool) as (...args: unknown[]) => unknown
+    return vi.spyOn(pool, 'query').mockImplementation(((...args: unknown[]) =>
+      String(args[0]).includes('UPDATE autonomous_tasks SET lease_expires_at = now() + ($4') ? Promise.reject(new Error('database blip')) : query(...args)) as never)
+  }
+
+  it('a turn survives failed claim renewals while its claim is still alive', async () => {
+    const { workspaceId } = await newTask()
+    let aborted: boolean | undefined
+    const h = harness([
+      async (context) => {
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        aborted = context.signal.aborted
+        return reply()
+      },
+    ])
+    const spy = failTaskRenewals()
+    try {
+      await scheduler(workspaceId, h, { leaseTtlMs: 3000 }).tick()
+      await vi.waitFor(() => expect(aborted).toBe(false), { timeout: 3000 })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('a turn is aborted once its claim has really expired with renewals still failing', async () => {
+    const { workspaceId } = await newTask()
+    let abortedAfterMs: number | undefined
+    const startedAt = Date.now()
+    const h = harness([
+      (context) =>
+        new Promise((resolve) => {
+          context.signal.addEventListener('abort', () => {
+            abortedAfterMs = Date.now() - startedAt
+            resolve(reply())
+          })
+        }),
+    ])
+    const spy = failTaskRenewals()
+    try {
+      await scheduler(workspaceId, h, { leaseTtlMs: 3000 }).tick()
+      await vi.waitFor(() => expect(abortedAfterMs).toBeDefined(), { timeout: 5000 })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(abortedAfterMs).toBeGreaterThanOrEqual(2900)
+  })
+
   it('kills a live recorded worker at startup before any new turn', async () => {
     const { workspaceId, task } = await newTask()
     const dir = mkdtempSync(join(tmpdir(), 'relay-sched-'))
@@ -692,9 +741,17 @@ describe('autonomous scheduler', () => {
         [host, `/Users/${host}`, lastSeen === 'now' ? '0 seconds' : '2 minutes'],
       )
     }
-    function gate(host: string, allowed: { value: boolean } = { value: true }): FailoverGate & { downs: string[] } {
-      const downs: string[] = []
-      return { host, downs, holdsFresh: () => allowed.value, mayStartWork: async () => allowed.value, stepDown: (reason) => void downs.push(reason) }
+    function gate(host: string, allowed: { value: boolean } = { value: true }): FailoverGate & { refusals: () => number } {
+      let refused = 0
+      return {
+        host,
+        refusals: () => refused,
+        holdsFresh: () => allowed.value,
+        mayStartWork: async () => {
+          if (!allowed.value) refused += 1
+          return allowed.value
+        },
+      }
     }
     function sleeper(): ReturnType<typeof spawnGated> {
       const dir = mkdtempSync(join(tmpdir(), 'relay-other-'))
@@ -787,14 +844,14 @@ describe('autonomous scheduler', () => {
       allowed.value = false
       const second = await newTask('second thread', first.workspaceId)
       s.wake()
-      while (failover.downs.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+      while (failover.refusals() === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
       const drained = s.drain()
       release()
       await drained
 
       expect(h.turns).toHaveLength(1)
       expect(h.posts).toEqual(['First answered.'])
-      expect(failover.downs.length).toBeGreaterThan(0)
+      expect(failover.refusals()).toBeGreaterThan(0)
       expect((await loadTask(pool, second.task.id))?.pendingEvents).toHaveLength(1)
     })
 

@@ -320,12 +320,62 @@ describe('team scheduler', () => {
     expect(notes[1]).toContain('marked failed')
   })
 
-  it('starts no member turn and steps down when this laptop may no longer start work', async () => {
+  function failMemberRenewals(): { mockRestore(): void } {
+    const query = pool.query.bind(pool) as (...args: unknown[]) => unknown
+    return vi.spyOn(pool, 'query').mockImplementation(((...args: unknown[]) =>
+      String(args[0]).includes('UPDATE team_assignments SET lease_expires_at = now() + ($4') ? Promise.reject(new Error('database blip')) : query(...args)) as never)
+  }
+
+  it('a member turn survives failed claim renewals while its claim is still alive', async () => {
+    const fixture = await teamFixture(pool)
+    const run = await openRun(pool, fixture)
+    await assign(fixture, run, { id: 'm0', name: 'M0' }, 'blip')
+    let aborted: boolean | undefined
+    const team = scheduler(fixture, async (context) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      aborted = context.signal.aborted
+      return reply('done')
+    }, { leaseTtlMs: 3000 })
+    const spy = failMemberRenewals()
+    try {
+      await team.tick()
+      await vi.waitFor(() => expect(aborted).toBe(false), { timeout: 3000 })
+      await team.drain()
+    } finally {
+      spy.mockRestore()
+    }
+    await team.stop()
+  })
+
+  it('a member turn is aborted once its claim has really expired with renewals still failing', async () => {
+    const fixture = await teamFixture(pool)
+    const run = await openRun(pool, fixture)
+    await assign(fixture, run, { id: 'm0', name: 'M0' }, 'expired')
+    let abortedAfterMs: number | undefined
+    const startedAt = Date.now()
+    const team = scheduler(fixture, (context) => new Promise((resolve) => {
+      context.signal.addEventListener('abort', () => {
+        abortedAfterMs = Date.now() - startedAt
+        resolve(reply('late'))
+      })
+    }), { leaseTtlMs: 3000 })
+    const spy = failMemberRenewals()
+    try {
+      await team.tick()
+      await vi.waitFor(() => expect(abortedAfterMs).toBeDefined(), { timeout: 5000 })
+      await team.drain()
+    } finally {
+      spy.mockRestore()
+    }
+    expect(abortedAfterMs).toBeGreaterThanOrEqual(2900)
+    await team.stop()
+  })
+
+  it('starts no member turn when this laptop may no longer start work', async () => {
     const fixture = await teamFixture(pool)
     const run = await openRun(pool, fixture)
     const assignment = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'stale')
-    const reasons: string[] = []
-    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => false, mayStartWork: async () => false, stepDown: (reason) => reasons.push(reason) }
+    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => false, mayStartWork: async () => false }
     const runTurn = vi.fn(async () => reply('never'))
     const team = scheduler(fixture, runTurn, { failover })
 
@@ -333,7 +383,6 @@ describe('team scheduler', () => {
 
     expect(await stateOf(assignment.id)).toBe('queued')
     expect(runTurn).not.toHaveBeenCalled()
-    expect(reasons).toHaveLength(1)
     await team.stop()
   })
 
@@ -348,7 +397,7 @@ describe('team scheduler', () => {
     workers.push(worker)
     const pgid = worker.pid ?? 0
     await pool.query(`UPDATE team_assignments SET state = 'running', lease_owner = $3, worker_pid = $2, worker_pgid = $2, worker_host = $4 WHERE id = $1`, [assignment.id, pgid, `relay-1@${other}`, other])
-    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => true, mayStartWork: async () => true, stepDown: () => undefined }
+    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => true, mayStartWork: async () => true }
     const team = scheduler(fixture, async () => reply('never'), { failover })
 
     await team.recover()

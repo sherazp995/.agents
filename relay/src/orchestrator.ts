@@ -1444,8 +1444,8 @@ export type OrchestratorHandle = {
   checkConnectivity(): Promise<void>
   /** Closes the Slack connection only; replies already queued keep posting. Used when stepping down. */
   closeSlack(): Promise<void>
-  /** True while a chat event handler is still running in this process. */
-  busy(): boolean
+  /** The kinds of work still running in this process; empty when none. */
+  waitingOn(): string[]
 }
 
 /**
@@ -1698,8 +1698,12 @@ export async function startOrchestrator(
       }
     },
 
-    busy(): boolean {
-      return activeHandlers.size > 0 || (draining !== null && !drained) || shellJobs.busy()
+    waitingOn(): string[] {
+      return [
+        ...(activeHandlers.size > 0 ? ['Slack messages being handled'] : []),
+        ...(draining !== null && !drained ? ['running turns'] : []),
+        ...(shellJobs.busy() ? ['shell commands'] : []),
+      ]
     },
 
     /**

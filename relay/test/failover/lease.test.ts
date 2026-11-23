@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Pool } from 'pg'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { applyMigrations, newestMigrationName } from '../../src/db/migrate.js'
-import { claimLease, otherHostsHaveRunningWorkers, raiseWantsBack, registerHost, releaseLease, renewLease } from '../../src/failover/lease.js'
+import { boundedLeaseDb, claimLease, otherHostsHaveRunningWorkers, raiseWantsBack, registerHost, releaseLease, renewLease } from '../../src/failover/lease.js'
 import { randomUUID } from 'node:crypto'
 import { intakeMention } from '../../src/autonomous/store.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
@@ -54,7 +54,17 @@ describe('failover lease', () => {
     const second = await claimLease(pool, 'hassan')
     expect(BigInt(second ?? '0')).toBe(BigInt(first ?? '0') + 1n)
     // The old holder can neither renew nor revive it.
-    expect(await renewLease(pool, 'zubair', first ?? '')).toEqual({ held: false, wantsBack: false })
+    expect(await renewLease(pool, 'zubair', first ?? '')).toMatchObject({ held: false, wantsBack: false })
+  })
+
+  it('a bounded request fails at its limit on a real connection, and the pool still answers', async () => {
+    const db = boundedLeaseDb(pool, 100)
+    const startedAt = Date.now()
+    await expect(db.query('SELECT pg_sleep(5)')).rejects.toThrow()
+    const elapsed = Date.now() - startedAt
+    expect(elapsed).toBeGreaterThanOrEqual(95)
+    expect(elapsed).toBeLessThan(2000)
+    expect((await db.query<{ ok: number }>('SELECT 1 AS ok')).rows[0]).toEqual({ ok: 1 })
   })
 
   it('hands back only through release: the flag shows on renewal, then the preferred laptop claims', async () => {
@@ -64,7 +74,7 @@ describe('failover lease', () => {
 
     // The flag never takes the record from a holder.
     expect(await claimLease(pool, 'hassan')).toBeNull()
-    expect(await renewLease(pool, 'zubair', generation)).toEqual({ held: true, wantsBack: true })
+    expect(await renewLease(pool, 'zubair', generation)).toMatchObject({ held: true, wantsBack: true, otherSeen: true })
 
     expect(await releaseLease(pool, 'zubair', generation)).toBe(true)
     // Reserved for the preferred laptop: the one that just released cannot take it again.

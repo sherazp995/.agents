@@ -139,10 +139,15 @@ function linesSince(lines: LogLine[], startMs: number): LogLine[] {
 function role(lines: LogLine[]): string | undefined {
   const states: Array<[string, string]> = [
     ['orchestrator is running', 'answering Slack'],
+    ['failover: recovered', 'answering Slack'],
+    ['failover: recovering', 'recovering the failover role'],
+    ['failover: stepping down', 'stepping down'],
     ['failover is on: waiting', 'waiting to take the failover record (another laptop answers, or the database is slow or unreachable)'],
     ['shutting down', 'shutting down'],
   ]
   for (const line of [...lines].reverse()) {
+    const waiting = line.text.match(/failover: (stepping down, waiting on .+)$/)?.[1]
+    if (waiting !== undefined) return waiting
     const found = states.find(([needle]) => line.text.includes(needle))
     if (found !== undefined) return found[1]
   }

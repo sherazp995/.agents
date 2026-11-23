@@ -13,17 +13,14 @@ export interface FailoverGate {
   readonly host: string | null
   /** Cheap and synchronous: renewed within the trust window by this laptop's wall clock. False once the record is lost or released. */
   holdsFresh(): boolean
-  /** The full check before starting work: fresh, and the generation in the database is still ours. */
+  /** The full check before starting work: fresh, and the generation in the database is still ours. False means start nothing; the failover runner alone decides whether to step down. */
   mayStartWork(): Promise<boolean>
-  /** Called when a check fails at intake: the daemon steps down (closes Slack, drains, exits non zero). */
-  stepDown(reason: string): void
 }
 
 export const ALWAYS_ACTIVE: FailoverGate = {
   host: null,
   holdsFresh: () => true,
   mayStartWork: async () => true,
-  stepDown: () => {},
 }
 
 /** One laptop's row in failover_hosts. */

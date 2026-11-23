@@ -23,6 +23,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 
 import { renderForModel, wrapUntrusted } from '../agent/untrusted.js'
+import { keepClaimRenewed } from '../failover/claim-renewal.js'
 import { DEFAULT_LEASE_TTL_MS, killWorkerGroup, type TurnRequestContext, type TurnResult } from '../autonomous/scheduler.js'
 import { hostGone, isOwnWorker, loadTask } from '../autonomous/store.js'
 import { knownHomes, mapPath } from '../failover/paths.js'
@@ -79,10 +80,7 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
     const due = await listDueAssignments(deps.pool, deps.workspaceId)
     // With failover off an idle pass costs one query, as before.
     if (due.length === 0 && gate.host === null) return
-    if (!(await gate.mayStartWork())) {
-      gate.stepDown('the team scheduler may no longer start work')
-      return
-    }
+    if (!(await gate.mayStartWork())) return
     if (gate.host !== null) await recoverGone(false)
     if (due.length === 0) return
     const counts = await countRunning(deps.pool)
@@ -97,31 +95,28 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
       if (running.has(assignment.id)) continue
       const teamRunning = byTeam.get(assignment.teamId) ?? 0
       if (teamRunning >= assignment.memberLimit) continue
+      const claimedAt = Date.now()
       const held = await acquireAssignmentLease(deps.pool, assignment.id, deps.owner, ttlMs)
       if (!held) continue
       total += 1
       byTeam.set(assignment.teamId, teamRunning + 1)
-      start(held.assignment, held.lease, assignment.teamId)
+      start(held.assignment, held.lease, assignment.teamId, claimedAt)
     }
   }
 
-  function start(assignment: HostedAssignment, lease: AssignmentLease, teamId: string): void {
+  function start(assignment: HostedAssignment, lease: AssignmentLease, teamId: string, claimedAt: number): void {
     const controller = new AbortController()
     let lost = false
-    const renewal = setInterval(() => {
-      void renewAssignmentLease(deps.pool, lease, ttlMs).then(
-        (held) => {
-          if (held) return
-          lost = true
-          controller.abort()
-        },
-        () => {
-          lost = true
-          controller.abort()
-        },
-      )
-    }, Math.max(1000, Math.floor(ttlMs / 3)))
-    renewal.unref()
+    const stopRenewing = keepClaimRenewed({
+      renew: () => renewAssignmentLease(deps.pool, lease, ttlMs),
+      ttlMs,
+      claimedAt,
+      onLost: () => {
+        lost = true
+        controller.abort()
+      },
+      onError: (error) => deps.log.warn({ err: error, assignmentId: assignment.id }, 'renewing a member claim failed; the turn continues until the claim expires'),
+    })
     const done = runMember(assignment, lease, controller.signal, () => lost)
       .catch(async (error: unknown) => {
         deps.log.error({ err: error, assignmentId: assignment.id }, 'team member turn failed')
@@ -129,7 +124,7 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
         if (!lost) await requeueAssignment(deps.pool, lease, RETRY_LATER_MS).catch(() => undefined)
       })
       .finally(() => {
-        clearInterval(renewal)
+        stopRenewing()
         running.delete(assignment.id)
       })
     running.set(assignment.id, { taskId: assignment.taskId, teamId, controller, done })

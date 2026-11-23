@@ -453,7 +453,7 @@ async function main(): Promise<void> {
     }
     if (failover) {
       // Exit 1 after a step down, so launchd and systemd restart this laptop as standby.
-      failover.attach({ closeSlack: () => handle.closeSlack(), busy: () => handle.busy(), exit: (code) => shutdown('failover step down', code) })
+      failover.attach({ closeSlack: () => handle.closeSlack(), waitingOn: () => handle.waitingOn(), exit: (code) => shutdown('failover step down', code) })
     }
     process.on('SIGINT', () => shutdown('SIGINT'))
     process.on('SIGTERM', () => shutdown('SIGTERM'))

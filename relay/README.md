@@ -94,8 +94,9 @@ start says so until `relay update` passes. Its log is `relay/tmp/update.log`.
 `relay restart` restarts the daemon without rebuilding; a restart drops
 replies the daemon holds in memory, so pick a quiet moment.
 `relay status` says whether the daemon is running and how often launchd or
-systemd has started it (so a crash loop shows), whether it answers Slack or
-waits to take the failover record, the last log line and last error of its
+systemd has started it (so a crash loop shows), whether it answers Slack,
+waits to take the failover record, is recovering it, or is stepping down
+and what it is waiting on, the last log line and last error of its
 current run, whether the database answers (one connection, 10 s limit), and
 the log's path; it exits 1 when the daemon is not running.
 
@@ -314,6 +315,17 @@ How it behaves:
   posts, even after the other laptop took over. A turn cut off because its
   laptop died is lost; its thread gets a note asking you to mention Relay
   again.
+- A short database failure does not end a running turn or disconnect
+  Slack. A turn stops only when its claim is confirmed lost or has expired.
+  If the laptop can no longer trust its record, it starts no new work,
+  refuses new Slack events so Slack can resend them, and tries to get the
+  record back. Buttons and popups can fail during this time; try them again.
+- Recovery ends at once if another laptop holds the record, asks for it
+  back, or the database has a newer Relay version. Otherwise it stops after
+  about 75 seconds when the other laptop was seen recently, or about 2
+  minutes when it was not. Relay then disconnects from Slack, finishes running work and
+  restarts as standby. `relay status` shows `recovering the failover role`
+  or `stepping down, waiting on` the work.
 - After each turn the Claude chat of a Slack thread is saved to the
   database (compressed, kept 7 days after the thread's last turn, 300 MB in
   total), so whichever laptop picks up the thread continues the same

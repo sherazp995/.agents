@@ -29,18 +29,15 @@ async function deliverMention(gate: FailoverGate): Promise<{ ack: ReturnType<typ
       event: { type: 'app_mention', user: 'U1', text: '<@UBOT> hi', ts: '1.1', channel: 'C1', event_ts: '1.1' },
     },
   })
-  await vi.waitFor(() => expect(ack.mock.calls.length + stepDowns(gate)).toBeGreaterThan(0))
+  // A refused event is never acknowledged, so the wait is for the gate's answer or the ack.
+  await vi.waitFor(() => expect(ack.mock.calls.length + (gate.holdsFresh as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0))
   // Let Bolt finish dispatching to listeners after its ack.
   await new Promise((resolve) => setImmediate(resolve))
   return { ack, heard }
 }
 
-function stepDowns(gate: FailoverGate): number {
-  return (gate.stepDown as ReturnType<typeof vi.fn>).mock.calls.length
-}
-
 function gate(fresh: boolean): FailoverGate {
-  return { host: 'zubair', holdsFresh: () => fresh, mayStartWork: async () => fresh, stepDown: vi.fn() }
+  return { host: 'zubair', holdsFresh: vi.fn(() => fresh), mayStartWork: async () => fresh }
 }
 
 describe('createGatedSocketModeReceiver', () => {
@@ -49,15 +46,13 @@ describe('createGatedSocketModeReceiver', () => {
     const { ack, heard } = await deliverMention(fresh)
     expect(ack).toHaveBeenCalledTimes(1)
     expect(heard).toEqual(['<@UBOT> hi'])
-    expect(stepDowns(fresh)).toBe(0)
   })
 
-  it('leaves an event unacknowledged and steps down once the claim is stale, so Slack resends it', async () => {
+  it('leaves an event unacknowledged while the claim is not trusted, so Slack can resend it', async () => {
     const stale = gate(false)
     const { ack, heard } = await deliverMention(stale)
     expect(ack).not.toHaveBeenCalled()
     expect(heard).toEqual([])
-    expect(stepDowns(stale)).toBe(1)
   })
 })
 
