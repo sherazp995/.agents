@@ -61,21 +61,23 @@ describe('relay status', async () => {
     })
   })
 
-  it('asks launchd for this user and label, and says how to install when launchd has no such service', async () => {
+  it('asks launchd for this user and label; no job and no plist is not installed, no job beside a plist is stopped', async () => {
     const calls: string[][] = []
-    const result = await runStatus({
-      platform: 'darwin',
-      uid: 501,
-      run: (file, args) => {
-        calls.push([file, ...args])
-        throw Object.assign(new Error('Command failed: /bin/launchctl print gui/501/com.relay.orchestrator'), {
-          status: 113,
-          stderr: 'Bad request.\nCould not find service "com.relay.orchestrator" in domain for user gui: 501\n',
-        })
-      },
-    })
+    const reads: string[] = []
+    const noJob = (file: string, args: readonly string[]): string => {
+      calls.push([file, ...args])
+      throw Object.assign(new Error('Command failed: /bin/launchctl print gui/501/com.relay.orchestrator'), {
+        status: 113,
+        stderr: 'Bad request.\nCould not find service "com.relay.orchestrator" in domain for user gui: 501\n',
+      })
+    }
+    const result = await runStatus({ platform: 'darwin', uid: 501, home: '/Users/me', run: noJob, readFile: (path) => (reads.push(path), null) })
     expect(calls).toEqual([['/bin/launchctl', 'print', 'gui/501/com.relay.orchestrator']])
+    expect(reads).toEqual(['/Users/me/Library/LaunchAgents/com.relay.orchestrator.plist'])
     expect(result).toEqual({ exitCode: 1, report: 'Relay daemon: not installed (launchd has no com.relay.orchestrator). Install it with: relay install-service --start' })
+
+    const stopped = await runStatus({ platform: 'darwin', uid: 501, home: '/Users/me', run: noJob, readFile: () => '<plist/>' })
+    expect(stopped).toEqual({ exitCode: 1, report: 'Relay daemon: stopped (launchd has not loaded com.relay.orchestrator). Start it with: relay start' })
   })
 
   it('on Linux reads systemd and the log path from the unit file', async () => {

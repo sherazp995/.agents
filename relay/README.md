@@ -93,6 +93,13 @@ if the build passed. A failed build keeps the old one and every session
 start says so until `relay update` passes. Its log is `relay/tmp/update.log`.
 `relay restart` restarts the daemon without rebuilding; a restart drops
 replies the daemon holds in memory, so pick a quiet moment.
+`relay stop` stops the daemon and waits until it has exited, and `relay start`
+starts it again (it never restarts a running one). Both work on macOS
+(launchd) and Linux (systemd), even without a build. A stopped daemon starts
+again at the next login, because it stays installed; `relay uninstall-service`
+removes it. A stop drops held replies like a restart does, and on the laptop
+that answers Slack it hands the failover role to the other laptop, which keeps
+answering.
 `relay status` says whether the daemon is running and how often launchd or
 systemd has started it (so a crash loop shows), whether it answers Slack,
 waits to take the failover record, is recovering it, or is stepping down
@@ -392,8 +399,8 @@ On Hassan's laptop, stop the daemon, so nothing writes while the rows are
 copied:
 
 ```bash
-launchctl bootout gui/$(id -u)/com.relay.orchestrator   # Linux: systemctl --user stop relay
-relay db move                                           # paste relay_hassan's URL, then Enter and Ctrl-D
+relay stop
+relay db move   # paste relay_hassan's URL, then Enter and Ctrl-D
 ```
 
 `relay db move` refuses while the daemon runs or anything else is
@@ -466,8 +473,8 @@ relay doctor          # failover: hassan-mbp answers, renewed 3s ago ...
    register each with `relay repos add <path>`.
 6. Restart the daemon (`relay install-service --start`) and run `relay
    doctor`. It should say Hassan's laptop answers and this one is not
-   preferred. Stop Hassan's daemon for a minute to see this laptop take
-   over, then start it again to see it hand back.
+   preferred. Stop Hassan's daemon for a minute (`relay stop`) to see this
+   laptop take over, then start it again (`relay start`) to see it hand back.
 
 Good to know:
 

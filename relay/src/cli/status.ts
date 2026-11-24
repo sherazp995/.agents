@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process'
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { SERVICE_LABEL, SYSTEMD_UNIT, serviceUnitPath } from './service.js'
+import { SERVICE_LABEL, SYSTEMD_UNIT, servicePlistPath, serviceUnitPath } from './service.js'
 
 export type StatusDeps = {
   readonly platform?: NodeJS.Platform
@@ -187,10 +187,14 @@ export async function runStatus(deps: StatusDeps = {}): Promise<StatusResult> {
     try {
       output = run('/bin/launchctl', ['print', `gui/${deps.uid ?? process.getuid?.() ?? 0}/${SERVICE_LABEL}`])
     } catch (error) {
+      // `relay stop` unloads the job but leaves its plist, so a plist without a job is stopped, not uninstalled.
+      const stopped = launchdMissing(error) && (deps.readFile ?? readFileOrNull)(servicePlistPath(deps.home ?? homedir())) !== null
       lines.push(
-        launchdMissing(error)
-          ? `Relay daemon: not installed (launchd has no ${SERVICE_LABEL}). Install it with: relay install-service --start`
-          : `Relay daemon: unknown (launchctl print failed: ${(error as Error).message.split('\n')[0]})`,
+        stopped
+          ? `Relay daemon: stopped (launchd has not loaded ${SERVICE_LABEL}). Start it with: relay start`
+          : launchdMissing(error)
+            ? `Relay daemon: not installed (launchd has no ${SERVICE_LABEL}). Install it with: relay install-service --start`
+            : `Relay daemon: unknown (launchctl print failed: ${(error as Error).message.split('\n')[0]})`,
       )
     }
     proc = output === undefined ? { running: false, detail: '' } : launchdProcess(output)

@@ -284,7 +284,7 @@ describe('installing on Linux as a systemd user unit', () => {
       ['systemctl', '--user', 'enable', 'relay.service'],
     ])
     expect(result.report).toContain('next login')
-    expect(result.report).toContain('systemctl --user stop relay')
+    expect(result.report).toContain('Stop it:      relay stop')
     expect(result.report).toContain('keyring')
   })
 

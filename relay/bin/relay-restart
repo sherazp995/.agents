@@ -12,5 +12,5 @@ elif command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$(id -u)/com.r
   launchctl kickstart -k "gui/$(id -u)/com.relay.orchestrator" >&2 || { echo "launchctl could not restart com.relay.orchestrator" >&2; exit 1; }
   echo "restarted com.relay.orchestrator"
 else
-  echo "no daemon is running, so none was restarted"
+  echo "no daemon is running, so none was restarted; start it with relay start"
 fi

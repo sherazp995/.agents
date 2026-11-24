@@ -39,6 +39,6 @@ describe('relay restart', () => {
     const bin = mkdtempSync(join(tmpdir(), 'relay-restart-none-'))
     for (const tool of ['bash', 'dirname', 'readlink', 'id']) symlinkSync(execFileSync('/usr/bin/which', [tool], { encoding: 'utf8' }).trim(), join(bin, tool))
     const { stdout } = await run(wrapper, ['restart'], { env: { PATH: bin, HOME: tmpdir() } })
-    expect(stdout).toBe('no daemon is running, so none was restarted\n')
+    expect(stdout).toBe('no daemon is running, so none was restarted; start it with relay start\n')
   })
 })

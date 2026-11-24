@@ -16,10 +16,12 @@ config/profiles.yaml
 config/repos.yaml
 /run/
 # relay install-service builds the macOS relay-secrets helper here; the PATH
-# wrapper and the update and restart scripts beside it are tracked.
+# wrapper and the update, start, stop and restart scripts beside it are tracked.
 /bin/*
 !/bin/relay
 !/bin/relay-update
+!/bin/relay-start
+!/bin/relay-stop
 !/bin/relay-restart
 
 # Runtime data Relay writes under its home: task dirs (inbox downloads, QA checkouts) and team run personas.

@@ -36,7 +36,6 @@ export const DATABASE_LOCAL_URL_SECRET = 'relay-database-local-url'
 import type { SecretProvider } from '../secrets/provider.js'
 import { registerSecretValue, scrubSecrets } from '../secrets/scrubber.js'
 import { runSecretsSet } from './secrets.js'
-import { SERVICE_LABEL, SYSTEMD_UNIT } from './service.js'
 
 export type DbResult = { readonly report: string; readonly exitCode: number }
 
@@ -425,7 +424,7 @@ export async function runDbMove(params: DbMoveParams, deps: DbMoveDependencies =
   }
   const daemonPid = runningDaemonPid(deps.relayHome ?? resolveRelayHome().path)
   if (daemonPid !== undefined) {
-    return { report: `The Relay daemon is running (pid ${daemonPid}). Stop it first (macOS: launchctl bootout gui/$(id -u)/${SERVICE_LABEL}; Linux: systemctl --user stop ${SYSTEMD_UNIT}); nothing was changed.`, exitCode: 1 }
+    return { report: `The Relay daemon is running (pid ${daemonPid}). Stop it first with relay stop; nothing was changed.`, exitCode: 1 }
   }
 
   const lines: string[] = []
@@ -527,6 +526,6 @@ export async function runDbMove(params: DbMoveParams, deps: DbMoveDependencies =
     `database.url is now ${keystoreReference(DATABASE_URL_SECRET)}` +
       (droppedOperatorUrl ? '; removed database.operator_url, which named the local database' : ''),
   )
-  lines.push(`Start the daemon again with relay install-service --start; it now uses ${targetName}.`)
+  lines.push(`Start the daemon again with relay start; it now uses ${targetName}.`)
   return { report: lines.join('\n'), exitCode: 0 }
 }

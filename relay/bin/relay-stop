@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Stops the Relay daemon: `relay stop` runs it. macOS boots the launchd job out,
+# Linux stops the systemd user unit; both stay installed, so Relay starts again
+# at the next login or with `relay start`. Waits until the daemon has exited,
+# so a start right after works. Prints one line; exits 1 when the service
+# manager refused. A stop drops replies the daemon holds in memory, and on the
+# laptop that answers Slack it hands the failover role to the other laptop.
+set -uo pipefail
+
+label=com.relay.orchestrator
+unit=relay.service
+wait_seconds=${RELAY_SERVICE_WAIT_SECONDS:-30}
+
+case "$(uname -s)" in
+  Darwin)
+    target="gui/$(id -u)/$label"
+    # launchd answers 113 ("Could not find service") for a job it has not loaded.
+    gone() {
+      local out code
+      out=$(launchctl print "$target" 2>&1)
+      code=$?
+      [ "$code" -eq 113 ] || [[ $out == *"Could not find service"* ]]
+    }
+    if gone; then
+      echo "relay was not running, so nothing was stopped"
+      exit 0
+    fi
+    out=$(launchctl bootout "$target" 2>&1)
+    code=$?
+    # 36 means the job is still exiting; the wait below covers it.
+    if [ "$code" -ne 0 ] && [ "$code" -ne 36 ] && ! gone; then
+      echo "launchctl could not stop $label: ${out%%$'\n'*}" >&2
+      exit 1
+    fi
+    deadline=$((SECONDS + wait_seconds))
+    until gone; do
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "launchctl is still stopping $label after ${wait_seconds}s; check it with relay status" >&2
+        exit 1
+      fi
+      sleep 0.5
+    done
+    echo "stopped $label"
+    ;;
+  Linux)
+    if ! out=$(systemctl --user show "$unit" -p LoadState -p ActiveState 2>&1); then
+      echo "systemctl --user failed: ${out%%$'\n'*}. There may be no systemd user session (a login over plain su or sudo has none); run relay stop from a login session." >&2
+      exit 1
+    fi
+    load=$(printf '%s\n' "$out" | while IFS='=' read -r key value; do [ "$key" = LoadState ] && echo "$value"; done)
+    active=$(printf '%s\n' "$out" | while IFS='=' read -r key value; do [ "$key" = ActiveState ] && echo "$value"; done)
+    # activating covers auto-restart, which would bring the daemon back by itself, so it is stopped too.
+    if [ "$load" = not-found ] || [ "$active" = inactive ] || [ "$active" = failed ]; then
+      echo "relay was not running, so nothing was stopped"
+      exit 0
+    fi
+    systemctl --user stop "$unit" >&2 || { echo "systemctl could not stop $unit" >&2; exit 1; }
+    echo "stopped $unit"
+    ;;
+  *)
+    echo "relay stop supports macOS (launchd) and Linux (systemd), not $(uname -s)" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Starts the installed Relay daemon: `relay start` runs it. macOS loads the
+# launchd job (or starts it when loaded but stopped), Linux starts the systemd
+# user unit. Never restarts a running daemon (that is `relay restart`), so it
+# cannot drop held replies. Prints one line; exits 1 when Relay is not installed
+# as a service or the service manager refused.
+set -uo pipefail
+
+label=com.relay.orchestrator
+unit=relay.service
+not_installed="Relay is not installed as a service. Install and start it with: relay install-service --start"
+
+case "$(uname -s)" in
+  Darwin)
+    domain="gui/$(id -u)"
+    target="$domain/$label"
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    out=$(launchctl print "$target" 2>&1)
+    code=$?
+    if [ "$code" -eq 0 ]; then
+      # Only the job's own (one tab) lines count; nested blocks carry their own state lines.
+      if [[ $out == *$'\n\tstate = running\n'* && $out == *$'\n\tpid = '* ]]; then
+        echo "relay is already running ($label)"
+        exit 0
+      fi
+      launchctl kickstart "$target" >&2 || { echo "launchctl could not start $label" >&2; exit 1; }
+      echo "started $label"
+      exit 0
+    fi
+    if [ "$code" -ne 113 ] && [[ $out != *"Could not find service"* ]]; then
+      echo "launchctl print failed: ${out%%$'\n'*}" >&2
+      exit 1
+    fi
+    if [ ! -f "$plist" ]; then
+      echo "$not_installed" >&2
+      exit 1
+    fi
+    if ! launchctl bootstrap "$domain" "$plist" >&2; then
+      # A job still unloading after a stop refuses the load: loaded now counts as started, otherwise try once more.
+      if ! launchctl print "$target" >/dev/null 2>&1; then
+        sleep 1
+        launchctl bootstrap "$domain" "$plist" >&2 || { echo "launchctl could not load $plist" >&2; exit 1; }
+      fi
+    fi
+    echo "started $label"
+    ;;
+  Linux)
+    if ! out=$(systemctl --user show "$unit" -p LoadState -p ActiveState 2>&1); then
+      echo "systemctl --user failed: ${out%%$'\n'*}. There may be no systemd user session (a login over plain su or sudo has none); run relay start from a login session." >&2
+      exit 1
+    fi
+    load=$(printf '%s\n' "$out" | while IFS='=' read -r key value; do [ "$key" = LoadState ] && echo "$value"; done)
+    active=$(printf '%s\n' "$out" | while IFS='=' read -r key value; do [ "$key" = ActiveState ] && echo "$value"; done)
+    if [ "$load" = not-found ]; then
+      echo "$not_installed" >&2
+      exit 1
+    fi
+    if [ "$active" = active ]; then
+      echo "relay is already running ($unit)"
+      exit 0
+    fi
+    systemctl --user start "$unit" >&2 || { echo "systemctl could not start $unit" >&2; exit 1; }
+    echo "started $unit"
+    ;;
+  *)
+    echo "relay start supports macOS (launchd) and Linux (systemd), not $(uname -s)" >&2
+    exit 1
+    ;;
+esac

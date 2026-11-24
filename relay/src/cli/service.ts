@@ -44,7 +44,7 @@ export const SERVICE_LABEL = 'com.relay.orchestrator'
 
 export type ServiceResult = { readonly report: string; readonly exitCode: number }
 
-/** The systemd user unit's name; `systemctl --user stop relay` finds it by this. */
+/** The systemd user unit's name; `relay stop` and `systemctl --user stop relay` find it by this. */
 export const SYSTEMD_UNIT = 'relay.service'
 
 export function servicePlistPath(home = homedir()): string {
@@ -414,7 +414,7 @@ export function runInstallService(
       'It starts at login and restarts on a FAILURE exit, which is what the daemon does after repeated Slack',
       'connectivity failures. A clean stop stays stopped, so this will not fight you when you want it down.',
       '',
-      'Stop it:      launchctl bootout ' + target + '/' + SERVICE_LABEL,
+      'Stop it:      relay stop (start it again with relay start)',
       'Remove it:    relay uninstall-service',
     ].join('\n'),
     exitCode: 0,
@@ -471,7 +471,7 @@ function installSystemdService(input: {
     report: [
       input.start
         ? `Installed and started ${SYSTEMD_UNIT} as a systemd user unit.`
-        : `Installed and enabled ${SYSTEMD_UNIT} as a systemd user unit. It starts at your next login; start it now with \`relay install-service --start\`.`,
+        : `Installed and enabled ${SYSTEMD_UNIT} as a systemd user unit. It starts at your next login; start it now with \`relay start\`.`,
       '',
       `  unit:  ${unitPath}`,
       `  log:   ${logPath}`,
@@ -480,7 +480,7 @@ function installSystemdService(input: {
       'A clean stop stays stopped, so this will not fight you when you want it down.',
       'It starts at login, not at boot: the daemon reads its secrets from the login keyring, which must be unlocked.',
       '',
-      `Stop it:      systemctl --user stop relay`,
+      'Stop it:      relay stop (start it again with relay start)',
       'Remove it:    relay uninstall-service',
     ].join('\n'),
     exitCode: 0,
