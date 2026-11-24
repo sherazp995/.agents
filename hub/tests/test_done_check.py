@@ -247,13 +247,25 @@ class DoneCheckTest(unittest.TestCase):
         self.assertNotIn('LESSONS:', reason)
 
     def test_the_autonomous_policy_appears_only_in_an_autonomous_run(self):
-        self.assertNotIn('autonomous run', self.edit_and_claim()['reason'])
+        plain = self.edit_and_claim()['reason']
+        self.assertNotIn('autonomous run', plain)
+        self.assertNotIn('keep the run directory', plain)
         self.transcript.unlink()
         shutil.rmtree(self.dir / 'state')
         with unittest.mock.patch.dict('os.environ', {'AGENTS_AUTONOMOUS_RUN': '/runs/r1'}):
             reason = self.edit_and_claim()['reason']
-        for words in ('autonomous run', 'fix only findings this change introduced', '/runs/r1/report.md'):
+        for words in ('autonomous run', 'fix only findings this change introduced', '/runs/r1/report.md',
+                      'delete only temp files: keep the run directory /runs/r1 and its deliverables'):
             self.assertIn(words, reason)
+
+    def test_a_pass_runs_storage_cleanup_first_and_its_line_sits_above_the_done_check_line(self):
+        reason = self.edit_and_claim()['reason']
+        self.assertIn('Only when you will end with PASS: first follow the storage-cleanup skill', reason)
+        self.assertIn('end-of-task mode', reason)
+        self.assertIn('just above the DONE-CHECK line', reason)
+        self.assertIn('Ending with OPEN skips it', reason)
+        # The cleanup step comes before the closing instruction, which stays the last thing the agent reads.
+        self.assertLess(reason.index('storage-cleanup'), reason.index('End your final message with exactly one line'))
 
     def test_the_chat_that_owns_a_here_run_gets_the_policy(self):
         runs = self.dir / 'runs'

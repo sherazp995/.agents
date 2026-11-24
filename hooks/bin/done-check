@@ -26,6 +26,11 @@ line. In an autonomous run (AGENTS_AUTONOMOUS_RUN names its directory, or the se
 run), the instructions add that run's disposition policy (fix only introduced, in-scope findings; record
 the rest in its report.md; the user's mid-run messages are follow-ups, not requests).
 
+A turn that will end with PASS first runs the storage-cleanup skill in its end-of-task mode (its own
+temp files, deliverables sent to Slack first, its pushed worktrees) and writes that in one line just
+above the DONE-CHECK line, which stays last. OPEN skips it, so the open work keeps its files. In an
+autonomous run only temp files go; the run directory and its deliverables stay.
+
 State lives in tmp/done-check/ of this hub (git-ignored).
 """
 import hashlib
@@ -308,6 +313,8 @@ def check_instructions(turn, root, committed_head, session_id=None):
         lessons_report = lessons_fix = ''
     run_dir = autonomous_run(session_id)
     policy = autonomous_policy(run_dir) if run_dir else ''
+    keep_run = (f' In this autonomous run delete only temp files: keep the run directory {run_dir} and its deliverables.'
+                if run_dir else '')
     return f'''DONE-CHECK: this task looks finished. Before it counts as done, verify it once with a fresh checker.
 
 Start one fresh subagent (Claude Code: the Agent tool, general-purpose; Codex: a new subagent, or if you have none, redo the check yourself from scratch). Give it only:
@@ -325,6 +332,8 @@ The checker is read-only and reports:
 - MEMORY: run `agents-hub memory show --cwd {root}` and read only the memories whose one-line hook touches this request or change; each one that applies, FOLLOWED or BROKEN with file:line evidence.{lessons_report}
 
 Then fix every MISSING item, every real correctness finding, every RULES finding (add the missing check and run it, or name the reading taken) and every BROKEN memory, rerun the affected checks, and keep the commit rules (amend when git-guard says so).{lessons_fix} If a fix needs the user's decision, do not guess: end with OPEN and name it.{policy}
+
+Only when you will end with PASS: first follow the storage-cleanup skill (~/.agents/skills/storage-cleanup/SKILL.md) in its end-of-task mode, and write its one-line result just above the DONE-CHECK line. Ending with OPEN skips it, so the open work keeps its files.{keep_run}
 End your final message with exactly one line:
 DONE-CHECK: PASS
 or

@@ -1,6 +1,6 @@
 ---
 name: storage-cleanup
-description: "Use when the disk is full or nearly full, or when the user asks agents to clean up after finishing their work. Deletes only what this session created: temp files freely, deliverables after a Slack backup, worktrees once pushed. Never destructive."
+description: "Use when the disk is full or nearly full, at the end of every finished task (the done check sends you here before DONE-CHECK: PASS), or when the user asks agents to clean up after their work. Deletes only what this session created: temp files freely, deliverables after a Slack backup, worktrees once pushed. Never destructive."
 ---
 
 <!-- agents-hub:learned-skill -->
@@ -12,6 +12,20 @@ came from a correction or preference the user gave in a past session.
 
 Clean up only what your own session created. You need no approval for these
 steps, and nothing here may destroy work.
+
+## Two modes
+
+- **End-of-task mode:** the done check sends you here when a task will end
+  with `DONE-CHECK: PASS`. Run steps 2 to 5 only, skip anything already
+  clean, and report in one line just above the `DONE-CHECK:` line (for
+  example "Cleanup: deleted 3 temp folders, sent the QA video to Slack, kept
+  worktree X (unpushed)", or "Cleanup: nothing to clean"). Never clean up
+  when ending with OPEN: the open work still needs its files. In an
+  autonomous run delete temp files only and keep the run directory and its
+  deliverables. In a Relay team member session leave deliverables to the
+  lead, since team members may not run relay commands.
+- **Full mode:** the disk is full or nearly full, or the user asks. Run every
+  step below.
 
 ## Steps
 
