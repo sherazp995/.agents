@@ -217,7 +217,10 @@ def reminder(safe):
     return ('These worktrees you created are clean and their commits are on the remote:\n'
             f'{lines}\n'
             'If you and the user are done with one, remove it with its command; the branch stays. '
-            'If it may still be needed, keep it and say why in one line. Then finish.')
+            'If it may still be needed, keep it and say why in one line. '
+            'Follow the storage-cleanup skill while you do (~/.agents/skills/storage-cleanup/SKILL.md): '
+            'also delete the temp files this session created, after sending any deliverable to Slack that is not there yet. '
+            'Then finish.')
 
 
 def verdict(event):

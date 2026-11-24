@@ -97,6 +97,7 @@ class WorktreeCleanupTest(unittest.TestCase):
         self.assertEqual(first['decision'], 'deny')
         self.assertIn(f'`cd {self.repo} && git worktree remove {path}`', first['reason'])
         self.assertIn('branch `feat`', first['reason'])
+        self.assertIn('storage-cleanup skill', first['reason'])
         self.assertIsNone(self.stop())  # reminded once per session
 
     def test_uncommitted_untracked_or_ignored_keepers_are_never_named(self):
