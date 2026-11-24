@@ -8,6 +8,8 @@ describe('WORKER_BRIEF', () => {
     expect(WORKER_BRIEF).toContain('Answer new messages yourself, straight away, without waiting for the subagent.')
     expect(WORKER_BRIEF).toContain("When a subagent's notification arrives, check its result and write the answer as your reply.")
     expect(WORKER_BRIEF).toContain('A background command must end by itself')
+    expect(WORKER_BRIEF).toContain('no Monitor or background watch loop that waits for work to finish')
+    expect(WORKER_BRIEF).toContain('Start long work detached, post the reply, end the turn')
     expect(WORKER_BRIEF).toContain('On Codex, messages reach you only after your turn ends')
   })
 

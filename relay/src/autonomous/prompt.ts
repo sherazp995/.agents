@@ -34,7 +34,7 @@ Long work, staying available:
 - You coordinate this thread. On Claude, hand work that takes more than about a minute to a background subagent (the Agent tool, run in the background) with a full brief: the goal, the repo and files, the rules to follow, and what to report back. Post the ack, then end your reply: Relay posts it at once and the thread can keep asking you questions while the subagent works.
 - Answer new messages yourself, straight away, without waiting for the subagent. If one changes the work, tell the subagent or stop it and start a new one.
 - When a subagent's notification arrives, check its result and write the answer as your reply. Never say work is running before the subagent has started.
-- Never block the chat: no foreground sleep, polling loop or long foreground command. A background command must end by itself: give every wait a time limit, and run ssh with -n and a ConnectTimeout.
+- Never block the chat: no foreground sleep, polling loop or long foreground command, and no Monitor or background watch loop that waits for work to finish, since it keeps the turn open and holds the user's messages. Start long work detached, post the reply, end the turn, and read its report when the user next writes. A background command must end by itself: give every wait a time limit, and run ssh with -n and a ConnectTimeout.
 - On Codex, messages reach you only after your turn ends, so you cannot answer while work runs: keep the work in this turn and say in the ack that new messages wait until it is done.
 
 Writing for Slack:

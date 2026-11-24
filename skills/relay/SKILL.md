@@ -49,4 +49,6 @@ A request that came over Slack is answered over Slack, every time, with no excep
 
 When the DM is attached, a reply in its thread comes back to this chat while it is open: relay's courier sends it in as a message, with the `relay live say` command to answer in the thread. Answer there, briefly, in the same Slack style.
 
+Don't wait on commands while running through Slack, it blocks the user's messages. That includes background watch loops and Monitor: start long work detached, reply, end the turn, and check its report when the user next writes.
+
 Once this chat has closed, a reply becomes that thread's autonomous task. The task reads the whole thread first, so the message itself should still make sense on its own.
