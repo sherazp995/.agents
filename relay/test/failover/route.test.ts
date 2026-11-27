@@ -8,7 +8,7 @@ import { applyMigrations, newestMigrationName } from '../../src/db/migrate.js'
 import { closePool, connectListenConnection, createPool } from '../../src/db/pool.js'
 import { recordButtonMessage, recordThreadOwner } from '../../src/failover/inbound.js'
 import { claimLease, publishReminderChannels, registerHost } from '../../src/failover/lease.js'
-import { InboundRouter, offlineText, queuedText, routeNoteOf, withoutLaptopName, type ReceivedEnvelope } from '../../src/failover/route.js'
+import { InboundRouter, namedLaptop, offlineText, queuedText, routeNoteOf, withoutLaptopName, type ReceivedEnvelope } from '../../src/failover/route.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { getTestDatabaseUrl } from '../support/database.js'
@@ -141,6 +141,41 @@ describe('failover routing', () => {
     await z.router.drain()
     expect(z.handled.map(eventText)).toEqual([`<@${BOT}> hi`])
     expect(routeNoteOf(z.handled[0] ?? {})?.guestHost).toBeUndefined()
+  })
+
+  it('in a DM, sends a message whose first word is a laptop name to that laptop, without the name', async () => {
+    const h = laptop(hassan)
+    const z = laptop(zubair)
+    await claimLease(pool, hassan)
+    const dm = (text: string) => {
+      const body = mention(text, { type: 'message' })
+      ;(body.event as Record<string, unknown>).channel = 'D1'
+      ;(body.event as Record<string, unknown>).channel_type = 'im'
+      return body
+    }
+    await receive(h, dm(`${zubair}\n! git status`))
+    await receive(h, dm(`<@${BOT}> ${zubair} hi`))
+    await z.router.drain()
+    expect(z.handled.map(eventText).sort()).toEqual(['! git status', `<@${BOT}> hi`].sort())
+    // A DM that does not start with a laptop name stays with the default laptop.
+    await receive(h, dm(`! git status`))
+    expect(h.handled.map(eventText)).toEqual(['! git status'])
+  })
+
+  it('reads a laptop name followed by a comma or colon, and drops it with the name', () => {
+    expect(namedLaptop(`<@${BOT}> ${zubair}, status`, BOT, [hassan, zubair])).toBe(zubair)
+    expect(withoutLaptopName(`<@${BOT}> ${zubair}: git status`, BOT, zubair)).toBe(`<@${BOT}> git status`)
+    expect(withoutLaptopName(`${zubair}, stop`, BOT, zubair, true)).toBe('stop')
+  })
+
+  it('outside a DM, a laptop name counts only after the mention', async () => {
+    const h = laptop(hassan)
+    const z = laptop(zubair)
+    await claimLease(pool, hassan)
+    await receive(h, mention(`${zubair}\n! git status`, { type: 'message' }))
+    await z.router.drain()
+    expect(z.handled).toHaveLength(0)
+    expect(h.handled.map(eventText)).toEqual([`${zubair}\n! git status`])
   })
 
   it('reads a laptop name in any case', async () => {

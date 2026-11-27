@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import type { z } from 'zod'
 import { ConfigError } from './errors.js'
@@ -30,7 +31,7 @@ function deepFreeze<T>(value: T): T {
  * and reading `z.infer` off it gives the post-parse shape the caller
  * actually gets at runtime.
  */
-function loadValidated<S extends z.ZodTypeAny>(filePath: string, schema: S): z.infer<S> {
+function readYaml(filePath: string): unknown {
   let raw: string
   try {
     raw = readFileSync(filePath, 'utf8')
@@ -50,7 +51,10 @@ function loadValidated<S extends z.ZodTypeAny>(filePath: string, schema: S): z.i
     const firstLine = (error as Error).message.split('\n')[0]
     throw new ConfigError(filePath, `YAML could not be parsed: ${firstLine}`)
   }
+  return parsed
+}
 
+function validated<S extends z.ZodTypeAny>(filePath: string, parsed: unknown, schema: S): z.infer<S> {
   const result = schema.safeParse(parsed)
   if (!result.success) {
     const detail = result.error.issues
@@ -61,6 +65,33 @@ function loadValidated<S extends z.ZodTypeAny>(filePath: string, schema: S): z.i
   return deepFreeze(result.data)
 }
 
+function loadValidated<S extends z.ZodTypeAny>(filePath: string, schema: S): z.infer<S> {
+  return validated(filePath, readYaml(filePath), schema)
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** `over` laid on `base`: objects merge key by key, anything else (a list, a value) replaces. */
+function overlay(base: unknown, over: unknown): unknown {
+  if (!isPlainObject(base) || !isPlainObject(over)) return over
+  const merged: Record<string, unknown> = { ...base }
+  for (const [key, value] of Object.entries(over)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
+    merged[key] = Object.hasOwn(base, key) ? overlay(base[key], value) : value
+  }
+  return merged
+}
+
+/**
+ * The laptop's own settings beside the shared config: `relay.local.yaml` in
+ * the same folder, kept out of git, so a laptop's name and role never
+ * conflict on an update. Absent is fine.
+ */
+export function localConfigPath(configPath: string): string {
+  return join(dirname(configPath), 'relay.local.yaml')
+}
+
 /** Loads and validates policy. Throws ConfigError rather than returning a partial value. */
 export function loadPolicy(filePath: string): Policy {
   return loadValidated(filePath, policySchema)
@@ -68,7 +99,16 @@ export function loadPolicy(filePath: string): Policy {
 
 /** Loads and validates runtime configuration. Throws ConfigError rather than returning a partial value. */
 export function loadRelayConfig(filePath: string): RelayConfig {
-  return loadValidated(filePath, relayConfigSchema)
+  const localPath = localConfigPath(filePath)
+  const shared = readYaml(filePath)
+  const local = existsSync(localPath) ? readYaml(localPath) : undefined
+  if (local !== undefined && local !== null && !isPlainObject(local)) throw new ConfigError(localPath, 'must be a mapping of settings')
+  const merged = local === undefined || local === null ? shared : overlay(shared, local)
+  const failover = isPlainObject(merged) ? merged.failover : undefined
+  if (isPlainObject(failover) && failover.host === undefined) {
+    throw new ConfigError(localPath, 'failover is on but this laptop has no name: set failover.host (and failover.preferred: true on the preferred laptop) in this file')
+  }
+  return validated(local === undefined ? filePath : `${filePath} with ${localPath}`, merged, relayConfigSchema)
 }
 
 /**

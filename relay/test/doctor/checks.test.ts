@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { checkConfig, checkNodeVersion, checkPostgres, checkRedisReachable } from '../../src/doctor/checks.js'
+import { committedConfigPath } from '../support/committed-config.js'
 
 describe('checkNodeVersion', () => {
   it('passes on Node 22', () => {
@@ -26,13 +27,13 @@ describe('checkConfig', () => {
 
   it('reports failed with the reason when policy is invalid, rather than throwing', () => {
     const policy = writeTemp('policy.yaml', 'version: 1\ndefaults:\n  unmatched: ask\nhard_blocked_origins: []\n')
-    const result = checkConfig('config/relay.config.yaml', policy)
+    const result = checkConfig(committedConfigPath(), policy)
     expect(result.status).toBe('failed')
     expect(result.detail).toMatch(/hard_blocked_origins/)
   })
 
   it('passes on the committed configuration', () => {
-    expect(checkConfig('config/relay.config.yaml', 'config/policy.yaml').status).toBe('ok')
+    expect(checkConfig(committedConfigPath(), 'config/policy.yaml').status).toBe('ok')
   })
 })
 

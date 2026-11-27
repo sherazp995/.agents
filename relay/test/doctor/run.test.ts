@@ -11,10 +11,11 @@ import type { Check, CheckContext } from '../../src/doctor/registry.js'
 // registry test below depends on this import having happened, exactly as the
 // CLI does.
 import { formatResults, readOncePerRun, runDoctor } from '../../src/doctor/run.js'
+import { committedConfigPath } from '../support/committed-config.js'
 import type { SecretProvider } from '../../src/secrets/provider.js'
 import { registerSecretValue, resetSecretScrubberForTests } from '../../src/secrets/scrubber.js'
 
-const REAL_CONFIG_PATH = 'config/relay.config.yaml'
+const REAL_CONFIG_PATH = committedConfigPath()
 const REAL_POLICY_PATH = 'config/policy.yaml'
 
 describe('formatResults', () => {

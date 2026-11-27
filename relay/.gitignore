@@ -14,6 +14,10 @@ config/profiles.yaml
 # not part of Relay. The
 # tracked template is config/repos.example.yaml.
 config/repos.yaml
+
+# One laptop's own settings (its failover name and role), laid over
+# config/relay.config.yaml; README "Failover".
+config/relay.local.yaml
 /run/
 # relay install-service builds the macOS relay-secrets helper here; the PATH
 # wrapper and the update, start, stop and restart scripts beside it are tracked.

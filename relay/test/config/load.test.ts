@@ -313,3 +313,55 @@ describe('loadRelayConfig', () => {
     }).toThrow(TypeError)
   })
 })
+
+describe('loadRelayConfig with relay.local.yaml', () => {
+  const SHARED = `
+model_provider:
+  name: anthropic
+  zero_data_retention: true
+database:
+  url: keystore:relay-database-url
+redis:
+  url: redis://localhost:6379/13
+logging:
+  level: info
+secrets:
+  provider: keychain
+failover: {}
+`
+  const NAMED = `failover:\n  host: zubair-mbp\n  preferred: false\nlogging:\n  level: debug\n`
+
+  it("lays this laptop's own file over the shared one, key by key", () => {
+    const path = writeTemp('relay.config.yaml', SHARED)
+    writeFileSync(join(path, '..', 'relay.local.yaml'), NAMED, 'utf8')
+    const config = loadRelayConfig(path)
+    expect(config.failover).toEqual({ host: 'zubair-mbp', preferred: false })
+    expect(config.logging.level).toBe('debug')
+    expect(config.redis.url).toBe('redis://localhost:6379/13')
+  })
+
+  it('refuses failover on without a laptop name, naming the local file to write', () => {
+    const path = writeTemp('relay.config.yaml', SHARED)
+    expect(() => loadRelayConfig(path)).toThrow(ConfigError)
+    expect(() => loadRelayConfig(path)).toThrow(/relay\.local\.yaml/)
+  })
+
+  it('needs no local file when failover is off', () => {
+    const path = writeTemp('relay.config.yaml', SHARED.replace('failover: {}\n', ''))
+    expect(loadRelayConfig(path).failover).toBeUndefined()
+  })
+
+  it('ignores a __proto__ key in the local file', () => {
+    const path = writeTemp('relay.config.yaml', SHARED)
+    writeFileSync(join(path, '..', 'relay.local.yaml'), `${NAMED}__proto__:\n  polluted: true\n`, 'utf8')
+    const config = loadRelayConfig(path)
+    expect(config.failover?.host).toBe('zubair-mbp')
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  })
+
+  it('still rejects an unknown key that arrives through the local file', () => {
+    const path = writeTemp('relay.config.yaml', SHARED)
+    writeFileSync(join(path, '..', 'relay.local.yaml'), `${NAMED}typo_key: 1\n`, 'utf8')
+    expect(() => loadRelayConfig(path)).toThrow(/typo_key/)
+  })
+})

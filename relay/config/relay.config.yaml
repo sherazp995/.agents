@@ -39,9 +39,10 @@ slack:
 #   host: hassan-mbp
 #   preferred: true
 
-failover:
-  host: hassan-mbp
-  preferred: true
+# On for both laptops. Each laptop names itself (failover.host, and
+# failover.preferred: true on the preferred one) in its own
+# config/relay.local.yaml, which git ignores, so updates never conflict.
+failover: {}
 
 # relay claude / relay codex: whose DM gets a terminal chat thread when its folder has no project channel.
 launcher:

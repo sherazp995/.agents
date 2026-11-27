@@ -1,6 +1,7 @@
+import { existsSync } from 'node:fs'
 import { ConfigError } from '../config/errors.js'
 import { resolveRelayHome } from '../config/paths.js'
-import { loadPolicy, loadRelayConfig } from '../config/load.js'
+import { localConfigPath, loadPolicy, loadRelayConfig } from '../config/load.js'
 import { databasePasswordInConfig, resolveOperatorDatabaseUrl } from '../config/database-url.js'
 import {
   APPROVAL_RECEIPT_KEY_SECRET,
@@ -59,7 +60,9 @@ export function checkConfigDetailed(
   try {
     const config = loadRelayConfig(configPath)
     const policy = loadPolicy(policyPath)
-    return { result: { name: 'config', status: 'ok', detail: `${configPath}, ${policyPath}` }, config, policy }
+    const localPath = localConfigPath(configPath)
+    const files = existsSync(localPath) ? `${configPath}, ${localPath}, ${policyPath}` : `${configPath}, ${policyPath}`
+    return { result: { name: 'config', status: 'ok', detail: files }, config, policy }
   } catch (error) {
     if (error instanceof ConfigError) {
       return {

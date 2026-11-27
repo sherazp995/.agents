@@ -316,7 +316,10 @@ How it behaves:
 - `@relay <laptop> ...` (for example `@relay zubair-mbp check the build`)
   goes to that laptop, whichever one Slack handed it to. The laptop's name
   is taken out, so the request is what follows it. When that laptop is
-  offline, Relay replies "`<laptop>` is offline right now".
+  offline, Relay replies "`<laptop>` is offline right now". In a DM with
+  Relay the name may also start the message with no mention: `zubair-mbp`,
+  then `! git status` on the next line, runs on zubair-mbp. Outside a DM a
+  name counts only right after the mention.
 - A plain `@relay ...` goes to the default laptop. The default is the laptop
   holding a record in the database that it renews every 15 seconds. One
   laptop is preferred (Hassan's): when it is back, it becomes the default
@@ -448,7 +451,11 @@ prints each table and its row count, never a password. Reading the URL from
 the paste prompt keeps its password out of your shell history; `relay db
 move <url>` also works.
 
-Then add this to `config/relay.config.yaml` and start the daemon again:
+Then name this laptop in `config/relay.local.yaml` and start the daemon
+again. That file holds only this laptop's settings and is kept out of git,
+so updates never conflict with it. Any key in it overrides the same key in
+the shared `config/relay.config.yaml`, which turns failover on for both
+laptops with `failover: {}`:
 
 ```yaml
 failover:
@@ -491,14 +498,19 @@ relay doctor          # failover: hassan-mbp answers, renewed 3s ago ...
    ```
 
 4. In its `config/relay.config.yaml`, make sure `database.url` is
-   `keystore:relay-database-url`, delete any `database.operator_url` line,
-   and add:
+   `keystore:relay-database-url` and there is no `database.operator_url`
+   line. Then name the laptop in its own `config/relay.local.yaml` (kept out
+   of git; Relay refuses to start with failover on and no name):
 
    ```yaml
    failover:
      host: second-mbp
      preferred: false
    ```
+
+   A laptop that had its name in `config/relay.config.yaml` before this file
+   existed drops that edit with `git checkout -- config/relay.config.yaml`
+   before pulling, then writes its `relay.local.yaml`.
 
 5. Clone the repositories Relay works in at the same place under your home
    folder as on Hassan's laptop (`~/Documents/project` on one is

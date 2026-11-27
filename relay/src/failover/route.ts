@@ -84,10 +84,28 @@ const str = (value: unknown): string | undefined => (typeof value === 'string' &
 const obj = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
 
-/** The word after a leading mention of the bot, when it is a laptop's name. */
-export function namedLaptop(text: string, botUserId: string, laptops: readonly string[]): string | undefined {
-  const match = new RegExp(`^\\s*<@${botUserId}(?:\\|[^>]*)?>\\s+([A-Za-z0-9._-]+)`).exec(text)
-  const word = match?.[1]?.toLowerCase()
+/**
+ * How a message may start before the laptop's name: a mention of the bot,
+ * or in a DM (`dm`) also nothing, since a DM talks to Relay without one.
+ */
+function leadPattern(botUserId: string, dm: boolean): string {
+  const mention = `<@${botUserId}(?:\\|[^>]*)?>`
+  return dm ? `^(\\s*(?:${mention})?)\\s*` : `^(\\s*${mention})\\s+`
+}
+
+/** True for an event sent in a DM with Relay. */
+export function isDirectMessage(event: Record<string, unknown> | undefined): boolean {
+  return event?.channel_type === 'im'
+}
+
+/**
+ * The word after a leading mention of the bot, when it is a laptop's name.
+ * In a DM the name may also start the message: "zubair-mbp" then "! git status".
+ */
+export function namedLaptop(text: string, botUserId: string, laptops: readonly string[], dm = false): string | undefined {
+  // The name ends at the first other character, so "@relay zubair-mbp, status" names it too.
+  const match = new RegExp(`${leadPattern(botUserId, dm)}([A-Za-z0-9._-]+)`).exec(text)
+  const word = match?.[2]?.toLowerCase()
   // Case does not matter: "@relay Zubair-MBP" names zubair-mbp.
   return word === undefined ? undefined : laptops.find((laptop) => laptop.toLowerCase() === word)
 }
@@ -97,11 +115,13 @@ export function namedLaptop(text: string, botUserId: string, laptops: readonly s
  * came after it. "@relay zubair-mbp stop" becomes plain "stop" (and the same
  * for "relay end"), so it stops that laptop's turn the way a plain stop does.
  */
-export function withoutLaptopName(text: string, botUserId: string, name: string): string {
-  const stripped = text.replace(new RegExp(`^(\\s*<@${botUserId}(?:\\|[^>]*)?>)\\s+${name.replace(/[.]/g, '\\.')}(?=\\s|$)`, 'i'), '$1')
+export function withoutLaptopName(text: string, botUserId: string, name: string, dm = false): string {
+  const stripped = text.replace(new RegExp(`${leadPattern(botUserId, dm)}${name.replace(/[.]/g, '\\.')}[,:]?(?=\\s|$)`, 'i'), '$1')
   if (stripped === text) return text
   const rest = stripped.replace(new RegExp(`^\\s*<@${botUserId}(?:\\|[^>]*)?>\\s*`), '')
-  return ['stop', 'relay end'].includes(rest.trim().toLowerCase()) ? rest.trim() : stripped
+  if (['stop', 'relay end'].includes(rest.trim().toLowerCase())) return rest.trim()
+  // A DM without a mention keeps only what came after the name.
+  return stripped.trim() === rest.trim() ? rest.trimStart() : stripped
 }
 
 export function offlineText(name: string): string {
@@ -293,7 +313,7 @@ export class InboundRouter {
     const text = str(event.text) ?? ''
     const threadRef = composeThreadRef(channel, str(event.thread_ts) ?? ts)
     const laptops = (await pool.query<{ name: string }>('SELECT name FROM failover_hosts')).rows.map((row) => row.name)
-    const named = namedLaptop(text, binding.botUserId, laptops)
+    const named = namedLaptop(text, binding.botUserId, laptops, isDirectMessage(event))
     const owner = await threadOwner(pool, binding.workspaceId, threadRef)
     if (named !== undefined) {
       if (!isReady(named)) return { kind: 'offline', name: named }
@@ -571,8 +591,9 @@ function messageOf(body: Record<string, unknown>): { channel: string; ts: string
 }
 
 function namedLaptopIn(body: Record<string, unknown>, botUserId: string, host: string): string | undefined {
-  const text = str(obj(body.event)?.text)
-  return text !== undefined && namedLaptop(text, botUserId, [host]) === host ? host : undefined
+  const event = obj(body.event)
+  const text = str(event?.text)
+  return text !== undefined && namedLaptop(text, botUserId, [host], isDirectMessage(event)) === host ? host : undefined
 }
 
 /** The event body with "@relay <name>" turned into "@relay", so the prompt starts after the name. */
@@ -580,5 +601,5 @@ function stripName(body: Record<string, unknown>, botUserId: string, name: strin
   const event = obj(body.event)
   const text = str(event?.text)
   if (name === undefined || event === undefined || text === undefined) return body
-  return { ...body, event: { ...event, text: withoutLaptopName(text, botUserId, name) } }
+  return { ...body, event: { ...event, text: withoutLaptopName(text, botUserId, name, isDirectMessage(event)) } }
 }
