@@ -6,6 +6,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { applyMigrations, MIGRATION_LOCK_KEY, selectPendingMigrations } from '../../src/db/migrate.js'
 import { createLogger } from '../../src/obs/logger.js'
+import { readdirSync, copyFileSync } from 'node:fs'
+import { provisionPrincipal } from '../../src/tenancy/principals.js'
+import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { getTestDatabaseUrl } from '../support/database.js'
 import type { Pool } from 'pg'
 
@@ -377,4 +380,45 @@ describeDb('applyMigrations', () => {
       await pool.query('DROP FUNCTION IF EXISTS relay_test_block_one_bookkeeping_row()')
     }
   })
+
+  it('0034 gives existing threads the laptop their chat, reminder pin or last worker ran on', async () => {
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;')
+    const before = mkdtempSync(join(tmpdir(), 'relay-migrate-0033-'))
+    for (const name of readdirSync('src/db/migrations').filter((file) => file.endsWith('.sql') && file < '0034')) copyFileSync(join('src/db/migrations', name), join(before, name))
+    await applyMigrations(pool, before)
+    const workspaceId = await resolveWorkspaceId(pool, 'slack', 'T_backfill')
+    const principalId = await provisionPrincipal(pool, workspaceId, 'slack', 'U_backfill', 'R', ['owner'])
+    await pool.query("INSERT INTO failover_hosts (name, home, build_migration) VALUES ('hassan-mbp', '/Users/hassan', '0033'), ('zubair-mbp', '/Users/zubair', '0033')")
+    const session = async (thread: string, engineHost: string | null): Promise<string> =>
+      (await pool.query<{ id: string }>("INSERT INTO sessions (workspace_id, principal_id, adapter, thread_ref, engine_host) VALUES ($1, $2, 'slack', $3, $4) RETURNING id", [workspaceId, principalId, thread, engineHost])).rows[0]!.id
+    await session('C1:1.1', 'zubair-mbp')
+    const pinned = await session('C1:2.2', null)
+    const worked = await session('C1:3.3', null)
+    await session('C1:4.4', 'gone-mbp')
+    await pool.query("INSERT INTO autonomous_tasks (workspace_id, session_id, requester_principal_id, pinned_host, worker_host) VALUES ($1, $2, $3, 'hassan-mbp', 'zubair-mbp')", [workspaceId, pinned, principalId])
+    await pool.query("INSERT INTO autonomous_tasks (workspace_id, session_id, requester_principal_id, worker_host) VALUES ($1, $2, $3, 'zubair-mbp')", [workspaceId, worked, principalId])
+
+    await applyMigrations(pool, 'src/db/migrations')
+
+    const { rows } = await pool.query<{ thread_ref: string; host: string }>('SELECT thread_ref, host FROM thread_hosts ORDER BY thread_ref')
+    expect(rows).toEqual([
+      { thread_ref: 'C1:1.1', host: 'zubair-mbp' },
+      { thread_ref: 'C1:2.2', host: 'hassan-mbp' },
+      { thread_ref: 'C1:3.3', host: 'zubair-mbp' },
+    ])
+  })
+
+  it('0034 keeps one active session per thread and per guest laptop', async () => {
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;')
+    await applyMigrations(pool, 'src/db/migrations')
+    const workspaceId = await resolveWorkspaceId(pool, 'slack', 'T_guest')
+    const principalId = await provisionPrincipal(pool, workspaceId, 'slack', 'U_guest', 'R', ['owner'])
+    const insert = (guest: string | null) =>
+      pool.query("INSERT INTO sessions (workspace_id, principal_id, adapter, thread_ref, guest_host) VALUES ($1, $2, 'slack', 'C1:9.9', $3)", [workspaceId, principalId, guest])
+    await insert(null)
+    await insert('zubair-mbp')
+    await expect(insert(null)).rejects.toThrow(/sessions_workspace_adapter_thread_active_key/)
+    await expect(insert('zubair-mbp')).rejects.toThrow(/sessions_workspace_adapter_thread_active_key/)
+  })
+
 })

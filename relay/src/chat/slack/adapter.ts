@@ -47,12 +47,14 @@ import {
 } from './shell-password.js'
 import type { ShellPasswordContext } from './shell-password.js'
 import type { ShellReplyPort } from '../../shell/types.js'
+import { routeNoteOf } from '../../failover/route.js'
 import { buildChatFiles, composeThreadRef, IGNORED_MESSAGE_SUBTYPES, RecentEventWindow } from './events.js'
 import { reminderActAs, type ReminderChannels } from './reminder.js'
 import type {
   DirectCommandRequest,
   SlackAdapterCreateOptions,
   SlackAdapterDeps,
+  AdapterFailover,
   SlackApiClient,
   SlackBlockActionEnvelope,
   SlackBoltApp,
@@ -177,8 +179,10 @@ export class SlackAdapter implements ChatAdapter {
   readonly #approvalContext: ApprovalInteractionContext
   readonly #sessionAttachContext: SessionAttachContext
   readonly #shellPasswordContext: ShellPasswordContext
+  readonly #failover: AdapterFailover | undefined
 
   #started = false
+  #connected = false
   #dispatch: ((event: ChatEvent) => Promise<void>) | undefined
   /**
    * The raw handler start() was given, kept alongside #dispatch (the queued
@@ -192,6 +196,9 @@ export class SlackAdapter implements ChatAdapter {
 
   private constructor(deps: SlackAdapterDeps) {
     this.#boltApp = deps.boltApp
+    this.#failover = deps.failover
+    // With failover on, every post with buttons and every popup is marked with this laptop, so the click comes back here.
+    if (deps.failover) deps = { ...deps, apiClient: markedForFailover(deps.apiClient, deps.failover, deps.log) }
     this.#apiClient = deps.apiClient
     this.#botUserId = deps.botUserId
     this.#workspaceId = deps.workspaceId
@@ -249,6 +256,13 @@ export class SlackAdapter implements ChatAdapter {
       )
     }
     const workspaceId = await resolveWorkspaceId('slack', identity.platformTeamId)
+    options.failover?.bind({
+      workspaceId,
+      botUserId: identity.botUserId,
+      post: async (channel, threadTs, text) => {
+        await apiClient.postMessage({ channel, thread: threadTs, text })
+      },
+    })
 
     return new SlackAdapter({
       boltApp,
@@ -273,6 +287,7 @@ export class SlackAdapter implements ChatAdapter {
         }),
       attachThreadToSession: options.attachThreadToSession ?? (async () => undefined),
       shellPassword: options.shellPassword,
+      failover: options.failover,
       sleep: options.sleep ?? defaultSleep,
       maxRateLimitRetries: options.maxRateLimitRetries ?? DEFAULT_MAX_RATE_LIMIT_RETRIES,
       log: options.log,
@@ -360,6 +375,7 @@ export class SlackAdapter implements ChatAdapter {
 
     await this.#boltApp.start()
     this.#started = true
+    this.#connected = true
   }
 
   /**
@@ -402,6 +418,18 @@ export class SlackAdapter implements ChatAdapter {
     await this.#apiClient.authTest()
   }
 
+  /**
+   * Failover (README, "Failover"): closes or reopens only the Socket Mode
+   * connection, so Slack sends everything to the other laptop while this one
+   * cannot reach the database. Handlers stay registered and posts keep going.
+   */
+  async setConnected(connected: boolean): Promise<void> {
+    if (!this.#started || connected === this.#connected) return
+    if (connected) await this.#boltApp.start()
+    else await this.#boltApp.stop()
+    this.#connected = connected
+  }
+
   async stop(): Promise<void> {
     if (!this.#started) return
     // Gate fix, Medium 1: awaits every inbound delivery already queued
@@ -423,8 +451,9 @@ export class SlackAdapter implements ChatAdapter {
     // still-pending handler is already reported by the orchestrator's own
     // bounded wait.
     await this.#settleDeliveryQueue(STOP_DELIVERY_SETTLE_TIMEOUT_MS)
-    await this.#boltApp.stop()
+    if (this.#connected) await this.#boltApp.stop()
     this.#started = false
+    this.#connected = false
     this.#dispatch = undefined
     this.#handler = undefined
   }
@@ -561,7 +590,7 @@ export class SlackAdapter implements ChatAdapter {
     // dropped prompt, indistinguishable from Relay ignoring someone.
     const reminderUser = reminderActAs(event, { channel, ts, botUserId: this.#botUserId, channels: this.#reminderChannels })
     if (reminderUser !== undefined) {
-      await this.#handleReminder(event, channel, ts, reminderUser)
+      await this.#handleReminder(event, channel, ts, reminderUser, envelope.body)
       return
     }
     if (this.#shouldIgnore(event)) return
@@ -579,7 +608,7 @@ export class SlackAdapter implements ChatAdapter {
     // good, with no error anywhere an operator could see. Leaving the key
     // unclaimed on failure means the retry is treated as a fresh envelope
     // and gets a real attempt.
-    const chatEvent = await this.#buildChatEvent(event, channel, ts)
+    const chatEvent = await this.#buildChatEvent(event, channel, ts, undefined, envelope.body)
 
     // Gate fix, Blocker 1: a Stop instruction bypasses #deliveryQueue
     // entirely rather than being queued behind whatever run is already in
@@ -604,7 +633,7 @@ export class SlackAdapter implements ChatAdapter {
       // resend and expect the same effect.
       const handler = this.#handler
       if (!handler) return
-      this.#recentEvents.add(dedupeKey)
+      if (!(await this.#claim(envelope.body, dedupeKey))) return
       await this.#deliver(handler, chatEvent)
       return
     }
@@ -619,7 +648,8 @@ export class SlackAdapter implements ChatAdapter {
     // there is nothing for a missing #handler to leave undelivered.
     const command = withoutBotMention(chatEvent.text, this.#botUserId)
     if (isSessionsCommand(command)) {
-      this.#recentEvents.add(dedupeKey)
+      if (!(await this.#claim(envelope.body, dedupeKey))) return
+      if (chatEvent.guestHost === undefined) await this.#failover?.ownThread(composeThreadRef(channel, chatEvent.ref.thread ?? ts))
       await handleSessionsCommand(this.#sessionAttachContext, chatEvent, typeof event.user === 'string' ? event.user : undefined)
       return
     }
@@ -628,8 +658,9 @@ export class SlackAdapter implements ChatAdapter {
     // an existing thread the same words are part of that thread's task.
     const directArguments = chatEvent.kind === 'message' ? directCommandArguments(command) : undefined
     if (directArguments !== undefined) {
-      this.#recentEvents.add(dedupeKey)
+      if (!(await this.#claim(envelope.body, dedupeKey))) return
       if (typeof event.user !== 'string') return
+      if (chatEvent.guestHost === undefined) await this.#failover?.ownThread(composeThreadRef(channel, ts))
       await this.#handleDirectCommand(chatEvent.ref.channel, ts, event.user, directArguments)
       return
     }
@@ -639,8 +670,7 @@ export class SlackAdapter implements ChatAdapter {
     // Normalization awaited above, so a concurrent envelope for the same
     // message may have claimed the key meanwhile: recheck and claim with no
     // await between them.
-    if (this.#recentEvents.has(dedupeKey)) return
-    this.#recentEvents.add(dedupeKey)
+    if (!(await this.#claim(envelope.body, dedupeKey))) return
     try {
       await dispatch(chatEvent)
     } catch {
@@ -658,17 +688,17 @@ export class SlackAdapter implements ChatAdapter {
    * "direct" are never read from a reminder: those paths have no read-only
    * limit. The dedupe and its recheck match the ordinary path below.
    */
-  async #handleReminder(event: SlackRawEvent, channel: string, ts: string, actAs: string): Promise<void> {
+  async #handleReminder(event: SlackRawEvent, channel: string, ts: string, actAs: string, body: Record<string, unknown>): Promise<void> {
     const dedupeKey = `${channel}:${ts}`
     if (this.#recentEvents.has(dedupeKey)) return
     if (!(await this.#isOwner(actAs))) {
       this.#log?.warn({ channel, platformUserId: actAs }, 'SlackAdapter: ignored a Slackbot reminder; slack.reminders names a user who is not an owner')
       return
     }
-    const chatEvent = await this.#buildChatEvent(event, channel, ts, actAs)
+    const chatEvent = await this.#buildChatEvent(event, channel, ts, actAs, body)
     const dispatch = this.#dispatch
-    if (!dispatch || this.#recentEvents.has(dedupeKey)) return
-    this.#recentEvents.add(dedupeKey)
+    if (!dispatch) return
+    if (!(await this.#claim(body, dedupeKey))) return
     try {
       await dispatch(chatEvent)
     } catch {
@@ -802,7 +832,26 @@ export class SlackAdapter implements ChatAdapter {
    * root instead of opening a thread. `sessionRefFor` in contract.ts is the
    * one place that turns this ref into "where the reply goes."
    */
-  async #buildChatEvent(event: SlackRawEvent, channel: string, ts: string, reminderActAs?: string): Promise<ChatEvent> {
+  /**
+   * Claims one message's `channel:ts` key: in memory, with no await between
+   * the check and the claim, then (with failover on) in the database, so the
+   * mention and its plain message copy run once even when each landed on a
+   * different laptop. A key the database refuses stays claimed in memory.
+   */
+  async #claim(body: Record<string, unknown>, dedupeKey: string): Promise<boolean> {
+    if (this.#recentEvents.has(dedupeKey)) return false
+    this.#recentEvents.add(dedupeKey)
+    if (!this.#failover) return true
+    try {
+      return await this.#failover.claimMessage(body, dedupeKey)
+    } catch (error) {
+      this.#recentEvents.delete(dedupeKey)
+      throw error
+    }
+  }
+
+  async #buildChatEvent(event: SlackRawEvent, channel: string, ts: string, reminderActAs?: string, body?: Record<string, unknown>): Promise<ChatEvent> {
+    const guestHost = body === undefined ? undefined : routeNoteOf(body)?.guestHost
     const threadTs = typeof event.thread_ts === 'string' ? event.thread_ts : undefined
     const isThreadReply = threadTs !== undefined && threadTs !== ts
     const kind: ChatEventKind = isThreadReply ? 'thread_reply' : 'message'
@@ -825,6 +874,7 @@ export class SlackAdapter implements ChatAdapter {
       mentionsBot: typeof event.text === 'string' && mentionsUser(event.text, this.#botUserId),
       platformEventId: `${channel}:${ts}`,
       ...(reminderActAs !== undefined ? { origin: 'reminder' as const } : {}),
+      ...(guestHost !== undefined ? { guestHost } : {}),
     }
   }
 
@@ -873,5 +923,46 @@ export class SlackAdapter implements ChatAdapter {
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
+  }
+}
+
+/**
+ * The API client with failover's marks: a post carrying buttons records this
+ * laptop as its poster, and a popup's hidden metadata names this laptop, so
+ * the other laptop passes the click or the submission here. A failed record
+ * is logged; the click then goes to the thread's owner.
+ */
+function markedForFailover(client: SlackApiClient, failover: AdapterFailover, log: Logger | undefined): SlackApiClient {
+  const hasButtons = (blocks: readonly Record<string, unknown>[] | undefined): boolean => (blocks ?? []).some((block) => block.type === 'actions')
+  return {
+    ...client,
+    async postMessage(args) {
+      const result = await client.postMessage(args)
+      if (hasButtons(args.blocks)) {
+        await failover.buttonsPosted(result.channel ?? args.channel, result.ts).catch((error: unknown) => log?.warn({ err: error }, 'SlackAdapter: could not record which laptop posted buttons'))
+      }
+      return result
+    },
+    async updateMessage(args) {
+      const result = await client.updateMessage(args)
+      if (hasButtons(args.blocks)) {
+        await failover.buttonsPosted(args.channel, args.ts).catch((error: unknown) => log?.warn({ err: error }, 'SlackAdapter: could not record which laptop posted buttons'))
+      }
+      return result
+    },
+    async openModal(args) {
+      await client.openModal({ ...args, view: withHost(args.view, failover.host) })
+    },
+  }
+}
+
+function withHost(view: Record<string, unknown>, host: string): Record<string, unknown> {
+  const raw = typeof view.private_metadata === 'string' ? view.private_metadata : '{}'
+  try {
+    const meta = JSON.parse(raw) as unknown
+    if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return view
+    return { ...view, private_metadata: JSON.stringify({ ...meta, relay_host: host }) }
+  } catch {
+    return view
   }
 }

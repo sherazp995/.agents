@@ -82,7 +82,7 @@ export const EGRESS_INVENTORY: readonly EgressDestination[] = [
       'With failover configured, two laptops share one Postgres (README, "Failover"), typically a cloud host the ' +
       'owner chose. It holds what Relay\'s local database holds today (people and roles, projects, personas, ' +
       'teams, tasks, approvals, the audit log, queued replies and their files) plus each Slack task thread\'s ' +
-      'saved Claude chat. Without failover, database.url points at the local Postgres and nothing leaves the machine.',
+      'saved Claude chat, and every Slack message, click and popup each laptop receives, kept until it is handled (a shell password sealed with the laptops\' shared key) and deleted 7 days after. Without failover, database.url points at the local Postgres and nothing leaves the machine.',
     hosts: [],
     requiresOperatorAcknowledgement: true,
     wiredInThisBuild: true,

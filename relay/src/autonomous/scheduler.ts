@@ -11,11 +11,11 @@
  * takeover procedure for startup and for an ordinary lease expiry), so two
  * workers never run for one task.
  *
- * Failover (README, "Failover"): a tick starts work only while this laptop
- * holds the "who is answering" record (`failover.mayStartWork()`); when it
- * does not, it starts nothing, while turns already running keep renewing
- * their leases and post their replies. `drain()` is the step
- * down's wait for them. A laptop signals and waits only on its own workers;
+ * Failover (README, "Failover"): both laptops tick. A tick takes a task only
+ * when it may run here (src/failover/ownership.ts: its thread's own laptop,
+ * or the default laptop when that one is not ready), checked inside the
+ * lease grab. `setPaused(true)` stops new turns while the other laptop
+ * migrates; running ones carry on. A laptop signals and waits only on its own workers;
  * a turn a gone laptop left mid-way is marked interrupted and its thread told
  * once (markInterruptedTasks).
  *
@@ -32,7 +32,9 @@ import { execFileSync } from 'node:child_process'
 import type { Pool, PoolClient } from 'pg'
 import type { ChatAction, ChatRef } from '../chat/contract.js'
 import type { Logger } from '../obs/logger.js'
+import { untilDatabaseAnswers } from '../db/offline.js'
 import { keepClaimRenewed } from '../failover/claim-renewal.js'
+import type { Placement } from '../failover/ownership.js'
 import { ALWAYS_ACTIVE, type FailoverGate } from '../failover/types.js'
 import { killProcessGroup, processGroupAlive } from '../process/gated-spawn.js'
 import { scrubSecrets } from '../secrets/scrubber.js'
@@ -57,6 +59,9 @@ import {
   requestCancel,
   updateTask,
   type AutonomousTask,
+  guestNote,
+  guestPlace,
+  guestReplyPrefix,
   type Lease,
   type PauseResult,
   type TaskUpdate,
@@ -154,8 +159,8 @@ export type Scheduler = {
   start(): Promise<void>
   /** Runs one pass now (the router calls it through wake()). */
   wake(): void
-  /** Starts nothing new from now on and resolves once every running turn has ended and posted. */
-  drain(): Promise<void>
+  /** Stops (true) or resumes (false) starting new turns, for the other laptop's migration; running turns carry on. */
+  setPaused(paused: boolean): Promise<void>
   /** Kills every running worker tree, then releases leases. */
   stop(): Promise<void>
   /** For tests: one pass, awaited. */
@@ -213,8 +218,9 @@ function looksLikeWorker(pgid: number): boolean {
 export async function stopAutonomousTask(pool: Pool, effects: Pick<SchedulerEffects, 'cleanupStopped'>, taskId: string, host: string | null = null): Promise<AutonomousTask | undefined> {
   const cancelled = await requestCancel(pool, taskId)
   if (!cancelled) return undefined
-  // Another laptop's worker is fenced by markTaskStopped's new generation: its own lease renewal fails and it kills its worker there.
+  // Another laptop's worker is fenced by markTaskStopped's new generation: its own lease renewal fails (now, or once it is back online) and it kills its worker there.
   if (cancelled.workerPgid !== null && isOwnWorker(cancelled.workerHost, host)) killProcessGroup(cancelled.workerPgid)
+  else if (cancelled.workerPgid !== null) await clearWorker(pool, taskId, cancelled.workerPgid, cancelled.workerHost)
   const stopped = await markTaskStopped(pool, taskId)
   if (stopped) await effects.cleanupStopped(stopped)
   return stopped
@@ -237,7 +243,9 @@ export async function pauseAutonomousTask(pool: Pool, effects: Pick<SchedulerEff
   if (existing.phase === 'stopped') return { kind: 'ended' }
   const cancelled = await requestCancel(pool, taskId)
   if (!cancelled) return { kind: 'missing' }
-  // Another laptop's worker is left to it: markTaskPaused's new generation fails its lease renewal, and it kills the worker there.
+  // Another laptop's worker is left to it: markTaskPaused's new generation fails its lease renewal (now, or once it is back online),
+  // and it kills the worker there. Its record is cleared here, so this thread can carry on on this laptop meanwhile.
+  if (cancelled.workerPgid !== null && !isOwnWorker(cancelled.workerHost, host)) await clearWorker(pool, taskId, cancelled.workerPgid, cancelled.workerHost)
   if (cancelled.workerPgid !== null && isOwnWorker(cancelled.workerHost, host)) {
     if (!(await killWorkerGroup(cancelled.workerPgid))) {
       await stopAutonomousTask(pool, effects, taskId, host)
@@ -256,8 +264,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   const running = new Map<string, { controller: AbortController; done: Promise<void> }>()
   let timer: NodeJS.Timeout | undefined
   let stopping = false
-  let draining = false
+  let paused = false
   let ticking: Promise<void> | undefined
+  const placement = (): Placement => ({ host: gate.host, isDefault: gate.isDefault() })
   // The env problem each thread was last told about, so a retry every 30 seconds does not repeat the note.
   const envNoted = new Map<string, string>()
 
@@ -289,21 +298,37 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       return
     }
-    if (draining) return
-    // Every pass that could start a turn asks first; without the record it starts nothing.
-    if (!(await gate.mayStartWork())) return
+    await sweepDeadWorkers()
+    // Paused for the other laptop's migration: running turns carry on, nothing new starts.
+    if (paused) return
     await markInterrupted()
     await deps.effects.sweep()
-    const due = await listDueWakeups(deps.pool, deps.workspaceId, gate.host)
+    const due = await listDueWakeups(deps.pool, deps.workspaceId, placement())
     for (const task of due) {
-      if (running.has(task.id) || stopping || draining) continue
+      if (running.has(task.id) || stopping || paused) continue
       const controller = new AbortController()
       const done = runStep(task.id, controller).catch((error: unknown) => {
         deps.log.error({ err: error, taskId: task.id }, 'autonomous step failed')
       })
       running.set(task.id, { controller, done: done.finally(() => running.delete(task.id)) })
     }
-    if (!stopping && !draining) await deps.team?.tick()
+    if (!stopping && !paused) await deps.team?.tick()
+  }
+
+  /**
+   * A turn that ends normally releases its lease but leaves its worker
+   * recorded, and only a restart used to clear it, so a long-running daemon
+   * piled up records of dead workers that held up migrations and failover
+   * forever. Each pass clears this laptop's records whose
+   * process group is gone and whose turn is not running here.
+   */
+  async function sweepDeadWorkers(): Promise<void> {
+    for (const task of await listTasksWithWorker(deps.pool, deps.workspaceId)) {
+      const pgid = task.workerPgid
+      if (pgid === null || running.has(task.id) || !isOwnWorker(task.workerHost, gate.host) || processGroupAlive(pgid)) continue
+      await clearWorker(deps.pool, task.id, pgid, task.workerHost)
+      deps.log.info({ taskId: task.id, pgid }, 'cleared the record of a worker that has exited')
+    }
   }
 
   /** Turns a gone laptop left mid-way: fenced, parked and their thread told, each once, in one transaction. */
@@ -319,19 +344,17 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   }
 
   async function runStep(taskId: string, controller: AbortController): Promise<void> {
-    const claimedAt = Date.now()
-    const lease = await acquireLease(deps.pool, taskId, deps.owner, ttlMs)
+    const lease = await acquireLease(deps.pool, taskId, deps.owner, ttlMs, placement())
     if (!lease) return
     let lost = false
     const stopRenewing = keepClaimRenewed({
       renew: () => renewLease(deps.pool, lease, ttlMs),
       ttlMs,
-      claimedAt,
       onLost: () => {
         lost = true
         controller.abort()
       },
-      onError: (error) => deps.log.warn({ err: error, taskId }, 'renewing a task claim failed; the turn continues until the claim expires'),
+      onError: (error) => deps.log.warn({ err: error, taskId }, 'renewing a task claim failed; the turn carries on and renewing resumes once the database answers'),
     })
     try {
       const task = await loadTask(deps.pool, taskId)
@@ -394,6 +417,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     const inbox: TurnInbox = { send: null }
     // Messages sent into the running turn, one write per entry: consumed by the first reply after the chat read them, or with the turn's last reply.
     const sent: SentIntoTurn = { events: [], files: [], writes: [] }
+    const place = gate.host === null ? undefined : await guestPlace(deps.pool, task.sessionId)
+    const notes = place === undefined ? task.pendingNotes : [guestNote(place), ...task.pendingNotes]
     const feeder = feedRunningTurn(task.id, lease, inbox, consumed, sent)
     const replies = postRepliesAsTheyCome(task, lease, { eventIds: consumed, notesRead, dueAt }, sent)
     let result: TurnResult
@@ -401,8 +426,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       result = await deps.effects.runTurn({
         task,
         lease,
-        prompt: buildTurnPrompt(task, task.pendingNotes),
-        freshPrompt: async () => buildTurnPrompt(task, task.pendingNotes, await deps.effects.threadHistory?.(task, firstPendingTs(task)) ?? null),
+        prompt: buildTurnPrompt(task, notes),
+        freshPrompt: async () => buildTurnPrompt(task, notes, await deps.effects.threadHistory?.(task, firstPendingTs(task)) ?? null),
         signal,
         recordWorker: (pid, pgid) => recordWorker(deps.pool, lease, pid, pgid, gate.host),
         inbox,
@@ -414,12 +439,23 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       await replies.settled()
     }
     if (isLost()) return
+    // The worker finished, maybe while the network was down: its writes wait for the database rather than lose the reply.
+    let waitLogged = false
+    const durably = <T>(write: () => Promise<T>): Promise<T> =>
+      untilDatabaseAnswers(write, {
+        giveUp: () => stopping || isLost(),
+        onWait: (error) => {
+          if (waitLogged) return
+          waitLogged = true
+          deps.log.warn({ err: error, taskId: task.id }, 'the turn finished but the database cannot be reached; its reply waits and is posted once it answers')
+        },
+      })
     // The turn's own messages and notes were consumed with the first reply posted; only messages sent in later are left.
     const handed = replies.consumedInput()
 
     if (result.kind === 'no_account') {
-      await post(task, result.reason)
-      await updateTask(deps.pool, lease, { nextWakeupAt: result.wakeAtMs === null ? null : new Date(result.wakeAtMs) })
+      await durably(() => post(task, result.reason))
+      await durably(() => updateTask(deps.pool, lease, { nextWakeupAt: result.wakeAtMs === null ? null : new Date(result.wakeAtMs) }))
       return
     }
     // Account fallbacks are relay's business, not the thread's.
@@ -429,29 +465,30 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     if (outcome.kind !== 'not_started' || outcome.envUnreadable === undefined) envNoted.delete(task.id)
     switch (outcome.kind) {
       case 'reply':
-        await finishTurn(task, lease, { eventIds: [...consumed, ...sent.events.map((event) => event.id)], notesRead: handed ? 0 : notesRead, dueAt }, { engineSessionId: outcome.sessionId, accountKey: result.accountKey }, [...replies.unposted(), outcome.text].filter((part) => part.trim() !== '').join('\n\n'), replies.lastPostId())
+        await durably(() => finishTurn(task, lease, { eventIds: [...consumed, ...sent.events.map((event) => event.id)], notesRead: handed ? 0 : notesRead, dueAt }, { engineSessionId: outcome.sessionId, accountKey: result.accountKey }, [...replies.unposted(), outcome.text].filter((part) => part.trim() !== '').join('\n\n'), replies.lastPostId()))
         return
       case 'resume_rejected':
         // The next turn starts a fresh session with the same pending events.
-        await updateTask(deps.pool, lease, { engineSessionId: null, nextWakeupAt: 'now' })
+        await durably(() => updateTask(deps.pool, lease, { engineSessionId: null, nextWakeupAt: 'now' }))
         return
       case 'not_started':
       case 'account_blocked':
         // A stored env that cannot be read: the thread hears it once, the messages stay pending, and the turn is retried.
         if (outcome.kind === 'not_started' && outcome.envUnreadable !== undefined && envNoted.get(task.id) !== outcome.envUnreadable) {
           envNoted.set(task.id, outcome.envUnreadable)
-          await post(task, envUnreadableNote(outcome.envUnreadable))
+          const note = envUnreadableNote(outcome.envUnreadable)
+          await durably(() => post(task, note))
         }
-        await updateTask(deps.pool, lease, { nextWakeupAt: new Date(Date.now() + RETRY_LATER_MS) })
+        await durably(() => updateTask(deps.pool, lease, { nextWakeupAt: new Date(Date.now() + RETRY_LATER_MS) }))
         return
       case 'stopped':
         // A reply the chat wrote before it was stopped, whose post failed, still reaches the thread, with the messages it answered.
-        await replies.flushUnposted()
+        await durably(() => replies.flushUnposted())
         return
       case 'failed':
         // The turn's own messages are dropped with the failure, so the next message starts clean instead of looping.
         // Messages sent into it mid-turn stay pending: the failed worker may never have read them.
-        await finishTurn(task, lease, { eventIds: consumed, notesRead, dueAt }, {}, `That turn failed: ${outcome.reason}`)
+        await durably(() => finishTurn(task, lease, { eventIds: consumed, notesRead, dueAt }, {}, `That turn failed: ${outcome.reason}`))
         return
     }
   }
@@ -524,6 +561,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    */
   async function finishTurn(task: AutonomousTask, lease: Lease, input: Parameters<typeof consumeTurnInput>[2], update: TaskUpdate, text: string, after?: string): Promise<string | undefined> {
     const ref = await deps.replyRef(task)
+    // A guest turn's first reply of the turn says whose thread this is (README, "Failover").
+    if (after === undefined && text.trim() !== '' && gate.host !== null) {
+      const place = await guestPlace(deps.pool, task.sessionId)
+      if (place !== undefined) text = `${guestReplyPrefix(place)}\n\n${text}`
+    }
     return inTransaction(deps.pool, async (client) => {
       if (Object.keys(update).length > 0 && !(await updateTask(client, lease, update))) return undefined
       if (!(await consumeTurnInput(client, lease, input))) return undefined
@@ -616,10 +658,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           ticking = undefined
         })
     },
-    async drain() {
-      draining = true
+    async setPaused(value) {
+      paused = value
       await ticking
-      await Promise.all([...running.values()].map((entry) => entry.done))
     },
     async stop() {
       stopping = true

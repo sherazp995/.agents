@@ -7,7 +7,7 @@
 import { App, defaultProcessEventErrorHandler, LogLevel, SocketModeReceiver } from '@slack/bolt'
 import { ErrorCode, WebClient } from '@slack/web-api'
 import { CONFIRM_MODAL_BLOCK_ID, CONFIRM_MODAL_CALLBACK_ID, EDIT_MODAL_BLOCK_ID, EDIT_MODAL_CALLBACK_ID } from '../../approvals/blockkit.js'
-import { ALWAYS_ACTIVE, type FailoverGate } from '../../failover/types.js'
+import { EnvelopeNotSavedError, type InboundRouter, type ProcessEnvelope, type ReceivedEnvelope } from '../../failover/route.js'
 import { SecretNotFoundError } from '../../secrets/provider.js'
 import type { SecretProvider } from '../../secrets/provider.js'
 import { TransportError } from '../outbox.js'
@@ -85,35 +85,28 @@ export function classifyTransportError(error: unknown): unknown {
 // Bolt's or WebClient's real types beyond this construction step.
 // ---------------------------------------------------------------------------
 
-/** Thrown in front of Bolt when this laptop no longer answers, so the event is neither processed nor acknowledged. */
-export class StaleClaimError extends Error {
-  constructor() {
-    super('this laptop no longer holds the failover record; Slack will resend the event to the laptop that does')
-    this.name = 'StaleClaimError'
-  }
-}
-
 /**
- * The Socket Mode receiver Relay's Bolt app runs on, with the failover check
- * in front of Bolt's event processing. Bolt acknowledges an Events API event
- * inside App.processEvent before any middleware runs, so a check in
- * middleware would be too late: the event would be acknowledged and lost.
- * Here a stale claim throws before processEvent, the error handler declines
- * to acknowledge, and Slack can resend the event. The failover runner alone
- * decides whether this laptop recovers or closes its connection.
+ * The Socket Mode receiver Relay's Bolt app runs on. With failover on, the
+ * router (src/failover/route.ts) sees every envelope before Bolt does: Bolt
+ * acknowledges an Events API event inside App.processEvent before any
+ * middleware runs, so this is the last place an envelope can still be saved
+ * before Slack is told it arrived. A save that fails throws
+ * EnvelopeNotSavedError, the error handler declines to acknowledge, and Slack
+ * sends the envelope again, to either laptop.
  */
-export function createGatedSocketModeReceiver(appToken: string, gate: FailoverGate): SocketModeReceiver {
+export function createGatedSocketModeReceiver(appToken: string, router?: InboundRouter): SocketModeReceiver {
   const receiver = new SocketModeReceiver({
     appToken,
     logLevel: LogLevel.INFO,
-    processEventErrorHandler: async (args) => (args.error instanceof StaleClaimError ? false : defaultProcessEventErrorHandler(args)),
+    processEventErrorHandler: async (args) => (args.error instanceof EnvelopeNotSavedError ? false : defaultProcessEventErrorHandler(args)),
   })
+  if (router === undefined) return receiver
   const init = receiver.init.bind(receiver)
   receiver.init = (app) => {
-    const processEvent = app.processEvent.bind(app)
+    const processEvent = app.processEvent.bind(app) as unknown as ProcessEnvelope
+    router.useProcessor(processEvent)
     app.processEvent = async (event) => {
-      if (!gate.holdsFresh()) throw new StaleClaimError()
-      await processEvent(event)
+      await router.handle(event as unknown as ReceivedEnvelope, processEvent)
     }
     init(app)
   }
@@ -141,9 +134,9 @@ export function viewFallbackErrors(callbackId: string): Record<string, string> {
   return { [blockId]: text }
 }
 
-export function createLiveSlackBoltApp(botToken: string, appToken: string, gate: FailoverGate = ALWAYS_ACTIVE): SlackBoltApp {
+export function createLiveSlackBoltApp(botToken: string, appToken: string, router?: InboundRouter): SlackBoltApp {
   // INFO pinned: at DEBUG, Bolt and its socket client print request bodies, a shell password popup's included.
-  const app = new App({ token: botToken, receiver: createGatedSocketModeReceiver(appToken, gate), logLevel: LogLevel.INFO })
+  const app = new App({ token: botToken, receiver: createGatedSocketModeReceiver(appToken, router), logLevel: LogLevel.INFO })
   return {
     event(eventType, listener) {
       app.event(eventType, async (args) => {

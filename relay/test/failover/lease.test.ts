@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Pool } from 'pg'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { applyMigrations, newestMigrationName } from '../../src/db/migrate.js'
-import { boundedLeaseDb, claimLease, otherHostsHaveRunningWorkers, raiseWantsBack, registerHost, releaseLease, renewLease } from '../../src/failover/lease.js'
+import { boundedLeaseDb, claimLease, liveHolder, otherHostsHaveRunningWorkers, othersPaused, pauseRequestedByOther, publishReminderChannels, raiseWantsBack, readyHosts, registerHost, releaseLease, reminderHost, renewLease, setPausedAt, setPauseRequest } from '../../src/failover/lease.js'
 import { randomUUID } from 'node:crypto'
 import { intakeMention } from '../../src/autonomous/store.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
@@ -74,7 +74,7 @@ describe('failover lease', () => {
 
     // The flag never takes the record from a holder.
     expect(await claimLease(pool, 'hassan')).toBeNull()
-    expect(await renewLease(pool, 'zubair', generation)).toMatchObject({ held: true, wantsBack: true, otherSeen: true })
+    expect(await renewLease(pool, 'zubair', generation)).toMatchObject({ held: true, wantsBack: true })
 
     expect(await releaseLease(pool, 'zubair', generation)).toBe(true)
     // Reserved for the preferred laptop: the one that just released cannot take it again.
@@ -114,4 +114,48 @@ describe('failover lease', () => {
     expect(await otherHostsHaveRunningWorkers(pool, 'hassan')).toBe(false)
     await pool.query('UPDATE autonomous_tasks SET worker_host = NULL, worker_pid = NULL, worker_pgid = NULL WHERE id = $1', [intake.task.id])
   })
+
+  it('counts a laptop ready only while it is seen and on the newest build', async () => {
+    expect(await readyHosts(pool)).toEqual(['hassan', 'zubair'])
+    await pool.query("UPDATE failover_hosts SET build_migration = '0001_old.sql' WHERE name = 'zubair'")
+    expect(await readyHosts(pool)).toEqual(['hassan'])
+    await pool.query("UPDATE failover_hosts SET last_seen_at = now() - interval '61 seconds' WHERE name = 'hassan'")
+    expect(await readyHosts(pool)).toEqual([])
+  })
+
+  it('names the live holder only until the record expires', async () => {
+    expect(await liveHolder(pool)).toBeNull()
+    await claimLease(pool, 'zubair')
+    expect(await liveHolder(pool)).toBe('zubair')
+    await expire()
+    expect(await liveHolder(pool)).toBeNull()
+  })
+
+  it('finds the seen laptop whose config lists a reminder channel', async () => {
+    await publishReminderChannels(pool, 'zubair', ['C_REM'])
+    expect(await reminderHost(pool, 'C_REM')).toBe('zubair')
+    expect(await reminderHost(pool, 'C_OTHER')).toBeNull()
+    await pool.query("UPDATE failover_hosts SET last_seen_at = now() - interval '61 seconds' WHERE name = 'zubair'")
+    expect(await reminderHost(pool, 'C_REM')).toBeNull()
+  })
+
+  it('a pause counts as acknowledged only once the other laptop paused after the request', async () => {
+    await setPausedAt(pool, 'zubair', true)
+    await setPauseRequest(pool, 'hassan', true)
+    expect(await pauseRequestedByOther(pool, 'zubair')).toBe(true)
+    expect(await pauseRequestedByOther(pool, 'hassan')).toBe(false)
+    // Paused before the request: not an answer to it.
+    await pool.query("UPDATE failover_hosts SET paused_at = now() - interval '1 minute' WHERE name = 'zubair'")
+    expect(await othersPaused(pool, 'hassan')).toBe(false)
+    await setPausedAt(pool, 'zubair', true)
+    expect(await othersPaused(pool, 'hassan')).toBe(true)
+    // A laptop gone quiet is not waited for.
+    await setPausedAt(pool, 'zubair', false)
+    expect(await othersPaused(pool, 'hassan')).toBe(false)
+    await pool.query("UPDATE failover_hosts SET last_seen_at = now() - interval '61 seconds' WHERE name = 'zubair'")
+    expect(await othersPaused(pool, 'hassan')).toBe(true)
+    await setPauseRequest(pool, 'hassan', false)
+    expect(await pauseRequestedByOther(pool, 'zubair')).toBe(false)
+  })
+
 })

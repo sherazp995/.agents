@@ -66,6 +66,8 @@ export type Session = {
   courierTarget: string | null
   /** The kind of chat engineSessionId names (0032_session_engine_kind.sql): a Codex id is never resumed with claude. */
   engineKind: EngineKind
+  /** The guest laptop for a guest turn's session (README, "Failover"); null for the thread's own session. */
+  guestHost: string | null
 }
 
 export type EngineKind = 'claude' | 'codex'
@@ -75,6 +77,8 @@ export type FindOrCreateSessionParams = {
   principalId: string
   adapter: string
   threadRef: string
+  /** Set for a guest turn: the laptop named in a thread another laptop owns (README, "Failover"). Omitted or null is the thread's own session. */
+  guestHost?: string | null
 }
 
 export type SessionRow = {
@@ -91,6 +95,7 @@ export type SessionRow = {
   mode: string
   courier_target?: string | null
   engine_kind?: string
+  guest_host?: string | null
 }
 
 export function toSession(row: SessionRow): Session {
@@ -108,6 +113,7 @@ export function toSession(row: SessionRow): Session {
     mode: toSessionMode(row.mode),
     courierTarget: row.courier_target ?? null,
     engineKind: row.engine_kind === 'codex' ? 'codex' : 'claude',
+    guestHost: row.guest_host ?? null,
   }
 }
 
@@ -130,11 +136,11 @@ export async function insertActiveSession(
   mode: SessionMode,
 ): Promise<Session | undefined> {
   const { rows } = await client.query<SessionRow>(
-    `INSERT INTO sessions (workspace_id, principal_id, adapter, thread_ref, mode)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (workspace_id, adapter, thread_ref) WHERE state = 'active' DO NOTHING
+    `INSERT INTO sessions (workspace_id, principal_id, adapter, thread_ref, mode, guest_host)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (workspace_id, adapter, thread_ref, (COALESCE(guest_host, ''))) WHERE state = 'active' DO NOTHING
      RETURNING *`,
-    [params.workspaceId, params.principalId, params.adapter, params.threadRef, mode],
+    [params.workspaceId, params.principalId, params.adapter, params.threadRef, mode, params.guestHost ?? null],
   )
   const row = rows[0]
   return row ? toSession(row) : undefined
@@ -213,9 +219,9 @@ export async function findOrCreateSession(
     const { rows } = await pool.query<SessionRow>(
       `UPDATE sessions
        SET last_active_at = now()
-       WHERE workspace_id = $1 AND adapter = $2 AND thread_ref = $3 AND state = 'active'
+       WHERE workspace_id = $1 AND adapter = $2 AND thread_ref = $3 AND state = 'active' AND COALESCE(guest_host, '') = COALESCE($4, '')
        RETURNING *`,
-      [workspaceId, adapter, threadRef],
+      [workspaceId, adapter, threadRef, params.guestHost ?? null],
     )
     const existingRow = rows[0]
     if (existingRow) return toSession(existingRow)
@@ -241,6 +247,8 @@ export type FindActiveSessionParams = {
   workspaceId: string
   adapter: string
   threadRef: string
+  /** The guest laptop's session instead of the thread's own; omitted or null is the thread's own. */
+  guestHost?: string | null
 }
 
 /**
@@ -256,8 +264,8 @@ export async function findActiveSession(
   params: FindActiveSessionParams,
 ): Promise<Session | null> {
   const { rows } = await pool.query<SessionRow>(
-    `SELECT * FROM sessions WHERE workspace_id = $1 AND adapter = $2 AND thread_ref = $3 AND state = 'active' LIMIT 1`,
-    [params.workspaceId, params.adapter, params.threadRef],
+    `SELECT * FROM sessions WHERE workspace_id = $1 AND adapter = $2 AND thread_ref = $3 AND state = 'active' AND COALESCE(guest_host, '') = COALESCE($4, '') LIMIT 1`,
+    [params.workspaceId, params.adapter, params.threadRef, params.guestHost ?? null],
   )
   const row = rows[0]
   return row ? toSession(row) : null

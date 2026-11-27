@@ -268,6 +268,8 @@ export type SlackAdapterOptions = {
    * jobs' password requests (src/shell/).
    */
   shellPassword?: ShellPasswordPort
+  /** Two laptops answering together (README, "Failover"); absent means this laptop handles everything it receives. */
+  failover?: AdapterFailover
   /** Overrides the declared capabilities. Production code should never need this; it exists for test doubles that must present a capability gap for runChatAdapterConformance's honesty check to exercise, see test/chat/slack/adapter.test.ts. */
   capabilities?: Partial<AdapterCapabilities>
   /** Overrides the wait between rate limited retries. Defaults to a real setTimeout; tests inject an instant resolver so adapter.test.ts never actually sleeps. */
@@ -275,6 +277,20 @@ export type SlackAdapterOptions = {
   maxRateLimitRetries?: number
   botTokenSecretName?: string
   appTokenSecretName?: string
+}
+
+/** What the adapter needs from failover routing (src/failover/route.ts). */
+export type AdapterFailover = {
+  /** This laptop's name: written into each popup's hidden metadata, so its submission comes back here. */
+  readonly host: string
+  /** Called once the adapter knows its workspace and bot user. */
+  bind(info: { workspaceId: string; botUserId: string; post: (channel: string, threadTs: string, text: string) => Promise<void> }): void
+  /** The shared duplicate check for one Slack message (`channel:ts`); false when another saved envelope already took it. */
+  claimMessage(body: Record<string, unknown>, messageKey: string): Promise<boolean>
+  /** Records that this laptop posted a message with buttons, so a click on it is passed here. */
+  buttonsPosted(channel: string, ts: string): Promise<void>
+  /** Records this laptop as a thread's owner when none is recorded (the adapter's own commands). */
+  ownThread(threadRef: string): Promise<void>
 }
 
 export type SlackAdapterCreateOptions = SlackAdapterOptions & {
@@ -301,6 +317,7 @@ export type SlackAdapterDeps = {
   onDirectCommand: (request: DirectCommandRequest) => Promise<void>
   attachThreadToSession: (params: AttachThreadToSessionParams) => Promise<AttachThreadToSessionResult | undefined>
   shellPassword: ShellPasswordPort | undefined
+  failover: AdapterFailover | undefined
   sleep: (ms: number) => Promise<void>
   maxRateLimitRetries: number
   log: Logger | undefined

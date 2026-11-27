@@ -93,6 +93,8 @@ export type ProposalCardDeps = {
   /** The setup page's port, for the "Open in page" link. */
   readonly uiPort: number
   readonly log?: Pick<Logger, 'warn' | 'error'>
+  /** This laptop's failover name: a restart fails only this laptop's cut off proposals. */
+  readonly host?: string | null
 }
 
 /**
@@ -168,7 +170,7 @@ export function proposalCardPoster(deps: ProposalCardDeps): (proposal: Pick<Prop
  */
 export async function failCutOffProposals(deps: ProposalCardDeps): Promise<void> {
   const post = proposalCardPoster(deps)
-  for (const proposal of await failRunningProposals(deps.pool, deps.workspaceId)) await post(proposal)
+  for (const proposal of await failRunningProposals(deps.pool, deps.workspaceId, deps.host ?? null)) await post(proposal)
 }
 
 /**

@@ -367,6 +367,21 @@ describe('approving a proposal', () => {
     expect([stored?.status, stored?.error]).toEqual(['failed', 'Relay restarted while proposing; propose again.'])
   })
 
+  it("with failover, fails at startup only this laptop's running proposal, and an old one with no laptop only when no other laptop is online", async () => {
+    const t = await team()
+    const other = `laptop-b-${Math.random().toString(36).slice(2, 10)}`
+    const here = `laptop-a-${Math.random().toString(36).slice(2, 10)}`
+    await pool.query(`INSERT INTO failover_hosts (name, home, build_migration) VALUES ($1, '/Users/b', '0034')`, [other])
+    const theirs = await inTx((client) => startProposal(client, t.workspaceId, { projectId: t.projectId, requestedBy: 'prn_owner', source: 'page' }, other))
+    expect(await failRunningProposals(pool, t.workspaceId, here)).toEqual([])
+    expect((await getProposal(pool, t.workspaceId, theirs.id))?.status).toBe('running')
+
+    await pool.query(`UPDATE team_proposals SET host = NULL WHERE id = $1`, [theirs.id])
+    expect(await failRunningProposals(pool, t.workspaceId, here)).toEqual([])
+    await pool.query(`UPDATE failover_hosts SET last_seen_at = now() - interval '2 minutes' WHERE name = $1`, [other])
+    expect(await failRunningProposals(pool, t.workspaceId, here)).toEqual([{ id: theirs.id, source: 'page' }])
+  })
+
   it('names the status when a proposal that is no longer ready is rejected', async () => {
     const t = await team()
     const rows: ProposedRow[] = [{ kind: 'add', name: 'Cy', role: 'developer', isLead: false, persona: { kind: 'existing', personaId: t.dev }, reason: '' }]

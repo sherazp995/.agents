@@ -37,6 +37,7 @@ const SESSION: Session = {
   mode: 'governed',
   courierTarget: null,
   engineKind: 'claude',
+    guestHost: null,
 }
 
 /** The run this session's own principal (the session opener) also drove, for the tests that are not about High 5's fix. */

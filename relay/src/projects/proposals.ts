@@ -22,6 +22,7 @@ import { scrubSecrets } from '../secrets/scrubber.js'
 import { UI_AUDIT_KIND } from '../ui/audit.js'
 import { newPersonaFileName, personaFileText, readPersona, savePersonaFiles, type FileOps, type PersonaFileFailure } from './persona-files.js'
 import { ensureTeam, getProject, listMembers, StoreConflict, type TeamMember } from './store.js'
+import { HOST_FRESH_SECONDS } from '../failover/lease.js'
 
 type Db = Pool | PoolClient
 
@@ -197,7 +198,7 @@ export type SupersededCard = { readonly proposalId: string; readonly channel: st
  * in the caller's transaction, returning the Slack cards those had. A second
  * running proposal for the project is refused by the database.
  */
-export async function startProposal(client: PoolClient, workspaceId: string, input: StartProposal): Promise<{ id: string; supersededCards: SupersededCard[] }> {
+export async function startProposal(client: PoolClient, workspaceId: string, input: StartProposal, host: string | null = null): Promise<{ id: string; supersededCards: SupersededCard[] }> {
   const { rows: superseded } = await client.query<{ id: string; slack_channel: string | null; card_dispatch_id: string | null }>(
     `UPDATE team_proposals SET status = 'superseded', updated_at = now() WHERE workspace_id = $1 AND project_id = $2 AND status = 'ready'
      RETURNING id, slack_channel, card_dispatch_id`,
@@ -208,8 +209,8 @@ export async function startProposal(client: PoolClient, workspaceId: string, inp
   )
   try {
     const { rows } = await client.query<{ id: string }>(
-      `INSERT INTO team_proposals (workspace_id, project_id, requested_by, source, slack_channel, slack_thread) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [workspaceId, input.projectId, input.requestedBy, input.source, input.slackChannel ?? null, input.slackThread ?? null],
+      `INSERT INTO team_proposals (workspace_id, project_id, requested_by, source, slack_channel, slack_thread, host) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [workspaceId, input.projectId, input.requestedBy, input.source, input.slackChannel ?? null, input.slackThread ?? null, host],
     )
     const id = rows[0]?.id
     if (id === undefined) throw new Error('startProposal: INSERT returned no id')
@@ -237,12 +238,20 @@ export async function markProposalFailed(db: Db, workspaceId: string, proposalId
   return (rowCount ?? 0) > 0
 }
 
-/** At daemon start: no proposal run survives a restart, so every running one has failed. */
-export async function failRunningProposals(db: Db, workspaceId: string): Promise<Pick<Proposal, 'id' | 'source'>[]> {
+/**
+ * At daemon start: no proposal run survives a restart, so every running one
+ * this laptop ran has failed. With failover on (`host` set) the other
+ * laptop's are left alone, and one from before proposals recorded a laptop
+ * fails only when no other laptop is online.
+ */
+export async function failRunningProposals(db: Db, workspaceId: string, host: string | null = null): Promise<Pick<Proposal, 'id' | 'source'>[]> {
   const { rows } = await db.query<{ id: string; source: Proposal['source'] }>(
-    `UPDATE team_proposals SET status = 'failed', error = 'Relay restarted while proposing; propose again.', updated_at = now() WHERE workspace_id = $1 AND status = 'running'
+    `UPDATE team_proposals SET status = 'failed', error = 'Relay restarted while proposing; propose again.', updated_at = now()
+      WHERE workspace_id = $1 AND status = 'running'
+        AND ($2::text IS NULL OR host = $2::text
+             OR (host IS NULL AND NOT EXISTS (SELECT 1 FROM failover_hosts o WHERE o.name <> $2::text AND o.last_seen_at > now() - make_interval(secs => $3::float8))))
      RETURNING id, source`,
-    [workspaceId],
+    [workspaceId, host, HOST_FRESH_SECONDS],
   )
   return rows
 }

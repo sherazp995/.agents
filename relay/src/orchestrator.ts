@@ -51,6 +51,8 @@ import type { SecretProvider } from './secrets/provider.js'
 import { SLACK_APP_TOKEN_SECRET, SLACK_BOT_TOKEN_SECRET, SlackAdapter } from './chat/slack/adapter.js'
 import { createLiveSlackBoltApp, readRequiredSecret } from './chat/slack/api-client.js'
 import type { FailoverGate } from './failover/types.js'
+import { recordButtonMessage, recordThreadOwner } from './failover/inbound.js'
+import type { InboundRouter } from './failover/route.js'
 import { composeThreadRef } from './chat/slack/events.js'
 import { createRealAttachThreadToSession, listRecentEngineSessions } from './chat/slack/session-attach.js'
 import type { SlackAdapterCreateOptions, SlackBoltApp } from './chat/slack/types.js'
@@ -159,7 +161,7 @@ export async function isKnownSessionQuery(
 
 export type CreateProductionSlackAdapterOptions = Omit<
   SlackAdapterCreateOptions,
-  'resolveWorkspaceId' | 'resolvePrincipalId' | 'isKnownSession' | 'resolveApprovalInteraction'
+  'resolveWorkspaceId' | 'resolvePrincipalId' | 'isKnownSession' | 'resolveApprovalInteraction' | 'failover'
 > & {
   /** The daemon's approval receipt key; when set, every resolved approval is signed (src/approvals/receipt.ts). */
   approvalReceiptKey?: Uint8Array
@@ -169,8 +171,10 @@ export type CreateProductionSlackAdapterOptions = Omit<
   folderQuestions?: FolderQuestions
   /** Injected for tests; production starts the real `claude` for `direct`. */
   directSession?: DirectSessionDependencies
-  /** With failover on, Slack events are left unacknowledged once this laptop stops answering. */
+  /** This laptop's failover name, recorded on the chats it starts. */
   failover?: FailoverGate
+  /** With failover on: saves every envelope before it is acknowledged and routes it to the laptop that answers it (src/failover/route.ts). */
+  inbound?: InboundRouter
   /** Shell threads with a job running here: known before their folder row exists, so their `stop` gets through. */
   shellThreads?: { isActive(threadRef: string): boolean }
 }
@@ -202,10 +206,25 @@ export async function createProductionSlackAdapter(
 ): Promise<{ adapter: SlackAdapter; workspaceId: string }> {
   let resolvedWorkspaceId: string | undefined
 
-  const { approvalReceiptKey, onApprovalResolved, folderQuestions, directSession, failover, shellThreads, ...adapterOptions } = options
+  const { approvalReceiptKey, onApprovalResolved, folderQuestions, directSession, failover, inbound, shellThreads, ...adapterOptions } = options
   const adapter = await SlackAdapter.create(secrets, {
     ...adapterOptions,
-    ...(failover && !adapterOptions.boltApp ? { boltApp: await gatedBoltApp(secrets, adapterOptions, failover) } : {}),
+    ...(inbound && !adapterOptions.boltApp ? { boltApp: await routedBoltApp(secrets, adapterOptions, inbound) } : {}),
+    ...(inbound
+      ? {
+          failover: {
+            host: inbound.host,
+            bind: (info) => inbound.bind(info),
+            claimMessage: (body, messageKey) => inbound.claimMessage(body, messageKey),
+            buttonsPosted: async (channel, ts) => {
+              if (resolvedWorkspaceId) await recordButtonMessage(pool, resolvedWorkspaceId, channel, ts, inbound.host)
+            },
+            ownThread: async (threadRef) => {
+              if (resolvedWorkspaceId) await recordThreadOwner(pool, resolvedWorkspaceId, 'slack', threadRef, inbound.host)
+            },
+          },
+        }
+      : {}),
     resolveWorkspaceId: async (platform, platformTeamId) => {
       resolvedWorkspaceId = await resolveWorkspaceId(pool, platform, platformTeamId)
       return resolvedWorkspaceId
@@ -316,11 +335,11 @@ export async function createProductionSlackAdapter(
   return { adapter, workspaceId: resolvedWorkspaceId }
 }
 
-/** The live Bolt app with the failover gate in front of it, reading the same two tokens SlackAdapter.create reads. */
-async function gatedBoltApp(secrets: SecretProvider, options: SlackAdapterCreateOptions, failover: FailoverGate): Promise<SlackBoltApp> {
+/** The live Bolt app with the failover router in front of it, reading the same two tokens SlackAdapter.create reads. */
+async function routedBoltApp(secrets: SecretProvider, options: SlackAdapterCreateOptions, inbound: InboundRouter): Promise<SlackBoltApp> {
   const botToken = await readRequiredSecret(secrets, options.botTokenSecretName ?? SLACK_BOT_TOKEN_SECRET)
   const appToken = await readRequiredSecret(secrets, options.appTokenSecretName ?? SLACK_APP_TOKEN_SECRET)
-  return createLiveSlackBoltApp(botToken, appToken, failover)
+  return createLiveSlackBoltApp(botToken, appToken, inbound)
 }
 
 // ---------------------------------------------------------------------------
@@ -674,7 +693,7 @@ async function handleStopInstruction(
   // no cancellation registry.
   // It pauses rather than ends: the thread stays open for the next message,
   // and "relay end" (handleEndInstruction) is how a task is closed for good.
-  const session = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
+  const session = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef, guestHost: event.guestHost ?? null })
   if (session && session.mode === 'autonomous' && deps.autonomous) {
     const outcome = await deps.autonomous.pauseSession(session.id, event.receivedAt)
     if (outcome !== 'missing') {
@@ -724,7 +743,7 @@ export const NOTHING_TO_END_TEXT = 'Nothing to end here.'
  * any other thread is told so rather than left without an answer.
  */
 async function handleEndInstruction(deps: OrchestratorDeps, event: ChatEvent, threadRef: string, replyRef: ChatRef): Promise<void> {
-  const session = await findActiveSession(deps.pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
+  const session = await findActiveSession(deps.pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef, guestHost: event.guestHost ?? null })
   if (session && session.mode === 'autonomous' && deps.autonomous && (await deps.autonomous.stopSession(session.id))) {
     deps.log.info({ sessionId: session.id }, 'received an End instruction; autonomous task stopped')
     await deps.dispatcher.perform({ kind: 'post', ref: replyRef, text: ENDED_TEXT })
@@ -859,7 +878,8 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
   // live chat thread: both reach the owner's machine unmediated
   // (src/tenancy/access.ts). Checked before Stop, so a member cannot stop
   // someone else's work either, and before any session or run row exists.
-  const existing = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef })
+  // A guest turn (README, "Failover") has its own session in the thread; the owner's is never touched.
+  const existing = await findActiveSession(pool, { workspaceId: event.workspaceId, adapter: event.adapter, threadRef, guestHost: event.guestHost ?? null })
   if (!(await principalIsOwner(pool, event.workspaceId, principalId))) {
     const refusal = await memberRefusal(pool, event.workspaceId, principalId, existing, deps.codexChat)
     if (refusal !== undefined) {
@@ -868,6 +888,8 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
       return
     }
   }
+  // The laptop that handles a thread's first message owns it; naming a laptop never moves it.
+  if (deps.failoverHost && event.guestHost === undefined) await recordThreadOwner(pool, event.workspaceId, event.adapter, threadRef, deps.failoverHost)
 
   // Gate fix, Blocker 1: recognised, and fully handled, BEFORE a session or
   // a run is ever created. No amount of retrying this branch can produce a
@@ -984,6 +1006,7 @@ export async function handleChatEvent(deps: OrchestratorDeps, event: ChatEvent):
     principalId,
     adapter: event.adapter,
     threadRef,
+    guestHost: event.guestHost ?? null,
   })
 
   // A reply without a mention in an autonomous thread.
@@ -1437,15 +1460,17 @@ export type StartOrchestratorOptions = {
   ui?: { readonly enabled: boolean; readonly port: number; readonly personasDir: string; readonly reposPath: string; readonly claudeBin?: string }
   /** Two laptops sharing one database (README, "Failover"); absent means this laptop always answers. */
   failover?: FailoverGate
+  /** With failover on: saves and routes every Slack envelope (src/failover/route.ts). */
+  inbound?: InboundRouter
 }
 
 export type OrchestratorHandle = {
   stop(): Promise<void>
   checkConnectivity(): Promise<void>
-  /** Closes the Slack connection only; replies already queued keep posting. Used when stepping down. */
-  closeSlack(): Promise<void>
-  /** The kinds of work still running in this process; empty when none. */
-  waitingOn(): string[]
+  /** Closes or reopens the Slack connection only; replies already queued keep posting (README, "Failover"). */
+  setSlack(connected: boolean): Promise<void>
+  /** Starts no new work while true (another laptop is applying migrations); running turns carry on. */
+  setPaused(paused: boolean): Promise<void>
 }
 
 /**
@@ -1510,7 +1535,6 @@ export async function startOrchestrator(
     replies: () => shellReplies,
     renderBlocks: shellReplyBlocks,
     principalFor: async (platformUserId) => (projectWorkspaceId === undefined ? null : resolvePrincipal(pool, projectWorkspaceId, 'slack', platformUserId)),
-    ...(options.failover ? { mayStartWork: () => options.failover?.mayStartWork() ?? Promise.resolve(true) } : {}),
     killSwitch: {
       refresh: async () => shellKillSwitch?.refresh(),
       isEngaged: () => shellKillSwitch?.isEngaged() ?? false,
@@ -1536,6 +1560,7 @@ export async function startOrchestrator(
       await autonomousRuntime?.onApprovalResolved(result)
     },
     ...(options.failover ? { failover: options.failover } : {}),
+    ...(options.inbound ? { inbound: options.inbound } : {}),
     ...options.slackAdapterOptions,
   })
 
@@ -1566,10 +1591,11 @@ export async function startOrchestrator(
   const uiOptions = options.ui
   let teamProposer: TeamProposer | undefined
   if (uiOptions) {
-    const cardDeps = { pool, workspaceId, outbox: dispatcher, uiPort: uiOptions.port, log }
+    const cardDeps = { pool, workspaceId, outbox: dispatcher, uiPort: uiOptions.port, log, host: options.failover?.host ?? null }
     await failCutOffProposals(cardDeps)
     teamProposer = createTeamProposer({
       pool,
+      host: options.failover?.host ?? null,
       log,
       personasDir: uiOptions.personasDir,
       repos: repoLookupFromRegistry(uiOptions.reposPath),
@@ -1609,9 +1635,6 @@ export async function startOrchestrator(
     ? { readAccounts: () => readAccountPool(undefined, log), cooldowns: new RedisCooldownStore(options.autonomousRuntime.redis) }
     : undefined
   const activeHandlers = new Set<Promise<void>>()
-  // Set once a failover step down asks the schedulers to finish and stop taking work.
-  let draining: Promise<void> | null = null
-  let drained = false
 
   await dispatcher.start(async (event) => {
     const handlerPromise = handleChatEvent(
@@ -1642,6 +1665,9 @@ export async function startOrchestrator(
       activeHandlers.delete(handlerPromise)
     }
   })
+
+  // Envelopes the other laptop passed here, and this laptop's own unfinished ones from before it started.
+  await options.inbound?.start()
 
   const drainOptions = { log, ...(options.drainIntervalMs !== undefined ? { intervalMs: options.drainIntervalMs } : {}) }
   const drainScheduler = scheduleOutboxDrain(dispatcher, drainOptions)
@@ -1686,24 +1712,13 @@ export async function startOrchestrator(
       await adapter.checkConnectivity()
     },
 
-    async closeSlack(): Promise<void> {
-      // Shell lines die first, while Slack can still take their last edit and before anything here can fail.
-      await shellJobs.closeAll('this laptop stopped answering')
-      await dispatcher.stop()
-      // Start nothing new; turns already running finish and post.
-      if (autonomousRuntime && draining === null) {
-        draining = autonomousRuntime.drain().finally(() => {
-          drained = true
-        })
-      }
+    async setSlack(connected: boolean): Promise<void> {
+      await adapter.setConnected(connected)
     },
 
-    waitingOn(): string[] {
-      return [
-        ...(activeHandlers.size > 0 ? ['Slack messages being handled'] : []),
-        ...(draining !== null && !drained ? ['running turns'] : []),
-        ...(shellJobs.busy() ? ['shell commands'] : []),
-      ]
+    async setPaused(paused: boolean): Promise<void> {
+      options.inbound?.setPaused(paused)
+      await autonomousRuntime?.setPaused(paused)
     },
 
     /**
@@ -1732,6 +1747,7 @@ export async function startOrchestrator(
     async stop(): Promise<void> {
       // First, so a later step that throws cannot leave a shell line running.
       await shellJobs.closeAll('Relay is shutting down')
+      await options.inbound?.stop()
       drainScheduler.stop()
       uploadDrainScheduler.stop()
       await uiServer?.close()

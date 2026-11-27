@@ -77,10 +77,10 @@ export function checkFailover(deps: FailoverCheckDependencies = {}): Check {
 
         const holder =
           lease?.holder == null
-            ? 'no laptop holds the record'
+            ? 'no laptop is the default'
             : lease.expired_ago !== null
-              ? `${lease.holder} held the record, which expired ${ago(lease.expired_ago)}`
-              : `${lease.holder} answers, renewed ${ago(lease.renewed_ago ?? 0)} (database time)`
+              ? `${lease.holder} was the default, its record expired ${ago(lease.expired_ago)}`
+              : `${lease.holder} is the default, renewed ${ago(lease.renewed_ago ?? 0)} (database time)`
         const self = `this laptop is ${failover.host}, ${failover.preferred ? 'preferred' : 'not preferred'}`
         const detail = `${holder}; ${self}`
 
@@ -88,7 +88,7 @@ export function checkFailover(deps: FailoverCheckDependencies = {}): Check {
           return {
             name: NAME,
             status: 'failed',
-            detail: `${detail}; this build's newest migration ${build} is older than the database's ${applied}, so this laptop will not answer`,
+            detail: `${detail}; this build's newest migration ${build} is older than the database's ${applied}, so this laptop stays off Slack until it is updated`,
             remediation: 'Update Relay on this laptop (git pull, pnpm install, pnpm build), then restart the daemon.',
           }
         }
@@ -97,7 +97,7 @@ export function checkFailover(deps: FailoverCheckDependencies = {}): Check {
           return {
             name: NAME,
             status: 'degraded',
-            detail: `${detail}; ${behind.map((host) => `${host.name} runs a build at ${host.build_migration}, older than the database's ${applied}, so it cannot take over`).join('; ')}`,
+            detail: `${detail}; ${behind.map((host) => `${host.name} runs a build at ${host.build_migration}, older than the database's ${applied}, so it stays off Slack and answers nothing`).join('; ')}`,
             remediation: `Update Relay on ${behind.map((host) => host.name).join(', ')}, then restart its daemon.`,
           }
         }

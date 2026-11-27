@@ -18,23 +18,31 @@ describe('keepClaimRenewed', () => {
   function keep(renew: () => Promise<boolean>) {
     const onLost = vi.fn()
     const onError = vi.fn()
-    stop = keepClaimRenewed({ renew, ttlMs: TTL_MS, claimedAt: Date.now(), onLost, onError })
+    stop = keepClaimRenewed({ renew, ttlMs: TTL_MS, onLost, onError })
     return { onLost, onError }
   }
 
-  it('survives failed renewals until the claim has really expired', async () => {
-    const { onLost, onError } = keep(() => Promise.reject(new Error('blip')))
-    await vi.advanceTimersByTimeAsync(TTL_MS - 1)
+  it('keeps the turn through an outage far longer than the claim, and renews again once the database answers', async () => {
+    let online = false
+    const renew = vi.fn(() => (online ? Promise.resolve(true) : Promise.reject(new Error('ENOTFOUND'))))
+    const { onLost, onError } = keep(renew)
+    await vi.advanceTimersByTimeAsync(TTL_MS * 10)
     expect(onLost).not.toHaveBeenCalled()
-    expect(onError).toHaveBeenCalledTimes(2)
-    await vi.advanceTimersByTimeAsync(1)
-    expect(onLost).toHaveBeenCalledTimes(1)
+    expect(onError).toHaveBeenCalledTimes(30)
+    online = true
+    await vi.advanceTimersByTimeAsync(TTL_MS / 3)
+    expect(renew).toHaveBeenCalledTimes(31)
+    expect(onLost).not.toHaveBeenCalled()
   })
 
-  it('ends at the deadline even when a renewal never answers', async () => {
-    const { onLost } = keep(() => new Promise(() => {}))
-    await vi.advanceTimersByTimeAsync(TTL_MS)
-    expect(onLost).toHaveBeenCalledTimes(1)
+  it('a renewal that never answers counts as failed, so the next one still runs', async () => {
+    let calls = 0
+    const { onLost, onError } = keep(() => (calls++ === 0 ? new Promise(() => {}) : Promise.resolve(true)))
+    await vi.advanceTimersByTimeAsync((TTL_MS / 3) * 2)
+    expect(onError).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(TTL_MS / 3)
+    expect(calls).toBe(2)
+    expect(onLost).not.toHaveBeenCalled()
   })
 
   it('ends at once on a confirmed loss, and only once', async () => {
@@ -42,17 +50,6 @@ describe('keepClaimRenewed', () => {
     await vi.advanceTimersByTimeAsync(TTL_MS / 3)
     expect(onLost).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(TTL_MS * 2)
-    expect(onLost).toHaveBeenCalledTimes(1)
-  })
-
-  it('a successful renewal moves the deadline to when that renewal started', async () => {
-    let healthy = true
-    const { onLost } = keep(() => (healthy ? Promise.resolve(true) : Promise.reject(new Error('blip'))))
-    await vi.advanceTimersByTimeAsync(TTL_MS / 3)
-    healthy = false
-    await vi.advanceTimersByTimeAsync(TTL_MS - 1)
-    expect(onLost).not.toHaveBeenCalled()
-    await vi.advanceTimersByTimeAsync(1)
     expect(onLost).toHaveBeenCalledTimes(1)
   })
 })

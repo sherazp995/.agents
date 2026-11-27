@@ -12,6 +12,7 @@
  *     or mid-turn, and a note added mid-turn is kept for its next turn.
  */
 
+import { taskRunsHereSql, type Placement } from '../failover/ownership.js'
 import type { Pool, PoolClient } from 'pg'
 import type { Assignment, AssignmentKind, AssignmentLease, AssignmentState, RunSnapshot, TeamRun, TeamRunKind, TeamRunStatus } from './types.js'
 
@@ -290,7 +291,8 @@ export async function countRunning(pool: Pool): Promise<{ total: number; byTeam:
 }
 
 /** Takes a queued assignment's lease and marks it running; each grant bumps the generation. */
-export async function acquireAssignmentLease(pool: Pool, assignmentId: string, owner: string, ttlMs: number): Promise<{ lease: AssignmentLease; assignment: HostedAssignment } | undefined> {
+/** Takes a queued assignment's lease; with `place`, only when its lead's task may run on that laptop (src/failover/ownership.ts). */
+export async function acquireAssignmentLease(pool: Pool, assignmentId: string, owner: string, ttlMs: number, place: Placement = { host: null, isDefault: true }): Promise<{ lease: AssignmentLease; assignment: HostedAssignment } | undefined> {
   const { rows } = await pool.query<AssignmentRow>(
     `UPDATE team_assignments a
      SET lease_owner = $2, lease_generation = a.lease_generation + 1, lease_expires_at = now() + ($3 * interval '1 millisecond'),
@@ -298,8 +300,9 @@ export async function acquireAssignmentLease(pool: Pool, assignmentId: string, o
      FROM autonomous_tasks t
      WHERE a.id = $1 AND a.state = 'queued' AND (a.lease_expires_at IS NULL OR a.lease_expires_at < now())
        AND t.id = a.task_id AND t.cancel_requested_at IS NULL
+       AND ${taskRunsHereSql('t', '$4', '$5')}
      RETURNING a.*`,
-    [assignmentId, owner, ttlMs],
+    [assignmentId, owner, ttlMs, place.host, place.isDefault],
   )
   const row = rows[0]
   if (!row) return undefined

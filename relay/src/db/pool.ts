@@ -64,3 +64,14 @@ export function createPool(url: string, options: { max?: number; connectTimeoutM
 export async function closePool(pool: Pool): Promise<void> {
   await pool.end()
 }
+
+/**
+ * One connection of its own, outside any pool, for LISTEN: a listener holds
+ * its connection for good, which would take one of the daemon's few pool
+ * slots. Same timeouts and keepalives as the pool.
+ */
+export async function connectListenConnection(url: string): Promise<pg.Client> {
+  const client = new pg.Client({ connectionString: url, connectionTimeoutMillis: DEFAULT_CONNECT_TIMEOUT_MS, keepAlive: true, keepAliveInitialDelayMillis: 10_000 })
+  await client.connect()
+  return client
+}

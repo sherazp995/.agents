@@ -85,6 +85,25 @@ describe('autonomous store', () => {
     expect(await count('outbox', workspaceId)).toBe(0)
   })
 
+  it("gives a guest laptop its own session and task in the thread, continues it on the next named message, and leaves the owner's task unchanged", async () => {
+    const { workspaceId, principalId } = await setup()
+    const owner = await intakeMention(pool, intakeParams(workspaceId, principalId, 'C1:9.1', 'C1:9.1'))
+    if (owner.kind !== 'created') throw new Error('expected a new task')
+    const ownerBefore = await loadTask(pool, owner.task.id)
+
+    const guest = { ...intakeParams(workspaceId, principalId, 'C1:9.1', 'C1:9.2'), guestHost: 'zubair-mbp' }
+    const first = await intakeMention(pool, guest)
+    const second = await intakeMention(pool, { ...guest, event: { ...guest.event, id: 'C1:9.3', text: 'and 3+3' } })
+
+    expect(first.kind).toBe('created')
+    expect(second.kind).toBe('appended')
+    if (first.kind !== 'created' || second.kind !== 'appended') throw new Error('unexpected intake')
+    expect(second.task.id).toBe(first.task.id)
+    expect(first.task.id).not.toBe(owner.task.id)
+    expect(first.session.guestHost).toBe('zubair-mbp')
+    expect(await loadTask(pool, owner.task.id)).toEqual(ownerBefore)
+  })
+
   it('rolls back the session and task when a failure hits after the session insert, and a retry yields one of each', async () => {
     const { workspaceId, principalId } = await setup()
     const params = intakeParams(workspaceId, principalId, 'C1:2.1', 'C1:2.1')

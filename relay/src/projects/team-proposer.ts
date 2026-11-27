@@ -61,6 +61,8 @@ export type ProposerRepo = { readonly name: string; readonly path: string; reado
 
 export type TeamProposerDeps = {
   readonly pool: Pool
+  /** This laptop's failover name, recorded on each proposal so a restart elsewhere leaves it running. */
+  readonly host?: string | null
   readonly log: Pick<Logger, 'info' | 'warn' | 'error'>
   readonly personasDir: string
   /** The project's repo names to their registry entries; a name not registered is left out. */
@@ -374,7 +376,7 @@ export function createTeamProposer(deps: TeamProposerDeps): TeamProposer {
       let supersededCards: SupersededCard[]
       try {
         await client.query('BEGIN')
-        ;({ id: proposalId, supersededCards } = await startProposal(client, workspaceId, request))
+        ;({ id: proposalId, supersededCards } = await startProposal(client, workspaceId, request, deps.host ?? null))
         await client.query('COMMIT')
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined)

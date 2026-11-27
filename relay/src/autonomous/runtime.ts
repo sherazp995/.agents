@@ -4,10 +4,12 @@
  * startOrchestrator starts it when `autonomous.enabled` and hands the
  * orchestrator its routing.
  *
- * With failover on (`failover`), work starts only while this laptop holds
- * the "who is answering" record, workers and leases carry this laptop's
- * name, stored folders are mapped to this laptop's home, and Claude chats
- * are saved for the other laptop. `drain()` is the step down's wait.
+ * With failover on (`failover`), both laptops run tasks: each takes the ones
+ * whose thread is its own, and the default laptop also those whose laptop is
+ * not ready (src/failover/ownership.ts). Workers and leases carry this
+ * laptop's name, stored folders are mapped to this laptop's home, and Claude
+ * chats are saved for the other laptop. `setPaused()` holds new turns while
+ * the other laptop migrates.
  */
 
 import { mkdirSync } from 'node:fs'
@@ -93,8 +95,8 @@ export type AutonomousRuntimeOptions = {
 export type AutonomousRuntime = {
   routing: AutonomousRouting
   onApprovalResolved(result: ResolveApprovalResult): Promise<void>
-  /** For the failover step down: starts no new task or member turn, and resolves once the running ones have ended and posted. */
-  drain(): Promise<void>
+  /** Stops (true) or resumes (false) starting tasks and member turns, for the other laptop's migration; running ones carry on. */
+  setPaused(paused: boolean): Promise<void>
   stop(): Promise<void>
 }
 
@@ -308,8 +310,9 @@ export async function startAutonomousRuntime(options: AutonomousRuntimeOptions):
       await wakeTask(pool, task.id)
       scheduler.wake()
     },
-    async drain() {
-      await Promise.all([scheduler.drain(), team.drain()])
+    async setPaused(paused) {
+      team.setPaused(paused)
+      await scheduler.setPaused(paused)
     },
     async stop() {
       await scheduler.stop()

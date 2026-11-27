@@ -13,7 +13,8 @@
  * never posts: its text goes to the lead as a note, written in the same
  * transaction as the assignment's result, so Stop fences both.
  *
- * Failover: a pass admits work only while `failover.mayStartWork()`, and a
+ * Failover: a pass takes an assignment only when its lead's task may run on
+ * this laptop (src/failover/ownership.ts), checked inside the lease grab, and a
  * laptop signals only the member workers it recorded itself. A running
  * assignment left by a laptop that went quiet is recovered like one left by
  * a restart; one whose laptop is still seen is left to finish there.
@@ -23,6 +24,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 
 import { renderForModel, wrapUntrusted } from '../agent/untrusted.js'
+import { untilDatabaseAnswers } from '../db/offline.js'
 import { keepClaimRenewed } from '../failover/claim-renewal.js'
 import { DEFAULT_LEASE_TTL_MS, killWorkerGroup, type TurnRequestContext, type TurnResult } from '../autonomous/scheduler.js'
 import { hostGone, isOwnWorker, loadTask } from '../autonomous/store.js'
@@ -63,8 +65,8 @@ export type TeamSchedulerOptions = TeamSchedulerDeps & { readonly failover?: Fai
 
 export type TeamScheduler = TeamHooks & {
   wake(): void
-  /** Admits nothing new from now on and resolves once every running member turn has ended. */
-  drain(): Promise<void>
+  /** Stops (true) or resumes (false) starting member turns, for the other laptop's migration; running ones carry on. */
+  setPaused(paused: boolean): void
 }
 
 export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
@@ -73,14 +75,13 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
   const gate = deps.failover ?? ALWAYS_ACTIVE
   const running = new Map<string, Running>()
   let stopping = false
-  let draining = false
+  let paused = false
 
   async function tick(): Promise<void> {
-    if (stopping || draining) return
+    if (stopping || paused) return
     const due = await listDueAssignments(deps.pool, deps.workspaceId)
     // With failover off an idle pass costs one query, as before.
     if (due.length === 0 && gate.host === null) return
-    if (!(await gate.mayStartWork())) return
     if (gate.host !== null) await recoverGone(false)
     if (due.length === 0) return
     const counts = await countRunning(deps.pool)
@@ -91,31 +92,29 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
     for (const entry of running.values()) local.set(entry.teamId, (local.get(entry.teamId) ?? 0) + 1)
     for (const [teamId, count] of local) byTeam.set(teamId, Math.max(byTeam.get(teamId) ?? 0, count))
     for (const assignment of due) {
-      if (stopping || draining || total >= machineLimit) return
+      if (stopping || paused || total >= machineLimit) return
       if (running.has(assignment.id)) continue
       const teamRunning = byTeam.get(assignment.teamId) ?? 0
       if (teamRunning >= assignment.memberLimit) continue
-      const claimedAt = Date.now()
-      const held = await acquireAssignmentLease(deps.pool, assignment.id, deps.owner, ttlMs)
+      const held = await acquireAssignmentLease(deps.pool, assignment.id, deps.owner, ttlMs, { host: gate.host, isDefault: gate.isDefault() })
       if (!held) continue
       total += 1
       byTeam.set(assignment.teamId, teamRunning + 1)
-      start(held.assignment, held.lease, assignment.teamId, claimedAt)
+      start(held.assignment, held.lease, assignment.teamId)
     }
   }
 
-  function start(assignment: HostedAssignment, lease: AssignmentLease, teamId: string, claimedAt: number): void {
+  function start(assignment: HostedAssignment, lease: AssignmentLease, teamId: string): void {
     const controller = new AbortController()
     let lost = false
     const stopRenewing = keepClaimRenewed({
       renew: () => renewAssignmentLease(deps.pool, lease, ttlMs),
       ttlMs,
-      claimedAt,
       onLost: () => {
         lost = true
         controller.abort()
       },
-      onError: (error) => deps.log.warn({ err: error, assignmentId: assignment.id }, 'renewing a member claim failed; the turn continues until the claim expires'),
+      onError: (error) => deps.log.warn({ err: error, assignmentId: assignment.id }, 'renewing a member claim failed; the turn carries on and renewing resumes once the database answers'),
     })
     const done = runMember(assignment, lease, controller.signal, () => lost)
       .catch(async (error: unknown) => {
@@ -186,7 +185,7 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
       if (workerPgid !== null && (await killWorkerGroup(workerPgid))) await clearAssignmentWorker(deps.pool, assignment.id, workerPgid)
     }
     if (isLost()) return
-    await settle(prepared, member, lease, result)
+    await settle(prepared, member, lease, result, isLost)
   }
 
   /**
@@ -233,7 +232,7 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
     )
   }
 
-  async function settle(assignment: Assignment, member: SnapshotMember, lease: AssignmentLease, result: TurnResult): Promise<void> {
+  async function settle(assignment: Assignment, member: SnapshotMember, lease: AssignmentLease, result: TurnResult, isLost: () => boolean): Promise<void> {
     const notesRead = assignment.pendingNotes.length
     if (result.kind === 'no_account') {
       const update: AssignmentUpdate = { state: 'queued', nextWakeupAt: new Date(result.wakeAtMs ?? Date.now() + LOGIN_WAIT_MS), releaseLease: true }
@@ -249,7 +248,11 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
     const outcome = result.outcome
     switch (outcome.kind) {
       case 'reply':
-        await finishReply(assignment, member, lease, outcome.text, { engineSessionId: outcome.sessionId, accountKey: result.accountKey, notesRead, loginWaitTold: false })
+        // The member may have finished while the network was down: its report waits for the database rather than being lost.
+        await untilDatabaseAnswers(() => finishReply(assignment, member, lease, outcome.text, { engineSessionId: outcome.sessionId, accountKey: result.accountKey, notesRead, loginWaitTold: false }), {
+          giveUp: () => stopping || isLost(),
+          onWait: (error) => deps.log.warn({ err: error, assignmentId: assignment.id }, 'a member finished but the database cannot be reached; its report waits'),
+        })
         return
       case 'resume_rejected':
         await updateAssignment(deps.pool, lease, { engineSessionId: null, state: 'queued', nextWakeupAt: 'now', releaseLease: true })
@@ -333,9 +336,10 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
         if (restarted) await recoverAssignment(deps.pool, assignment, MAX_RESTARTS)
         continue
       }
+      // A member whose worker is recorded on the gone laptop may still be running there, offline: it reconnects and posts (README, "Failover").
+      if (!own && assignment.workerPgid !== null) continue
       if (await hostGone(deps.pool, leaseHost, host)) {
         await recoverAssignment(deps.pool, assignment, MAX_RESTARTS)
-        if (!own && assignment.workerPgid !== null) await clearAssignmentWorker(deps.pool, assignment.id, assignment.workerPgid)
       }
     }
   }
@@ -370,9 +374,8 @@ export function createTeamScheduler(deps: TeamSchedulerOptions): TeamScheduler {
       for (const entry of running.values()) entry.controller.abort()
       await Promise.all([...running.values()].map((entry) => entry.done))
     },
-    async drain() {
-      draining = true
-      await Promise.all([...running.values()].map((entry) => entry.done))
+    setPaused(value) {
+      paused = value
     },
     // The autonomous scheduler ticks every two seconds and calls tick(); a second loop here could race it.
     wake: () => undefined,

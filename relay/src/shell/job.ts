@@ -58,8 +58,6 @@ export type ShellJobsDeps = {
   readonly renderBlocks: (text: string, passwordRequestId?: string) => Record<string, unknown>[]
   /** Maps a Slack user to a Relay principal, for the password buttons. */
   readonly principalFor: (platformUserId: string) => Promise<string | null>
-  /** Failover's "this laptop answers" check, before every line; absent means always. */
-  readonly mayStartWork?: () => Promise<boolean>
   /** Re-read while lines run, so `relay kill` from the CLI stops them. */
   readonly killSwitch?: { readonly refresh?: () => Promise<unknown>; readonly isEngaged: () => boolean; readonly reason: () => string | undefined }
   /** Engaging the kill switch and shutdown cancel every token here. */
@@ -321,10 +319,9 @@ export class ShellJobs {
     return start.kind === 'folder' && isFolder(start.path) ? start.path : current
   }
 
-  /** Failover and the kill switch, checked before each line. */
+  /** The kill switch, checked before each line. */
   async #mayRunLine(signal: AbortSignal): Promise<string | undefined> {
     if (signal.aborted) return `Stopped: ${String(signal.reason)}.`
-    if (this.#deps.mayStartWork && !(await this.#deps.mayStartWork())) return 'This laptop is no longer the one answering, so the remaining lines did not run.'
     const engaged = await this.#killSwitchEngaged()
     if (engaged !== undefined) return `Relay is paused: ${engaged}. The remaining lines did not run.`
     return undefined

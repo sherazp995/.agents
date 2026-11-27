@@ -101,6 +101,8 @@ export type ChatEvent = {
   platformEventId: string
   /** Set on a Slackbot reminder (src/chat/slack/reminder.ts): the task it starts is read-only for its whole life. */
   origin?: 'reminder'
+  /** A guest turn (README, "Failover"): this laptop was named in a thread another laptop owns. */
+  guestHost?: string
 }
 
 /**

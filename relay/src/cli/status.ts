@@ -135,19 +135,22 @@ function linesSince(lines: LogLine[], startMs: number): LogLine[] {
   return first < 0 ? [] : lines.slice(first)
 }
 
-/** What the last state line says this daemon is doing. A failover wait does not say why it waits, so neither does this. */
+/** What the last state line says this daemon is doing (README, "Failover"). */
 function role(lines: LogLine[]): string | undefined {
   const states: Array<[string, string]> = [
+    ['failover: this laptop is now the default', 'answering Slack, the default laptop'],
+    ['failover: this laptop is no longer the default', 'answering Slack, its own threads and messages naming it'],
+    ['failover: handed the default record back', 'answering Slack, its own threads and messages naming it'],
+    ['failover: the database has not answered', 'off Slack until the database answers again'],
+    ['failover: the database answers again', 'answering Slack'],
+    ['failover: another laptop is migrating', 'paused while the other laptop migrates the database'],
+    ['failover: the other laptop withdrew its pause', 'answering Slack'],
+    ['failover: waiting for', 'waiting for the other laptop to pause before migrating'],
+    ['or update it first', 'waiting: the other laptop runs a build too old to pause; stop or update it'],
     ['orchestrator is running', 'answering Slack'],
-    ['failover: recovered', 'answering Slack'],
-    ['failover: recovering', 'recovering the failover role'],
-    ['failover: stepping down', 'stepping down'],
-    ['failover is on: waiting', 'waiting to take the failover record (another laptop answers, or the database is slow or unreachable)'],
     ['shutting down', 'shutting down'],
   ]
   for (const line of [...lines].reverse()) {
-    const waiting = line.text.match(/failover: (stepping down, waiting on .+)$/)?.[1]
-    if (waiting !== undefined) return waiting
     const found = states.find(([needle]) => line.text.includes(needle))
     if (found !== undefined) return found[1]
   }

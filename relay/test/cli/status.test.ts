@@ -25,10 +25,11 @@ const T = Date.parse('2026-11-20T18:22:59.000Z')
 
 describe('relay status', async () => {
   it.each([
-    ['recovering', ['failover: recovering the role; new work waits'], 'recovering the failover role'],
-    ['answering after recovery', ['failover: recovering the role; new work waits', 'failover: recovered the role; answering Slack'], 'answering Slack'],
-    ['stepping down', ['failover: stepping down; finishing running work, then restarting as standby'], 'stepping down'],
-    ['stepping down with its work', ['failover: stepping down; finishing running work, then restarting as standby', 'failover: stepping down, waiting on running turns, worker processes'], 'stepping down, waiting on running turns, worker processes'],
+    ['the default laptop', ['failover: this laptop is now the default'], 'answering Slack, the default laptop'],
+    ['no longer the default', ['failover: this laptop is now the default', 'failover: this laptop is no longer the default; it keeps answering its own threads'], 'answering Slack, its own threads and messages naming it'],
+    ['off Slack without the database', ['failover: the database has not answered for the trust window; leaving Slack until it does'], 'off Slack until the database answers again'],
+    ['back on Slack', ['failover: the database has not answered for the trust window; leaving Slack until it does', 'failover: the database answers again; reconnecting to Slack'], 'answering Slack'],
+    ['paused for a migration', ['failover: another laptop is migrating the database; starting no new work until it finishes'], 'paused while the other laptop migrates the database'],
   ])('says when the daemon is %s', async (_name, messages, doing) => {
     const tail = ['orchestrator is running: Socket Mode is connected', ...messages].map((message, index) => json(T + index, message)).join('\n')
     const result = await runStatus({ platform: 'darwin', uid: 501, run: () => LAUNCHD_RUNNING, processStartMs: () => T - 10_000, readTail: () => tail })
@@ -36,7 +37,7 @@ describe('relay status', async () => {
   })
 
   it('reports a running daemon with its pid, that it answers Slack, its last log line and log path, exit 0', async () => {
-    const tail = [json(T - 9000, 'failover is on: waiting until this laptop holds the record before connecting to Slack'), json(T, 'orchestrator is running: Socket Mode is connected')].join('\n')
+    const tail = [json(T - 9000, 'failover is on: connecting to Slack'), json(T, 'orchestrator is running: Socket Mode is connected')].join('\n')
     const result = await runStatus({ platform: 'darwin', uid: 501, run: () => LAUNCHD_RUNNING, processStartMs: () => T - 10_000, readTail: (path) => (path === '/relay/tmp/relay.log' ? tail : null) })
     expect(result).toEqual({
       exitCode: 0,
@@ -44,10 +45,10 @@ describe('relay status', async () => {
     })
   })
 
-  it('says a running daemon stands by when the last state line is the failover wait', async () => {
-    const tail = [json(T - 9000, 'orchestrator is running: Socket Mode is connected'), json(T, 'failover is on: waiting until this laptop holds the record before connecting to Slack')].join('\n')
+  it('says a laptop waiting to migrate is waiting for the other one to pause', async () => {
+    const tail = [json(T - 9000, 'orchestrator is running: Socket Mode is connected'), json(T, 'failover: waiting for zubair-mbp to pause and finish its running turns before applying migrations')].join('\n')
     const result = await runStatus({ platform: 'darwin', uid: 501, run: () => LAUNCHD_RUNNING, processStartMs: () => T - 10_000, readTail: () => tail })
-    expect(result.report.split('\n')[0]).toBe('Relay daemon: running (pid 32870, started 1 time), waiting to take the failover record (another laptop answers, or the database is slow or unreachable)')
+    expect(result.report.split('\n')[0]).toBe('Relay daemon: running (pid 32870, started 1 time), waiting for the other laptop to pause before migrating')
   })
 
   it('reports a crash-looping daemon as not running with its exit code, start count and the error it died on, exit 1', async () => {

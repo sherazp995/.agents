@@ -10,6 +10,7 @@
  *     changes nothing.
  */
 
+import { taskRunsHereSql, type Placement } from '../failover/ownership.js'
 import type { Pool, PoolClient } from 'pg'
 import type { ChatAction, ChatRef } from '../chat/contract.js'
 import { insertActiveSession, toSession, type FindOrCreateSessionParams, type Session, type SessionRow } from '../sessions/store.js'
@@ -192,9 +193,9 @@ export async function intakeMention(pool: Pool, params: IntakeMentionParams): Pr
 
     const { rows: sessions } = await client.query<SessionRow>(
       `SELECT * FROM sessions
-       WHERE workspace_id = $1 AND adapter = $2 AND thread_ref = $3 AND state = 'active'
+       WHERE workspace_id = $1 AND adapter = $2 AND thread_ref = $3 AND state = 'active' AND COALESCE(guest_host, '') = COALESCE($4, '')
        FOR UPDATE`,
-      [params.workspaceId, params.adapter, params.threadRef],
+      [params.workspaceId, params.adapter, params.threadRef, params.guestHost ?? null],
     )
     const active = sessions[0]
     // An active session archived between the INSERT and this SELECT is a
@@ -279,6 +280,9 @@ export function leaseOwnerName(pid: number, host: string | null): string {
   return host === null ? `relay-${pid}` : `relay-${pid}@${host}`
 }
 
+/** Failover off: every task runs on this laptop. */
+export const LOCAL_PLACEMENT: Placement = { host: null, isDefault: true }
+
 /** The host part of a lease_owner column; '' for an owner written without one. */
 export const LEASE_HOST_SQL = (column: string): string => `split_part(${column}, '@', 2)`
 
@@ -312,14 +316,18 @@ export async function hostGone(pool: Pool | PoolClient, other: string | null, ho
 }
 
 /** Takes the lease when it is free or expired and the task is not cancelled. Each grant bumps the generation, fencing out the previous holder. */
-export async function acquireLease(pool: Pool, taskId: string, owner: string, ttlMs: number): Promise<Lease | undefined> {
+/** Takes the task's lease; with `place`, only when the task may run on that laptop (src/failover/ownership.ts), checked in the same statement. */
+export async function acquireLease(pool: Pool, taskId: string, owner: string, ttlMs: number, place: Placement = LOCAL_PLACEMENT): Promise<Lease | undefined> {
   const { rows } = await pool.query<{ lease_generation: string }>(
-    `UPDATE autonomous_tasks
-     SET lease_owner = $2, lease_generation = lease_generation + 1,
+    `UPDATE autonomous_tasks AS t
+     SET lease_owner = $2, lease_generation = t.lease_generation + 1,
          lease_expires_at = now() + ($3 * interval '1 millisecond'), updated_at = now()
-     WHERE id = $1 AND (lease_expires_at IS NULL OR lease_expires_at < now()) AND cancel_requested_at IS NULL
-     RETURNING lease_generation`,
-    [taskId, owner, ttlMs],
+     WHERE t.id = $1 AND (t.lease_expires_at IS NULL OR t.lease_expires_at < now()) AND t.cancel_requested_at IS NULL
+       AND ${taskRunsHereSql('t', '$4', '$5')}
+       -- Never over a worker another laptop recorded: it may be running there offline (README, "Failover").
+       AND ($4::text IS NULL OR t.worker_pgid IS NULL OR t.worker_host IS NOT DISTINCT FROM $4::text)
+     RETURNING t.lease_generation`,
+    [taskId, owner, ttlMs, place.host, place.isDefault],
   )
   const row = rows[0]
   return row ? { taskId, owner, generation: Number(row.lease_generation) } : undefined
@@ -404,12 +412,16 @@ export async function recordWorker(pool: Pool, lease: Lease, pid: number, pgid: 
   return rowCount === 1
 }
 
-/** Clears the recorded worker once its process group has exited. Not fenced: whoever confirmed the exit may clear it. */
-export async function clearWorker(pool: Pool, taskId: string, pgid: number): Promise<void> {
+/**
+ * Clears the recorded worker once its process group has exited. Not fenced:
+ * whoever confirmed the exit may clear it. With `host`, only the record that
+ * laptop wrote, so a pgid the other laptop just recorded is never cleared.
+ */
+export async function clearWorker(pool: Pool, taskId: string, pgid: number, host?: string | null): Promise<void> {
   await pool.query(
     `UPDATE autonomous_tasks SET worker_pid = NULL, worker_pgid = NULL, worker_host = NULL, worker_started_at = NULL, updated_at = now()
-     WHERE id = $1 AND worker_pgid = $2`,
-    [taskId, pgid],
+     WHERE id = $1 AND worker_pgid = $2 AND ($3::boolean IS FALSE OR worker_host IS NOT DISTINCT FROM $4::text)`,
+    [taskId, pgid, host !== undefined, host ?? null],
   )
 }
 
@@ -447,6 +459,8 @@ export async function markInterruptedTasks(client: PoolClient, workspaceId: stri
          updated_at = now()
      WHERE t.workspace_id = $1 AND t.lease_owner IS NOT NULL AND ${leaseHost} <> '' AND ${leaseHost} <> $2
        AND NOT EXISTS (SELECT 1 FROM failover_hosts h WHERE h.name = ${leaseHost} AND h.last_seen_at > now() - ($3 * interval '1 millisecond'))
+       -- A worker recorded on the gone laptop may still be running there offline; it reconnects and posts.
+       AND (t.worker_pgid IS NULL OR t.worker_host IS NOT DISTINCT FROM $2)
      RETURNING t.*`,
     [workspaceId, host, HOST_GONE_MS],
   )
@@ -591,15 +605,15 @@ export async function requestCancel(pool: Pool | PoolClient, taskId: string): Pr
   return rows[0] ? toTask(rows[0]) : undefined
 }
 
-/** Tasks whose wakeup time has come, not cancelled and not leased; with failover on, not pinned to another laptop. */
-export async function listDueWakeups(pool: Pool, workspaceId: string, host: string | null = null): Promise<AutonomousTask[]> {
+/** Tasks whose wakeup time has come, not cancelled and not leased; with failover on, only those that may run on this laptop. */
+export async function listDueWakeups(pool: Pool, workspaceId: string, place: Placement = LOCAL_PLACEMENT): Promise<AutonomousTask[]> {
   const { rows } = await pool.query<TaskRow>(
-    `SELECT * FROM autonomous_tasks
-     WHERE workspace_id = $1 AND next_wakeup_at IS NOT NULL AND next_wakeup_at <= now()
-       AND cancel_requested_at IS NULL AND (lease_expires_at IS NULL OR lease_expires_at < now())
-       AND ($2::text IS NULL OR pinned_host IS NULL OR pinned_host = $2::text)
-     ORDER BY next_wakeup_at`,
-    [workspaceId, host],
+    `SELECT * FROM autonomous_tasks AS t
+     WHERE t.workspace_id = $1 AND t.next_wakeup_at IS NOT NULL AND t.next_wakeup_at <= now()
+       AND t.cancel_requested_at IS NULL AND (t.lease_expires_at IS NULL OR t.lease_expires_at < now())
+       AND ${taskRunsHereSql('t', '$2', '$3')}
+     ORDER BY t.next_wakeup_at`,
+    [workspaceId, place.host, place.isDefault],
   )
   return rows.map(toTask)
 }
@@ -631,4 +645,39 @@ export async function inTransaction<T>(pool: Pool, body: (client: PoolClient) =>
   } finally {
     client.release()
   }
+}
+
+/**
+ * A guest turn's place in its thread (README, "Failover"): the laptop it runs
+ * on, the laptop that owns the thread, and whether the owner's own task is
+ * mid-turn. Undefined for an ordinary task.
+ */
+export async function guestPlace(pool: Pool | PoolClient, sessionId: string): Promise<{ guest: string; owner: string; ownerRunning: boolean } | undefined> {
+  const { rows } = await pool.query<{ guest: string; owner: string | null; running: boolean }>(
+    `SELECT s.guest_host AS guest, th.host AS owner,
+            EXISTS (SELECT 1 FROM sessions os JOIN autonomous_tasks ot ON ot.session_id = os.id
+                     WHERE os.workspace_id = s.workspace_id AND os.adapter = s.adapter AND os.thread_ref = s.thread_ref
+                       AND os.guest_host IS NULL AND os.state = 'active' AND ot.lease_owner IS NOT NULL) AS running
+       FROM sessions s
+       LEFT JOIN thread_hosts th ON th.workspace_id = s.workspace_id AND th.adapter = s.adapter AND th.thread_ref = s.thread_ref
+      WHERE s.id = $1 AND s.guest_host IS NOT NULL`,
+    [sessionId],
+  )
+  const row = rows[0]
+  if (!row || row.owner === null) return undefined
+  return { guest: row.guest, owner: row.owner, ownerRunning: row.running }
+}
+
+/** The line a guest turn's first reply starts with (decision 2). */
+export function guestReplyPrefix(place: { guest: string; owner: string; ownerRunning: boolean }): string {
+  const where = place.ownerRunning ? `this thread's run is working on \`${place.owner}\`` : `this thread belongs to \`${place.owner}\``
+  return `\`${place.guest}\`: ${where}; this answer is from ${place.guest}.`
+}
+
+/** What a guest turn's chat is told first: whose thread it is, and that the owner's work is not its to touch. */
+export function guestNote(place: { guest: string; owner: string }): string {
+  return (
+    `You are answering on ${place.guest} as a guest in a Slack thread that belongs to ${place.owner}. ` +
+    `Answer what was asked of you here and do the work on this laptop. Do not touch ${place.owner}'s run: not its worktree, its branch, its processes or its files.`
+  )
 }

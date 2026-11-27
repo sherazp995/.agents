@@ -52,14 +52,14 @@ describe('failover doctor check', () => {
     const result = await checkFailover({ buildMigration: newestMigration(MIGRATIONS) }).run(context(databaseUrl, { host: 'sara-mbp', preferred: false }))
 
     expect(result.status).toBe('ok')
-    expect(result.detail).toMatch(/^hassan-mbp answers, renewed [56]s ago \(database time\); this laptop is sara-mbp, not preferred/)
+    expect(result.detail).toMatch(/^hassan-mbp is the default, renewed [56]s ago \(database time\); this laptop is sara-mbp, not preferred/)
   })
 
   it('fails when this build is older than the database', async () => {
     const result = await checkFailover({ buildMigration: '0029_task_read_only.sql' }).run(context(databaseUrl, { host: 'sara-mbp', preferred: false }))
 
     expect(result.status).toBe('failed')
-    expect(result.detail).toContain('this laptop will not answer')
+    expect(result.detail).toContain('this laptop stays off Slack until it is updated')
   })
 
   it('warns when the other laptop runs a build older than the database', async () => {

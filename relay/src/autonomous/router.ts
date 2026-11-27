@@ -88,6 +88,8 @@ export async function routeAutonomousEvent(
     principalId,
     adapter: event.adapter,
     threadRef: thread.threadRef,
+    // A guest turn: its own session and task in the thread, run only on the guest laptop.
+    guestHost: event.guestHost ?? null,
     event: {
       id: event.platformEventId,
       principalId,

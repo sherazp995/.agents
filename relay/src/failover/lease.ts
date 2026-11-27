@@ -30,17 +30,6 @@ export type Renewal = {
   readonly held: boolean
   /** A preferred laptop seen within HOST_FRESH_SECONDS is asking for the record back. */
   readonly wantsBack: boolean
-  /** Another laptop was seen within HOST_FRESH_SECONDS, so it could take over. */
-  readonly otherSeen: boolean
-}
-
-/** The record as it stands, read when a recovery could neither renew nor claim it. */
-export type LeaseState = {
-  readonly holder: string | null
-  readonly generation: string
-  readonly live: boolean
-  /** Another laptop's fresh hand back flag reserves the record for it. */
-  readonly reservedByOther: boolean
 }
 
 /** The one query shape the failover statements use. */
@@ -122,7 +111,7 @@ export async function claimLease(pool: LeaseDb, host: string, ttlSeconds = LEASE
  * to take it.
  */
 export async function renewLease(pool: LeaseDb, host: string, generation: string, ttlSeconds = LEASE_TTL_SECONDS): Promise<Renewal> {
-  const { rows } = await pool.query<{ held: boolean; wants_back: boolean; other_seen: boolean }>(
+  const { rows } = await pool.query<{ held: boolean; wants_back: boolean }>(
     `WITH renewed AS (
        UPDATE failover_lease
           SET renewed_at = now(), expires_at = now() + make_interval(secs => $3::float8)
@@ -134,35 +123,103 @@ export async function renewLease(pool: LeaseDb, host: string, generation: string
      SELECT EXISTS (SELECT 1 FROM renewed) AS held,
             EXISTS (SELECT 1 FROM failover_hosts h
                      WHERE h.name <> $1 AND h.preferred AND h.wants_back_at IS NOT NULL
-                       AND h.last_seen_at > now() - make_interval(secs => $4::float8)) AS wants_back,
-            EXISTS (SELECT 1 FROM failover_hosts h
-                     WHERE h.name <> $1 AND h.last_seen_at > now() - make_interval(secs => $4::float8)) AS other_seen`,
+                       AND h.last_seen_at > now() - make_interval(secs => $4::float8)) AS wants_back`,
     [host, generation, ttlSeconds, HOST_FRESH_SECONDS],
   )
-  return { held: rows[0]?.held === true, wantsBack: rows[0]?.wants_back === true, otherSeen: rows[0]?.other_seen === true }
+  return { held: rows[0]?.held === true, wantsBack: rows[0]?.wants_back === true }
 }
 
-/** True while the record is still ours at this generation and unexpired: the check before starting work. */
-export async function stillHolds(pool: LeaseDb, host: string, generation: string): Promise<boolean> {
+/** The live holder of the default record, by the database's clock; null when nobody holds it. */
+export async function liveHolder(pool: LeaseDb): Promise<string | null> {
+  const { rows } = await pool.query<{ holder: string }>('SELECT holder FROM failover_lease WHERE id = 1 AND holder IS NOT NULL AND expires_at > now()')
+  return rows[0]?.holder ?? null
+}
+
+/**
+ * The laptops that can take work now: seen within HOST_FRESH_SECONDS and on
+ * a build that knows every migration the database has. A laptop on an older
+ * build keeps updating its last seen time while it waits to be updated, so
+ * being seen alone does not make it ready.
+ */
+export async function readyHosts(pool: LeaseDb): Promise<string[]> {
+  const { rows } = await pool.query<{ name: string }>(
+    `SELECT name FROM failover_hosts
+      WHERE last_seen_at > now() - make_interval(secs => $1::float8)
+        AND build_migration >= COALESCE((SELECT max(name) FROM schema_migrations), '')
+      ORDER BY name`,
+    [HOST_FRESH_SECONDS],
+  )
+  return rows.map((row) => row.name)
+}
+
+/** Publishes the Slack reminder channels this laptop's config lists, so a reminder the other laptop receives is passed here. */
+export async function publishReminderChannels(pool: LeaseDb, host: string, channels: readonly string[]): Promise<void> {
+  await pool.query('UPDATE failover_hosts SET reminder_channels = $2 WHERE name = $1', [host, [...channels]])
+}
+
+/** The ready laptop whose config lists `channel` as a reminder channel, if any. */
+export async function reminderHost(pool: LeaseDb, channel: string): Promise<string | null> {
+  const { rows } = await pool.query<{ name: string }>(
+    `SELECT name FROM failover_hosts
+      WHERE $1 = ANY (reminder_channels) AND last_seen_at > now() - make_interval(secs => $2::float8)
+      ORDER BY name LIMIT 1`,
+    [channel, HOST_FRESH_SECONDS],
+  )
+  return rows[0]?.name ?? null
+}
+
+/** True once migration 0034 has added the pause columns; before it, a laptop cannot be asked to pause. */
+export async function pauseSupported(pool: LeaseDb): Promise<boolean> {
   const { rows } = await pool.query(
-    'SELECT 1 FROM failover_lease WHERE id = 1 AND holder = $1 AND generation = $2::bigint AND expires_at > now()',
-    [host, generation],
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'failover_hosts' AND column_name = 'pause_requested_at'",
   )
   return rows.length > 0
 }
 
-/** Who has the record now, by the database's clock. */
-export async function readLease(pool: LeaseDb, host: string): Promise<LeaseState> {
-  const { rows } = await pool.query<{ holder: string | null; generation: string; live: boolean; reserved: boolean }>(
-    `SELECT holder, generation::text AS generation, COALESCE(expires_at > now(), false) AS live,
-            EXISTS (SELECT 1 FROM failover_hosts h
-                     WHERE h.name <> $1 AND h.wants_back_at IS NOT NULL
-                       AND h.last_seen_at > now() - make_interval(secs => $2::float8)) AS reserved
-       FROM failover_lease WHERE id = 1`,
+/** Other laptops seen recently, with their build: who must pause, or be stopped, before a migration. */
+export async function otherFreshHosts(pool: LeaseDb, host: string): Promise<{ name: string; buildMigration: string }[]> {
+  const { rows } = await pool.query<{ name: string; build_migration: string }>(
+    `SELECT name, build_migration FROM failover_hosts
+      WHERE name <> $1 AND last_seen_at > now() - make_interval(secs => $2::float8) ORDER BY name`,
     [host, HOST_FRESH_SECONDS],
   )
-  const row = rows[0]
-  return { holder: row?.holder ?? null, generation: row?.generation ?? '', live: row?.live === true, reservedByOther: row?.reserved === true }
+  return rows.map((row) => ({ name: row.name, buildMigration: row.build_migration }))
+}
+
+/** This laptop asks the others to stop starting work so it can migrate (null withdraws the request). */
+export async function setPauseRequest(pool: LeaseDb, host: string, requested: boolean): Promise<void> {
+  await pool.query(
+    `UPDATE failover_hosts SET pause_requested_at = CASE WHEN $2 THEN COALESCE(pause_requested_at, now()) END, last_seen_at = now() WHERE name = $1`,
+    [host, requested],
+  )
+}
+
+/** True while another laptop seen recently asks this one to pause. */
+export async function pauseRequestedByOther(pool: LeaseDb, host: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM failover_hosts
+      WHERE name <> $1 AND pause_requested_at IS NOT NULL AND last_seen_at > now() - make_interval(secs => $2::float8)`,
+    [host, HOST_FRESH_SECONDS],
+  )
+  return rows.length > 0
+}
+
+/** Records that this laptop has stopped starting work for a pause request (false: it has resumed). */
+export async function setPausedAt(pool: LeaseDb, host: string, paused: boolean): Promise<void> {
+  await pool.query('UPDATE failover_hosts SET paused_at = CASE WHEN $2 THEN now() END WHERE name = $1', [host, paused])
+}
+
+/** True when every other laptop seen recently has paused since this laptop asked. */
+export async function othersPaused(pool: LeaseDb, host: string): Promise<boolean> {
+  const { rows } = await pool.query<{ waiting: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM failover_hosts o, failover_hosts me
+        WHERE me.name = $1 AND o.name <> $1 AND o.last_seen_at > now() - make_interval(secs => $2::float8)
+          AND (me.pause_requested_at IS NULL OR o.paused_at IS NULL OR o.paused_at < me.pause_requested_at)
+     ) AS waiting`,
+    [host, HOST_FRESH_SECONDS],
+  )
+  return rows[0]?.waiting === false
 }
 
 /** Gives the record up so the other laptop can claim it at once; a no-op when it is no longer ours. */
@@ -195,20 +252,6 @@ export async function newerAppliedMigration(pool: LeaseDb, buildMigration: strin
     [buildMigration],
   )
   return rows[0]?.name ?? null
-}
-
-/**
- * True while `host` has a worker process recorded: a task or team member
- * whose process group is still set. The runtime clears it when the worker
- * ends.
- */
-export async function hostHasRunningWorkers(pool: LeaseDb, host: string): Promise<boolean> {
-  const { rows } = await pool.query<{ busy: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM autonomous_tasks WHERE worker_host = $1 AND worker_pgid IS NOT NULL)
-         OR EXISTS (SELECT 1 FROM team_assignments WHERE worker_host = $1 AND worker_pgid IS NOT NULL) AS busy`,
-    [host],
-  )
-  return rows[0]?.busy === true
 }
 
 /** True while another laptop seen recently still has workers running; migrations wait for them. */

@@ -804,6 +804,43 @@ describeDb('orchestrator', () => {
         expect(await runCount(workspaceId)).toBe(0)
       })
 
+      it("records the thread's laptop only once the member check passed, and never for a guest turn", async () => {
+        const { workspaceId, principalId: ownerId } = await createFixtures()
+        const memberId = await memberIn(workspaceId)
+        const host = `laptop-${randomUUID().slice(0, 8)}`
+        await pool.query(`INSERT INTO failover_hosts (name, home, build_migration) VALUES ($1, '/Users/x', '0034')`, [host])
+        const reply = buildEvent({ workspaceId, principalId: memberId })
+        const session = await threadOf(workspaceId, ownerId, reply)
+        await pool.query(`UPDATE sessions SET mode = 'autonomous' WHERE id = $1`, [session.id])
+        const auto = fakeAutonomous('handled')
+        const withHost = (event: ChatEvent) =>
+          handleChatEvent({ pool, dispatcher: new MockAdapter(), log: silentLogger(), capabilities: { echo }, policy: PERMISSIVE_POLICY, autonomous: auto.routing, failoverHost: host }, event)
+        const owners = async () => (await pool.query('SELECT host FROM thread_hosts WHERE workspace_id = $1', [workspaceId])).rows
+
+        await withHost(reply)
+        expect(await owners()).toEqual([])
+        await withHost({ ...buildEvent({ workspaceId, principalId: ownerId }), guestHost: host })
+        expect(await owners()).toEqual([])
+        await withHost(buildEvent({ workspaceId, principalId: ownerId }))
+        expect(await owners()).toEqual([{ host }])
+      })
+
+      it("a guest Stop pauses only the guest turn and leaves the owner's run going", async () => {
+        const { workspaceId, principalId: ownerId } = await createFixtures()
+        const first = buildEvent({ workspaceId, principalId: ownerId })
+        const owner = await threadOf(workspaceId, ownerId, first)
+        const threadRef = composeThreadRef(first.ref.channel, first.ref.message ?? '')
+        const guest = await findOrCreateSession(pool, { workspaceId, principalId: ownerId, adapter: 'test', threadRef, guestHost: 'zubair-mbp' })
+        await pool.query(`UPDATE sessions SET mode = 'autonomous' WHERE id = ANY($1)`, [[owner.id, guest.id]])
+        const auto = fakeAutonomous('handled')
+        const stop = { ...buildEvent({ workspaceId, principalId: ownerId, channel: first.ref.channel, message: first.ref.message ?? '', text: 'stop' }), guestHost: 'zubair-mbp' }
+
+        await handle(stop, auto, new MockAdapter())
+
+        expect(guest.id).not.toBe(owner.id)
+        expect(auto.paused).toEqual([guest.id])
+      })
+
       it('lets a member work and Stop in their own thread', async () => {
         const { workspaceId } = await createFixtures()
         const memberId = await memberIn(workspaceId)

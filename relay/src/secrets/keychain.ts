@@ -37,6 +37,8 @@ export function relaySecretsReader(relayHome: string): KeychainReader {
 
 /** The approval receipt HMAC key (src/approvals/receipt.ts), read by the daemon only. */
 export const APPROVAL_RECEIPT_KEY_SECRET = 'relay-approval-receipt-key'
+/** The key both failover laptops share, to pass a shell password popup between them sealed (README, "Failover"). */
+export const FORWARD_KEY_SECRET = 'relay-forward-key'
 /** The `relay_app` connection URL that `database.url: keystore:relay-database-url` names after `relay secrets migrate`. */
 export const DATABASE_URL_SECRET = 'relay-database-url'
 /** The URL config held before migration, kept so the operator still has it; nothing in relay reads it. */

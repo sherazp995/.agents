@@ -98,12 +98,11 @@ starts it again (it never restarts a running one). Both work on macOS
 (launchd) and Linux (systemd), even without a build. A stopped daemon starts
 again at the next login, because it stays installed; `relay uninstall-service`
 removes it. A stop drops held replies like a restart does, and on the laptop
-that answers Slack it hands the failover role to the other laptop, which keeps
-answering.
+that is the default it hands that role to the other laptop at once.
 `relay status` says whether the daemon is running and how often launchd or
 systemd has started it (so a crash loop shows), whether it answers Slack,
-waits to take the failover record, is recovering it, or is stepping down
-and what it is waiting on, the last log line and last error of its
+is the default laptop, is off Slack without the database, or is paused
+for the other laptop's migration, the last log line and last error of its
 current run, whether the database answers (one connection, 10 s limit), and
 the log's path; it exits 1 when the daemon is not running.
 
@@ -310,38 +309,72 @@ and saved chats) in one cloud Postgres database instead of on one laptop.
 
 How it behaves:
 
-- One laptop answers at a time. It holds a "who is answering" record in
-  the database and renews it every 15 seconds. The other laptop waits: it
-  keeps no Slack connection open and starts no work.
-- When the answering laptop goes quiet, its record expires after 60
-  seconds and the waiting laptop takes over, so Relay answers again within
-  about a minute.
-- One laptop is preferred (Hassan's). When it comes back it takes new
-  messages back within about 30 seconds.
-- A turn already running on a laptop finishes there and its reply still
-  posts, even after the other laptop took over. A turn cut off because its
-  laptop died is lost; its thread gets a note asking you to mention Relay
-  again.
-- A short database failure does not end a running turn or disconnect
-  Slack. A turn stops only when its claim is confirmed lost or has expired.
-  If the laptop can no longer trust its record, it starts no new work,
-  refuses new Slack events so Slack can resend them, and tries to get the
-  record back. Buttons and popups can fail during this time; try them again.
-- Recovery ends at once if another laptop holds the record, asks for it
-  back, or the database has a newer Relay version. Otherwise it stops after
-  about 75 seconds when the other laptop was seen recently, or about 2
-  minutes when it was not. Relay then disconnects from Slack, finishes running work and
-  restarts as standby. `relay status` shows `recovering the failover role`
-  or `stepping down, waiting on` the work.
+- Both laptops stay connected to Slack and both answer. Slack hands each
+  message, button click or popup to one of them; that laptop saves it to the
+  database before telling Slack it arrived, then decides which laptop it is
+  for and passes it on through the database when it is the other one.
+- `@relay <laptop> ...` (for example `@relay zubair-mbp check the build`)
+  goes to that laptop, whichever one Slack handed it to. The laptop's name
+  is taken out, so the request is what follows it. When that laptop is
+  offline, Relay replies "`<laptop>` is offline right now".
+- A plain `@relay ...` goes to the default laptop. The default is the laptop
+  holding a record in the database that it renews every 15 seconds. One
+  laptop is preferred (Hassan's): when it is back, it becomes the default
+  again within about 30 seconds. When the default laptop goes quiet, its
+  record expires after 60 seconds and the other laptop becomes the default,
+  so a plain mention is answered again within about 75 seconds.
+- A thread belongs to the laptop that handled its first message. Plain
+  replies in it go to that laptop while it is online, and to the default
+  laptop when it is not.
+- Naming the other laptop in a thread (`@relay zubair-mbp what is 2+2` in a
+  thread that belongs to hassan-mbp) is a guest turn on zubair-mbp. It has
+  its own chat, folder and task in that thread, reads the thread for
+  context, and never touches the owner's run, worktree or queued messages.
+  Its replies start with "`zubair-mbp`: this thread's run is working on
+  `hassan-mbp`; this answer is from zubair-mbp." The thread stays with its
+  owner; later named messages continue the guest chat, plain ones go to the
+  owner. `@relay zubair-mbp stop` stops only the guest turn.
+- A button goes to the laptop that posted it, and a popup to the laptop
+  that opened it. A popup the other laptop receives waits up to 2.5 seconds
+  for the answer, so an error in what you typed still shows; a slower answer
+  closes the popup and the outcome is posted in the thread. A shell password
+  typed into a popup is sealed with the `relay-forward-key` keychain item
+  before it is saved, and erased once read: set the same value on both
+  laptops (`relay secrets set relay-forward-key`), or a password popup is
+  answered only by the laptop Slack hands it to.
+- A Slackbot reminder goes to the laptop whose config lists its channel.
+- Running work keeps running when the network drops. A turn is stopped only
+  when its claim is confirmed gone (a Stop), never because the database was
+  unreachable; the Claude or Codex worker underneath carries on, and its
+  reply is posted once the database answers again. Meanwhile the other
+  laptop leaves that task alone: a plain message in its thread is queued for
+  it, with one note that the run is still going on the offline laptop. Say
+  stop to end it there and carry on with the other laptop.
+- A laptop that cannot reach the database for 40 seconds leaves Slack, so
+  Slack sends everything to the other laptop, and reconnects as soon as the
+  database answers.
+- A laptop with migrations to apply stays off Slack until they are applied.
+  It asks the other laptop to pause; that laptop keeps saving messages but
+  starts nothing until the migrations are done, then handles what it saved.
+  A laptop whose build is older than the database stays off Slack and
+  answers nothing until it is updated.
 - After each turn the Claude chat of a Slack thread is saved to the
   database (compressed, kept 7 days after the thread's last turn, 300 MB in
   total), so whichever laptop picks up the thread continues the same
   conversation.
 - The kill switch lives in the database, so `relay kill engage` on either
   laptop stops work on whichever laptop is answering.
-- `relay doctor` shows which laptop answers, how long ago it renewed the
-  record, this laptop's name and whether it is preferred, and whether
-  either laptop runs a build too old to answer.
+- `relay doctor` shows which laptop is the default, how long ago it
+  renewed the record, this laptop's name and whether it is preferred, and
+  whether either laptop runs a build too old to answer. `relay status` says
+  whether this laptop is the default, off Slack without the database, or
+  paused for the other laptop's migration.
+
+First rollout of this version (migration 0034): the older build cannot
+pause, so update one laptop at a time in this order. Stop Relay on
+zubair-mbp (`relay stop`). Update and start hassan-mbp; it applies 0034.
+Then update and start zubair-mbp. While an older build is online, the new
+one waits and logs "stop Relay on zubair-mbp or update it first".
 
 What is not shared:
 

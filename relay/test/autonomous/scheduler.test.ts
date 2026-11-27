@@ -6,12 +6,12 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Pool } from 'pg'
 import { closePool, createPool } from '../../src/db/pool.js'
-import { applyMigrations } from '../../src/db/migrate.js'
+import { applyMigrations, newestMigrationName } from '../../src/db/migrate.js'
 import { resolveWorkspaceId } from '../../src/tenancy/workspaces.js'
 import { provisionPrincipal } from '../../src/tenancy/principals.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { processGroupAlive, spawnGated } from '../../src/process/gated-spawn.js'
-import { acquireLease, addNote, intakeMention, loadTask, PAUSED_NOTE, pinReminderTask, updateTask, type AutonomousTask } from '../../src/autonomous/store.js'
+import { acquireLease, addNote, intakeMention, loadTask, PAUSED_NOTE, pinReminderTask, renewLease, updateTask, type AutonomousTask } from '../../src/autonomous/store.js'
 import { downloadTaskFiles, type FileFetch } from '../../src/autonomous/files.js'
 import { claimRead, createScheduler, INTERRUPTED_NOTE, pauseAutonomousTask, stopAutonomousTask, type SchedulerDeps, type SchedulerEffects, type TurnRequestContext, type TurnResult } from '../../src/autonomous/scheduler.js'
 import { missingFolderText, placeTaskTurn, repositoryFallbackText } from '../../src/autonomous/runtime.js'
@@ -627,28 +627,54 @@ describe('autonomous scheduler', () => {
     }
   })
 
-  it('a turn is aborted once its claim has really expired with renewals still failing', async () => {
+  it('a turn outlives its claim while renewals keep failing, and still posts its reply', async () => {
     const { workspaceId } = await newTask()
-    let abortedAfterMs: number | undefined
-    const startedAt = Date.now()
+    let aborted: boolean | undefined
     const h = harness([
-      (context) =>
-        new Promise((resolve) => {
-          context.signal.addEventListener('abort', () => {
-            abortedAfterMs = Date.now() - startedAt
-            resolve(reply())
-          })
-        }),
+      async (context) => {
+        // Longer than the whole claim: an outage the Claude worker underneath does not notice.
+        await new Promise((resolve) => setTimeout(resolve, 4000))
+        aborted = context.signal.aborted
+        return reply('Finished offline.')
+      },
     ])
     const spy = failTaskRenewals()
     try {
       await scheduler(workspaceId, h, { leaseTtlMs: 3000 }).tick()
-      await vi.waitFor(() => expect(abortedAfterMs).toBeDefined(), { timeout: 5000 })
     } finally {
       spy.mockRestore()
     }
-    expect(abortedAfterMs).toBeGreaterThanOrEqual(2900)
-  })
+    expect(aborted).toBe(false)
+    expect(h.posts).toEqual(['Finished offline.'])
+  }, 10_000)
+
+  it('a turn that finishes while the database is unreachable posts its reply once it answers', async () => {
+    const { workspaceId } = await newTask()
+    let outageWrites = 0
+    let offline = false
+    const connect = pool.connect.bind(pool) as (...args: unknown[]) => unknown
+    const spy = vi.spyOn(pool, 'connect').mockImplementation(((...args: unknown[]) => {
+      if (offline && outageWrites < 1) {
+        outageWrites += 1
+        return Promise.reject(Object.assign(new Error('getaddrinfo ENOTFOUND db.example'), { code: 'ENOTFOUND' }))
+      }
+      return connect(...args)
+    }) as never)
+    const h = harness([
+      async () => {
+        offline = true
+        return reply('Finished during the outage.')
+      },
+    ])
+    try {
+      // One real retry wait (5 seconds) between the failed write and the one that lands.
+      await scheduler(workspaceId, h).tick()
+    } finally {
+      spy.mockRestore()
+    }
+    expect(outageWrites).toBe(1)
+    expect(h.posts).toEqual(['Finished during the outage.'])
+  }, 15_000)
 
   it('kills a live recorded worker at startup before any new turn', async () => {
     const { workspaceId, task } = await newTask()
@@ -737,21 +763,18 @@ describe('autonomous scheduler', () => {
     const name = (laptop: string): string => `${laptop}-${randomUUID().slice(0, 8)}`
     const laptop = async (host: string, lastSeen: 'now' | 'gone'): Promise<void> => {
       await pool.query(
-        `INSERT INTO failover_hosts (name, home, build_migration, last_seen_at) VALUES ($1, $2, '0030', now() - $3::interval)`,
-        [host, `/Users/${host}`, lastSeen === 'now' ? '0 seconds' : '2 minutes'],
+        `INSERT INTO failover_hosts (name, home, build_migration, last_seen_at) VALUES ($1, $2, $3, now() - $4::interval)`,
+        [host, `/Users/${host}`, newestMigrationName('src/db/migrations'), lastSeen === 'now' ? '0 seconds' : '2 minutes'],
       )
     }
-    function gate(host: string, allowed: { value: boolean } = { value: true }): FailoverGate & { refusals: () => number } {
-      let refused = 0
-      return {
-        host,
-        refusals: () => refused,
-        holdsFresh: () => allowed.value,
-        mayStartWork: async () => {
-          if (!allowed.value) refused += 1
-          return allowed.value
-        },
-      }
+    function gate(host: string, isDefault = true): FailoverGate {
+      return { host, isDefault: () => isDefault }
+    }
+    const ownThread = async (task: AutonomousTask, host: string): Promise<void> => {
+      await pool.query(
+        `INSERT INTO thread_hosts (workspace_id, adapter, thread_ref, host) SELECT workspace_id, adapter, thread_ref, $2 FROM sessions WHERE id = $1`,
+        [task.sessionId, host],
+      )
     }
     function sleeper(): ReturnType<typeof spawnGated> {
       const dir = mkdtempSync(join(tmpdir(), 'relay-other-'))
@@ -761,7 +784,7 @@ describe('autonomous scheduler', () => {
       return spawnGated({ bin, args: [], cwd: dir, env: process.env, timeoutMs: 60_000 })
     }
 
-    it("never signals a worker another laptop recorded, at startup, on a turn, or on Stop", async () => {
+    it("never signals a worker another laptop recorded, and starts no turn over it, at startup, on a tick, or on Stop", async () => {
       const { workspaceId, task } = await newTask()
       const here = name('laptop-a')
       const other = name('laptop-b')
@@ -777,8 +800,32 @@ describe('autonomous scheduler', () => {
       await stopAutonomousTask(pool, h.effects, task.id, here)
       await s.stop()
 
-      expect(h.posts).toEqual(['Done here.'])
+      // That worker may be the other laptop's turn still running: no turn here either.
+      expect(h.posts).toEqual([])
       expect(processGroupAlive(child.pgid)).toBe(true)
+      process.kill(-child.pgid, 'SIGKILL')
+      await child.done
+    })
+
+    it('clears its own record of a worker that exited, and leaves a live one and the other laptop\'s alone', async () => {
+      const here = name('laptop-a')
+      const other = name('laptop-b')
+      await laptop(other, 'now')
+      const dead = await newTask()
+      const live = await newTask()
+      const elsewhere = await newTask()
+      const child = sleeper()
+      // A turn that ended normally: its lease is released, its worker record stays.
+      await pool.query('UPDATE autonomous_tasks SET worker_pid = 999998, worker_pgid = 999998, worker_host = $2, next_wakeup_at = NULL WHERE id = $1', [dead.task.id, here])
+      await pool.query('UPDATE autonomous_tasks SET worker_pid = $2, worker_pgid = $2, worker_host = $3, next_wakeup_at = NULL WHERE id = $1', [live.task.id, child.pgid, here])
+      await pool.query('UPDATE autonomous_tasks SET worker_pid = 999997, worker_pgid = 999997, worker_host = $2, next_wakeup_at = NULL WHERE id = $1', [elsewhere.task.id, other])
+      const h = harness([])
+
+      for (const workspaceId of new Set([dead.workspaceId, live.workspaceId, elsewhere.workspaceId])) await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here) }).tick()
+
+      expect(await loadTask(pool, dead.task.id)).toMatchObject({ workerPgid: null, workerHost: null })
+      expect(await loadTask(pool, live.task.id)).toMatchObject({ workerPgid: child.pgid, workerHost: here })
+      expect(await loadTask(pool, elsewhere.task.id)).toMatchObject({ workerPgid: 999997, workerHost: other })
       process.kill(-child.pgid, 'SIGKILL')
       await child.done
     })
@@ -789,8 +836,8 @@ describe('autonomous scheduler', () => {
       const gone = name('laptop-b')
       await laptop(gone, 'gone')
       await pool.query(
-        `UPDATE autonomous_tasks SET lease_owner = $2, lease_expires_at = now() - interval '1 second', worker_pid = 999999, worker_pgid = 999999, worker_host = $3 WHERE id = $1`,
-        [task.id, `relay-4242@${gone}`, gone],
+        `UPDATE autonomous_tasks SET lease_owner = $2, lease_expires_at = now() - interval '1 second' WHERE id = $1`,
+        [task.id, `relay-4242@${gone}`],
       )
       const h = harness([async () => reply('should not run')])
 
@@ -804,6 +851,34 @@ describe('autonomous scheduler', () => {
       expect(h.turns).toHaveLength(0)
       // The message stays for the turn the next mention starts.
       expect(await loadTask(pool, task.id)).toMatchObject({ nextWakeupAt: null, leaseOwner: null, workerPgid: null, workerHost: null, pendingEvents: [expect.objectContaining({ text: 'fix the login bug' })] })
+    })
+
+    it('leaves a turn whose worker runs on a laptop gone offline for that laptop, until a Stop here frees the thread', async () => {
+      const { workspaceId, task, say } = await newTask()
+      const here = name('laptop-a')
+      const gone = name('laptop-b')
+      await laptop(gone, 'gone')
+      // The claim expired while that laptop was offline; its Claude worker is still working there.
+      await pool.query(
+        `UPDATE autonomous_tasks SET lease_owner = $2, lease_expires_at = now() - interval '5 minutes', worker_pid = 999999, worker_pgid = 999999, worker_host = $3 WHERE id = $1`,
+        [task.id, `relay-4242@${gone}`, gone],
+      )
+      await say('and the signup page')
+      const h = harness([async () => reply('Carried on here.')])
+      const s = createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here) })
+
+      await s.tick()
+      await s.tick()
+      expect(h.posts).toEqual([])
+      expect(h.turns).toHaveLength(0)
+      expect(await loadTask(pool, task.id)).toMatchObject({ leaseOwner: `relay-4242@${gone}`, workerPgid: 999999, workerHost: gone })
+
+      const paused = await pauseAutonomousTask(pool, h.effects, task.id, new Date().toISOString(), here)
+      expect(paused.kind).not.toBe('missing')
+      expect(await loadTask(pool, task.id)).toMatchObject({ workerPgid: null, workerHost: null })
+      // The offline laptop's claim is fenced: its renewal on reconnect finds a new generation.
+      expect(await renewLease(pool, { taskId: task.id, owner: `relay-4242@${gone}`, generation: task.leaseGeneration }, 60_000)).toBe(false)
+      await s.stop()
     })
 
     it('runs a reminder task only on the laptop it is pinned to', async () => {
@@ -822,10 +897,47 @@ describe('autonomous scheduler', () => {
       expect(h.posts).toEqual(['Deploy is green.'])
     })
 
-    it('starts nothing once the record is lost, steps down, and lets the running turn finish and post', async () => {
+    it('takes a task only on its thread\'s laptop while that one is ready, and on the default laptop once it is not', async () => {
+      const { workspaceId, task } = await newTask()
+      const owner = name('laptop-b')
+      const here = name('laptop-a')
+      await laptop(owner, 'now')
+      await laptop(here, 'now')
+      await ownThread(task, owner)
+      const h = harness([async () => reply('Answered by the default laptop.')])
+
+      await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here, true) }).tick()
+      expect(h.turns).toHaveLength(0)
+      // The grab itself refuses too, not only the list.
+      expect(await acquireLease(pool, task.id, 'other', 60_000, { host: here, isDefault: true })).toBeUndefined()
+
+      await pool.query("UPDATE failover_hosts SET last_seen_at = now() - interval '2 minutes' WHERE name = $1", [owner])
+      await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here, false) }).tick()
+      expect(h.turns).toHaveLength(0)
+      await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here, true) }).tick()
+      expect(h.posts).toEqual(['Answered by the default laptop.'])
+    })
+
+    it('runs a guest turn only on its guest laptop, even when that laptop is gone', async () => {
+      const { workspaceId, task } = await newTask()
+      const guest = name('laptop-b')
+      const here = name('laptop-a')
+      await laptop(guest, 'gone')
+      await pool.query('UPDATE sessions SET guest_host = $2 WHERE id = $1', [task.sessionId, guest])
+      await laptop(here, 'now')
+      await ownThread(task, here)
+      const h = harness([async () => reply('Guest answer.')])
+
+      await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(here, true) }).tick()
+      expect(h.turns).toHaveLength(0)
+      await createScheduler({ ...schedulerDeps(workspaceId, h), failover: gate(guest, false) }).tick()
+      // Its reply says whose thread it is, and its chat was told not to touch the owner's run.
+      expect(h.posts).toEqual([`\`${guest}\`: this thread belongs to \`${here}\`; this answer is from ${guest}.\n\nGuest answer.`])
+      expect(h.turns[0]?.prompt).toContain(`Do not touch ${here}'s run`)
+    })
+
+    it('a paused scheduler starts nothing new, lets the running turn post, and resumes', async () => {
       const first = await newTask('first thread')
-      const allowed = { value: true }
-      const failover = gate(name('laptop-a'), allowed)
       let release: () => void = () => undefined
       const h = harness([
         async () => {
@@ -834,25 +946,27 @@ describe('autonomous scheduler', () => {
           })
           return reply('First answered.')
         },
-        async () => reply('should not run'),
+        async () => reply('Second answered.'),
       ])
-      const s = createScheduler({ ...schedulerDeps(first.workspaceId, h), failover })
+      const s = createScheduler({ ...schedulerDeps(first.workspaceId, h), failover: gate(name('laptop-a')) })
       s.wake()
       const deadline = Date.now() + 3000
       while (h.turns.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
 
-      allowed.value = false
+      await s.setPaused(true)
       const second = await newTask('second thread', first.workspaceId)
+      // wake(), not tick(): the test tick waits for running turns, and the first one is held.
       s.wake()
-      while (failover.refusals() === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
-      const drained = s.drain()
-      release()
-      await drained
-
+      await new Promise((resolve) => setTimeout(resolve, 100))
       expect(h.turns).toHaveLength(1)
-      expect(h.posts).toEqual(['First answered.'])
-      expect(failover.refusals()).toBeGreaterThan(0)
+      release()
+      await vi.waitFor(() => expect(h.posts).toEqual(['First answered.']))
       expect((await loadTask(pool, second.task.id))?.pendingEvents).toHaveLength(1)
+
+      await s.setPaused(false)
+      await s.tick()
+      expect(h.posts).toEqual(['First answered.', 'Second answered.'])
+      await s.stop()
     })
 
     it('runs a turn whose worktree is missing here in its repository, saying so once', async () => {

@@ -38,13 +38,14 @@ import { defaultPersonasDir } from '../src/projects/persona-files.js'
 import { DEFAULT_UI_PORT } from '../src/config/schema.js'
 import { createLogger, type Logger } from '../src/obs/logger.js'
 import { createRotatingLogDestination } from '../src/obs/rotation.js'
-import { createPool, closePool, DAEMON_POOL_MAX } from '../src/db/pool.js'
+import { createPool, closePool, connectListenConnection, DAEMON_POOL_MAX } from '../src/db/pool.js'
 import { applyMigrations, newestMigrationName, pendingMigrations } from '../src/db/migrate.js'
-import { failoverTablesExist, otherHostsHaveRunningWorkers } from '../src/failover/lease.js'
+import { failoverTablesExist, newerAppliedMigration, otherFreshHosts, otherHostsHaveRunningWorkers, othersPaused, pauseSupported, setPauseRequest } from '../src/failover/lease.js'
+import { InboundRouter } from '../src/failover/route.js'
 import { FailoverRunner } from '../src/failover/run.js'
 import { startOrchestrator, type OrchestratorHandle, type StartOrchestratorOptions } from '../src/orchestrator.js'
 import { createRedis } from '../src/redis/client.js'
-import { APPROVAL_RECEIPT_KEY_SECRET, relaySecretsHelperPath } from '../src/secrets/keychain.js'
+import { APPROVAL_RECEIPT_KEY_SECRET, FORWARD_KEY_SECRET, relaySecretsHelperPath } from '../src/secrets/keychain.js'
 import { runSecretsSet } from '../src/cli/secrets.js'
 import { loadReaderKey, startReaderKeySync } from '../src/worker-env/keys.js'
 import type { ReaderKey } from '../src/worker-env/seal.js'
@@ -242,43 +243,78 @@ async function autonomousRuntimeOptions(config: RelayConfig, secrets: SecretProv
   }
 }
 
-/** What startWithFailover drives; the real FailoverRunner in the daemon. */
-export type StandbyGate = Pick<FailoverRunner, 'register' | 'waitForClaim'>
-
-/**
- * The failover start order (README, "Failover"). The very first start
- * applies every pending migration under the migration lock, because the
- * record does not exist before 0030. After that only the laptop holding the
- * record migrates and starts: a waiting laptop never reaches `start`, so it
- * opens no Slack connection and runs no scheduler. Undefined when stopped
- * while waiting.
- */
-export async function startWithFailover<T>(steps: {
-  gate: StandbyGate
-  tablesExist: () => Promise<boolean>
-  migrateAll: () => Promise<unknown>
-  migrateAsHolder: () => Promise<unknown>
-  start: () => Promise<T>
-}): Promise<T | undefined> {
-  if (!(await steps.tablesExist())) await steps.migrateAll()
-  await steps.gate.register()
-  if (!(await steps.gate.waitForClaim())) return undefined
-  await steps.migrateAsHolder()
-  return steps.start()
-}
-
-/** How often the holder rechecks before migrating while the other laptop finishes its turns. */
+/** The first migration whose pause request an older laptop understands (README, "Failover"). */
+export const PAUSE_MIGRATION = '0034'
+/** How often a laptop with migrations to apply rechecks the other laptop. */
 const MIGRATION_WAIT_MS = 15_000
 
-/** The holder applies new migrations only once the other laptop's running turns, built on the old schema, have ended. */
-async function migrateAsHolder(pool: Parameters<typeof applyMigrations>[0], host: string, log: Logger): Promise<void> {
-  for (;;) {
-    if ((await pendingMigrations(pool, MIGRATIONS_DIR)).length === 0) return
-    if (!(await otherHostsHaveRunningWorkers(pool, host))) break
-    log.info('failover: waiting for the other laptop to finish its running turns before applying migrations')
-    await new Promise((resolve) => setTimeout(resolve, MIGRATION_WAIT_MS))
+export type MigrationSteps = {
+  pending: () => Promise<number>
+  pauseSupported: () => Promise<boolean>
+  others: () => Promise<{ name: string; buildMigration: string }[]>
+  setPauseRequest: (requested: boolean) => Promise<void>
+  othersPaused: () => Promise<boolean>
+  othersRunning: () => Promise<boolean>
+  apply: () => Promise<unknown>
+  log: Pick<Logger, 'info' | 'warn'>
+  sleep?: (ms: number) => Promise<void>
+}
+
+/**
+ * Applies pending migrations without pulling the schema out from under the
+ * other laptop (README, "Failover"). This laptop stays off Slack meanwhile.
+ * It asks the other laptop to pause; that laptop keeps saving envelopes but
+ * starts nothing, and says so. Migrations run once it has paused and its
+ * running turns have ended, or once it is offline. A laptop on a build from
+ * before the pause request cannot pause, so while one is online this one
+ * waits and asks for it to be stopped or updated.
+ */
+export async function migrateWithFailover(steps: MigrationSteps): Promise<void> {
+  const sleep = steps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  if ((await steps.pending()) === 0) return
+  let told = ''
+  const tell = (line: string): void => {
+    if (line === told) return
+    told = line
+    steps.log.info(line)
   }
-  await applyMigrations(pool, MIGRATIONS_DIR, { log })
+  try {
+    for (;;) {
+      const others = await steps.others()
+      const old = (await steps.pauseSupported()) ? others.filter((other) => other.buildMigration < PAUSE_MIGRATION) : others
+      if (old.length > 0) {
+        steps.log.warn({ laptops: old.map((other) => other.name) }, `failover: stop Relay on ${old.map((other) => other.name).join(', ')} or update it first; this laptop applies its migrations once that one is offline`)
+        await sleep(MIGRATION_WAIT_MS)
+        continue
+      }
+      if (others.length === 0) break
+      await steps.setPauseRequest(true)
+      if ((await steps.othersPaused()) && !(await steps.othersRunning())) break
+      tell(`failover: waiting for ${others.map((other) => other.name).join(', ')} to pause and finish its running turns before applying migrations`)
+      await sleep(MIGRATION_WAIT_MS)
+    }
+    await steps.apply()
+  } finally {
+    if (await steps.pauseSupported().catch(() => false)) await steps.setPauseRequest(false).catch(() => undefined)
+  }
+}
+
+/**
+ * A build older than the database never connects or starts work (README,
+ * "Failover"): it idles, still seen by the other laptop, until it is
+ * updated. True when it idles.
+ */
+export async function idleIfBehind(
+  pool: Parameters<typeof newerAppliedMigration>[0],
+  build: string,
+  failover: Pick<FailoverRunner, 'host' | 'attach'>,
+  log: Pick<Logger, 'error'>,
+): Promise<boolean> {
+  const newer = await newerAppliedMigration(pool, build)
+  if (newer === null) return false
+  log.error({ host: failover.host, database: newer }, 'failover: the database has a migration this build does not know; staying off Slack and taking no work until Relay here is updated')
+  failover.attach({ setSlack: async () => undefined, setPaused: async () => undefined })
+  return true
 }
 
 async function main(): Promise<void> {
@@ -293,7 +329,8 @@ async function main(): Promise<void> {
   const policy = loadPolicy(POLICY_PATH)
   const log = await createDaemonLogger(config)
   const secrets = createDaemonSecretProvider(config, resolveRelayHome().path)
-  const pool = createPool(await resolveDatabaseUrl(config, secrets), { max: config.database.pool_max ?? DAEMON_POOL_MAX })
+  const databaseUrl = await resolveDatabaseUrl(config, secrets)
+  const pool = createPool(databaseUrl, { max: config.database.pool_max ?? DAEMON_POOL_MAX })
   // This laptop's env key: published now and on a timer, also while standing by, so the answering laptop seals envs for it (README, "Envs for Relay's sessions").
   const workerEnvKey = await loadReaderKey({
     secrets,
@@ -309,9 +346,22 @@ async function main(): Promise<void> {
         home: homedir(),
         buildMigration: newestMigrationName(MIGRATIONS_DIR),
         preferred: config.failover.preferred,
+        reminderChannels: (config.slack?.reminders ?? []).map((entry) => entry.channel),
       })
     : undefined
-  // A standby laptop may wait for hours, so a stop must work before startup finishes.
+  // Password popups pass between the laptops sealed with this shared key; without it they are answered only where they land.
+  const forwardKey = failover ? await secrets.get(FORWARD_KEY_SECRET).catch(() => undefined) : undefined
+  if (failover && forwardKey === undefined) log.warn(`failover: the ${FORWARD_KEY_SECRET} keychain item is not set; a shell password popup is answered only by the laptop Slack hands it to`)
+  const inbound = failover
+    ? new InboundRouter({
+        pool,
+        host: failover.host,
+        log,
+        ...(forwardKey !== undefined ? { forwardKey } : {}),
+        connectListener: () => connectListenConnection(databaseUrl),
+      })
+    : undefined
+  // A laptop waiting to migrate may wait a while, so a stop must work before startup finishes.
   const stopWaiting = (): void => {
     keySync?.stop()
     void failover?.stop().finally(() => {
@@ -348,6 +398,7 @@ async function main(): Promise<void> {
           ...(config.slack ? { slack: config.slack } : {}),
           ...(autonomousRuntime ? { autonomousRuntime } : {}),
           ...(failover ? { failover } : {}),
+          ...(inbound ? { inbound } : {}),
           ui: {
             enabled: config.ui?.enabled ?? true,
             port: config.ui?.port ?? DEFAULT_UI_PORT,
@@ -364,17 +415,22 @@ async function main(): Promise<void> {
 
     let handle: OrchestratorHandle
     if (failover) {
-      log.info({ host: failover.host }, 'failover is on: waiting until this laptop holds the record before connecting to Slack')
-      const started = await startWithFailover({
-        gate: failover,
-        tablesExist: () => failoverTablesExist(pool),
-        migrateAll: () => applyMigrations(pool, MIGRATIONS_DIR, { log }),
-        migrateAsHolder: () => migrateAsHolder(pool, failover.host, log),
-        start,
+      if (!(await failoverTablesExist(pool))) await applyMigrations(pool, MIGRATIONS_DIR, { log })
+      await failover.register()
+      await migrateWithFailover({
+        pending: async () => (await pendingMigrations(pool, MIGRATIONS_DIR)).length,
+        pauseSupported: () => pauseSupported(pool),
+        others: () => otherFreshHosts(pool, failover.host),
+        setPauseRequest: (requested) => setPauseRequest(pool, failover.host, requested),
+        othersPaused: () => othersPaused(pool, failover.host),
+        othersRunning: () => otherHostsHaveRunningWorkers(pool, failover.host),
+        apply: () => applyMigrations(pool, MIGRATIONS_DIR, { log }),
+        log,
       })
-      // Stopped while waiting: stopWaiting closes the pool and exits.
-      if (started === undefined) return
-      handle = started
+      if (await idleIfBehind(pool, newestMigrationName(MIGRATIONS_DIR), failover, log)) return
+      await failover.publish()
+      log.info({ host: failover.host }, 'failover is on: connecting to Slack; both laptops answer, and the default laptop takes what is not meant for another one')
+      handle = await start()
       process.off('SIGINT', stopWaiting)
       process.off('SIGTERM', stopWaiting)
     } else {
@@ -438,7 +494,7 @@ async function main(): Promise<void> {
         .catch((error: unknown) => {
           log.error({ err: error }, 'error while stopping the orchestrator')
         })
-        // Hands the record over at once on a clean stop; a step down already released it.
+        // Hands the record over at once on a clean stop.
         .then(() => failover?.stop())
         .finally(() => {
           closePool(pool)
@@ -451,10 +507,8 @@ async function main(): Promise<void> {
             })
         })
     }
-    if (failover) {
-      // Exit 1 after a step down, so launchd and systemd restart this laptop as standby.
-      failover.attach({ closeSlack: () => handle.closeSlack(), waitingOn: () => handle.waitingOn(), exit: (code) => shutdown('failover step down', code) })
-    }
+    // The default laptop role, the build check, the pause, and leaving Slack while the database is out of reach.
+    failover?.attach({ setSlack: (connected) => handle.setSlack(connected), setPaused: (paused) => handle.setPaused(paused) })
     process.on('SIGINT', () => shutdown('SIGINT'))
     process.on('SIGTERM', () => shutdown('SIGTERM'))
   } catch (error) {

@@ -3,7 +3,7 @@ import type { Pool } from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TurnRequestContext, TurnResult } from '../../src/autonomous/scheduler.js'
 import { loadTask } from '../../src/autonomous/store.js'
-import { applyMigrations } from '../../src/db/migrate.js'
+import { applyMigrations, newestMigrationName } from '../../src/db/migrate.js'
 import { closePool, createPool } from '../../src/db/pool.js'
 import { createLogger } from '../../src/obs/logger.js'
 import { processGroupAlive } from '../../src/process/gated-spawn.js'
@@ -340,44 +340,62 @@ describe('team scheduler', () => {
     try {
       await team.tick()
       await vi.waitFor(() => expect(aborted).toBe(false), { timeout: 3000 })
-      await team.drain()
     } finally {
       spy.mockRestore()
     }
     await team.stop()
   })
 
-  it('a member turn is aborted once its claim has really expired with renewals still failing', async () => {
+  it('a member turn outlives its claim while renewals keep failing', async () => {
     const fixture = await teamFixture(pool)
     const run = await openRun(pool, fixture)
-    await assign(fixture, run, { id: 'm0', name: 'M0' }, 'expired')
-    let abortedAfterMs: number | undefined
-    const startedAt = Date.now()
-    const team = scheduler(fixture, (context) => new Promise((resolve) => {
-      context.signal.addEventListener('abort', () => {
-        abortedAfterMs = Date.now() - startedAt
-        resolve(reply('late'))
-      })
-    }), { leaseTtlMs: 3000 })
+    await assign(fixture, run, { id: 'm0', name: 'M0' }, 'outage')
+    let aborted: boolean | undefined
+    const team = scheduler(fixture, async (context) => {
+      await new Promise((resolve) => setTimeout(resolve, 4000))
+      aborted = context.signal.aborted
+      return reply('done offline')
+    }, { leaseTtlMs: 3000 })
     const spy = failMemberRenewals()
     try {
       await team.tick()
-      await vi.waitFor(() => expect(abortedAfterMs).toBeDefined(), { timeout: 5000 })
-      await team.drain()
+      await vi.waitFor(() => expect(aborted).toBe(false), { timeout: 6000 })
     } finally {
       spy.mockRestore()
     }
-    expect(abortedAfterMs).toBeGreaterThanOrEqual(2900)
+    await team.stop()
+  }, 10_000)
+
+  it('starts no member turn while paused, and starts it once resumed', async () => {
+    const fixture = await teamFixture(pool)
+    const run = await openRun(pool, fixture)
+    const assignment = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'paused')
+    const runTurn = vi.fn(async () => reply('after the pause'))
+    const team = scheduler(fixture, runTurn)
+
+    team.setPaused(true)
+    await team.tick()
+    expect(await stateOf(assignment.id)).toBe('queued')
+    expect(runTurn).not.toHaveBeenCalled()
+
+    team.setPaused(false)
+    await team.tick()
+    await vi.waitFor(() => expect(runTurn).toHaveBeenCalledTimes(1))
     await team.stop()
   })
 
-  it('starts no member turn when this laptop may no longer start work', async () => {
+  it("takes no member turn whose lead's thread belongs to another ready laptop", async () => {
     const fixture = await teamFixture(pool)
     const run = await openRun(pool, fixture)
-    const assignment = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'stale')
-    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => false, mayStartWork: async () => false }
+    const assignment = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'elsewhere')
+    const other = `laptop-b-${Math.random().toString(36).slice(2, 10)}`
+    await pool.query(`INSERT INTO failover_hosts (name, home, build_migration) VALUES ($1, '/Users/b', $2)`, [other, newestMigrationName('src/db/migrations')])
+    await pool.query(
+      `INSERT INTO thread_hosts (workspace_id, adapter, thread_ref, host) SELECT s.workspace_id, s.adapter, s.thread_ref, $2 FROM autonomous_tasks t JOIN sessions s ON s.id = t.session_id WHERE t.id = $1`,
+      [fixture.task.id, other],
+    )
     const runTurn = vi.fn(async () => reply('never'))
-    const team = scheduler(fixture, runTurn, { failover })
+    const team = scheduler(fixture, runTurn, { failover: { host: 'laptop-a', isDefault: () => true } })
 
     await team.tick()
 
@@ -386,27 +404,32 @@ describe('team scheduler', () => {
     await team.stop()
   })
 
-  it("startup recovery with failover leaves another laptop's member alone while that laptop is seen, and reruns it without any signal once it went quiet", async () => {
+  it("startup recovery with failover leaves another laptop's member alone, seen or gone, while its worker is recorded there; one with no worker reruns once that laptop went quiet", async () => {
     const fixture = await teamFixture(pool)
     const run = await openRun(pool, fixture)
-    const assignment = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'a')
+    const offline = await assign(fixture, run, { id: 'm0', name: 'M0' }, 'a')
+    const cutOff = await assign(fixture, run, { id: 'm1', name: 'M1' }, 'b')
     const other = `laptop-b-${Math.random().toString(36).slice(2, 10)}`
     await pool.query(`INSERT INTO failover_hosts (name, home, build_migration) VALUES ($1, '/Users/b', '0030')`, [other])
     // A live group whose pgid the other laptop recorded: here it is some unrelated process.
     const worker = fakeWorker()
     workers.push(worker)
     const pgid = worker.pid ?? 0
-    await pool.query(`UPDATE team_assignments SET state = 'running', lease_owner = $3, worker_pid = $2, worker_pgid = $2, worker_host = $4 WHERE id = $1`, [assignment.id, pgid, `relay-1@${other}`, other])
-    const failover: FailoverGate = { host: 'laptop-a', holdsFresh: () => true, mayStartWork: async () => true }
+    await pool.query(`UPDATE team_assignments SET state = 'running', lease_owner = $3, worker_pid = $2, worker_pgid = $2, worker_host = $4 WHERE id = $1`, [offline.id, pgid, `relay-1@${other}`, other])
+    await pool.query(`UPDATE team_assignments SET state = 'running', lease_owner = $2 WHERE id = $1`, [cutOff.id, `relay-1@${other}`])
+    const failover: FailoverGate = { host: 'laptop-a', isDefault: () => true }
     const team = scheduler(fixture, async () => reply('never'), { failover })
 
     await team.recover()
-    expect(await stateOf(assignment.id)).toBe('running')
+    expect(await stateOf(offline.id)).toBe('running')
+    expect(await stateOf(cutOff.id)).toBe('running')
 
     await pool.query(`UPDATE failover_hosts SET last_seen_at = now() - interval '2 minutes' WHERE name = $1`, [other])
     await team.recover()
-    expect(await loadAssignment(pool, assignment.id)).toMatchObject({ state: 'queued', workerPgid: null })
+    // Its member may still be working there offline: it reconnects and reports.
+    expect(await loadAssignment(pool, offline.id)).toMatchObject({ state: 'running', workerPgid: pgid })
     expect(processGroupAlive(pgid)).toBe(true)
+    expect(await stateOf(cutOff.id)).toBe('queued')
     expect(await leadNotes(fixture)).toEqual([expect.stringContaining('runs again')])
   })
 })

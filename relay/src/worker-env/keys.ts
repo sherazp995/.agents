@@ -75,7 +75,7 @@ export type ReaderKeySync = {
 
 /**
  * Runs syncReaderKey now and every `intervalMs`. A database not yet migrated
- * to the env tables (a standby waiting for the answering laptop) is retried
+ * to the env tables (a laptop waiting for the other one to apply migrations) is retried
  * quietly. The timer is unreferenced: it never keeps the process alive.
  */
 export function startReaderKeySync(deps: { pool: Pool; key: ReaderKey; host: string; log: Logger; intervalMs?: number }): ReaderKeySync {
